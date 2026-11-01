@@ -145,6 +145,10 @@ an error.
 **Bug:** vasm's manual documents the option as turning case sensitivity off, but the source
 still fails with `undefined symbol <foo>`.
 
+It is worse than that: with `opt c-`, a label with a capital letter can't be found even when
+spelled the same. `opt c-` / ` bsr Foo` / `Foo` fails with `undefined symbol <Foo>` in `-Fhunkexe`.
+A real example is `3_Layer_Balls.s` in the corpus.
+
 **rasm-one:** symbols stay case-sensitive, as they are in vasm, but it warns
 `option-ignored` so the source's author knows.
 
