@@ -78,6 +78,8 @@ const ACCEPTED: &[&str] = &[
     "x equ 1\nl: nop\ny equ 2",
     "n equ 1\nl: nop\n dc.l l+n",
     // Relocations.
+    " move.l #s,s\ns: dc.l s",
+    " move.l s,s\n dc.l s\ns:",
     " dc.b 1\n dc.l s\ns:",
     " section c,code\ns: dc.l s,t,s,t+2\n section d,data\nt: dc.l s,t,u\n section b,bss\nu: ds.w 1",
     " dc.l s\n ds.b 65534\ns: dc.l s",

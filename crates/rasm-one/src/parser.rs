@@ -126,6 +126,14 @@ fn is_directive(name: &str) -> bool {
             | "opt"
             | "printt"
             | "printv"
+            | "list"
+            | "nolist"
+            | "page"
+            | "nopage"
+            | "ttl"
+            | "spc"
+            | "llen"
+            | "plen"
             | "echo"
             | "fail"
             | "end"
@@ -997,7 +1005,30 @@ impl<'f> Parser<'f> {
                 self.conditionals.pop();
                 Ok(())
             }
-            "else" => {
+            "else" | "elseif" => {
+                // `elseif` is another name for `else`. vasm ignores anything after
+                // it, so `elseif 0` would run its block; that is reported instead.
+                let rest = Lexer::new(&line.text[end..]);
+                let mut rest = rest;
+                rest.skip_blanks();
+                if word == "elseif"
+                    && !matches!(rest.peek(), Ok(Tok::End))
+                    && self
+                        .conditionals
+                        .last()
+                        .is_some_and(|top| top.parent_active)
+                {
+                    return Err(Diagnostic::error(
+                        "syntax",
+                        "elseif takes no condition; use elif",
+                        Span {
+                            file,
+                            line: line.number,
+                            col: 1,
+                            len: 1,
+                        },
+                    ));
+                }
                 if let Some(top) = self.conditionals.last_mut() {
                     if top.seen_else && top.parent_active {
                         return Err(Diagnostic::error(
@@ -1019,7 +1050,7 @@ impl<'f> Parser<'f> {
                 }
                 Ok(())
             }
-            "elif" | "elseif" => {
+            "elif" => {
                 let eligible = self
                     .conditionals
                     .last()
@@ -1324,6 +1355,9 @@ impl LineParser<'_, '_, '_> {
             }
             return self.parse_after_column_zero();
         }
+        if self.peek_is(Punct::Star)? {
+            return Ok(());
+        }
         // An indented word is a label only if a colon follows it.
         let start = self.lexer.pos();
         if let Some(name) = self.eat_label_name()? {
@@ -1421,7 +1455,8 @@ impl LineParser<'_, '_, '_> {
             return Err(self.error_at("syntax", "label expected", start));
         };
         let span = self.span(start);
-        if self.peek_is(Punct::Colon)? {
+        let has_colon = self.peek_is(Punct::Colon)?;
+        if has_colon {
             self.eat_colons(&name, span)?;
         } else {
             let lower = name.to_ascii_lowercase();
@@ -1434,7 +1469,7 @@ impl LineParser<'_, '_, '_> {
             }
         }
         let at_equals = self.peek_is(Punct::Eq)?;
-        if !self.lexer.at_blank() && !at_equals && self.peek()? != Tok::End {
+        if !has_colon && !self.lexer.at_blank() && !at_equals && self.peek()? != Tok::End {
             return Err(self.error_at("syntax", "unexpected text after label", self.lexer.pos()));
         }
         self.parse_statement(Some((name, span)))
@@ -1725,12 +1760,19 @@ impl LineParser<'_, '_, '_> {
             "endc" | "endif" => {
                 self.parser.conditionals.pop();
             }
-            "else" if top.seen_else => {
+            "elseif" if self.lexer.peek().map_or(true, |tok| tok != Tok::End) => {
+                return Err(Diagnostic::error(
+                    "syntax",
+                    "elseif takes no condition; use elif",
+                    span,
+                ));
+            }
+            "else" | "elseif" if top.seen_else => {
                 return Err(Diagnostic::error("syntax", "second else in a block", span));
             }
             _ => {
                 top.active = false;
-                top.seen_else = word == "else";
+                top.seen_else = word != "elif";
             }
         }
         Ok(())
@@ -1941,7 +1983,7 @@ impl LineParser<'_, '_, '_> {
                 self.define_label(&label, span)?;
             }
             return match self.peek()? {
-                Tok::End => Ok(()),
+                Tok::End | Tok::Punct(Punct::Star) => Ok(()),
                 _ => Err(self.error_at("syntax", "mnemonic expected", start)),
             };
         };
@@ -2192,6 +2234,10 @@ impl LineParser<'_, '_, '_> {
                 "opt is not supported, because ignoring it could change what the source means",
                 span,
             )),
+            // Listings aren't affected by these; the rest of the line is ignored.
+            "list" | "nolist" | "page" | "nopage" | "ttl" | "spc" | "llen" | "plen" => {
+                self.no_size(size, span)
+            }
             "printt" | "echo" => {
                 self.no_size(size, span)?;
                 let Tok::Str(text) = self.peek()? else {

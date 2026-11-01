@@ -85,6 +85,36 @@ impl Vasm {
         self.assemble_with_files(source, cpu, format, &[])
     }
 
+    /// Assembles an existing file to a hunk object, from its own directory.
+    pub fn assemble_file(
+        &self,
+        dir: &Path,
+        file: &str,
+        cpu: &str,
+        args: &[&str],
+    ) -> Result<Output, OracleError> {
+        let out_dir = unique_temp_dir()?;
+        let out_file = out_dir.join("out");
+        let run = Command::new(&self.path)
+            .current_dir(dir)
+            .args(["-quiet", "-no-opt", "-maxerrors=1", "-Fhunk"])
+            .arg(format!("-m{cpu}"))
+            .args(args)
+            .arg("-o")
+            .arg(&out_file)
+            .arg(file)
+            .output();
+        let bytes = fs::read(&out_file).unwrap_or_default();
+        // Best effort: a leftover temp dir must not fail the test.
+        let _ = fs::remove_dir_all(&out_dir);
+        let out = run?;
+        Ok(Output {
+            success: out.status.success(),
+            bytes,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
     /// Like [`Vasm::assemble`], with extra command-line arguments.
     pub fn assemble_with_args(
         &self,

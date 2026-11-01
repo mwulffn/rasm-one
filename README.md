@@ -45,6 +45,9 @@ cargo test --workspace
 The script builds a pinned, unmodified vasm under `target/`, which is never
 committed. Without `RASM_VASM`, comparison tests are skipped with a message.
 
+`scripts/fetch-corpus.sh` downloads real-world sources from Aminet for
+`tests/corpus.rs`; set `RASM_CORPUS` to the directory it prints.
+
 Two kinds of test run the output. To run executables under
 [vamos](https://github.com/cnvogelg/amitools), install it with
 `uv tool install 'amitools[vamos]'` and set `RASM_VAMOS` to its path. To boot one
