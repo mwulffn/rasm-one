@@ -694,6 +694,155 @@ fn test_assemble_null_displacements_match_vasm_o8_o9() -> Result<(), Box<dyn Err
     Ok(())
 }
 
+const ADD_TO_LEA: Rule = Rule {
+    number: 10,
+    flag: "-opt-o10+",
+};
+
+const LEA_TO_QUICK: Rule = Rule {
+    number: 11,
+    flag: "-opt-o11+",
+};
+
+const WORD_IMMEDIATE: Rule = Rule {
+    number: 12,
+    flag: "-opt-o12+",
+};
+
+const IMMEDIATES: &[&str] = &[
+    "0",
+    "1",
+    "8",
+    "9",
+    "-1",
+    "-8",
+    "-9",
+    "127",
+    "128",
+    "$7fff",
+    "$8000",
+    "$ffff",
+    "$ffff8000",
+    "$ffff7fff",
+    "$10000",
+    "z",
+    "w",
+    "g-f",
+];
+
+fn compare_each(rule: &Rule, sources: &[String]) -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for source in sources {
+        failures.extend(compare(&vasm, source, "68000", Format::Bin, rule, false)?);
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// Wrong in vasm, so checked on their own below: see vasm-bugs.md.
+fn wrong_in_vasm(mnemonic: &str, value: &str, destination: &str) -> bool {
+    matches!(mnemonic, "sub" | "suba") && value == "$8000" && destination != "d0"
+}
+
+#[test]
+fn test_assemble_address_arithmetic_matches_vasm_o10() -> Result<(), Box<dyn Error>> {
+    let mut sources = Vec::new();
+    for mnemonic in ["add", "adda", "addi", "sub", "suba", "subi", "cmp", "move"] {
+        for size in [".w", ".l", ""] {
+            for value in IMMEDIATES {
+                for destination in ["a0", "sp", "d0"] {
+                    // vasm takes `movea #1,d0` as a `move`, but rasm-one doesn't.
+                    if mnemonic.ends_with('a') && destination == "d0" {
+                        continue;
+                    }
+                    let line = format!("{mnemonic}{size} #{value},{destination}");
+                    if !wrong_in_vasm(mnemonic, value, destination) {
+                        sources.push(format!(" {line}\nz equ 3\nw equ 300\nf: nop\ng:"));
+                    }
+                }
+            }
+        }
+    }
+    sources.push(" opt o10-\n add.w #300,a0".to_string());
+    compare_each(&ADD_TO_LEA, &sources)
+}
+
+#[test]
+fn test_assemble_small_lea_matches_vasm_o11() -> Result<(), Box<dyn Error>> {
+    let mut sources = Vec::new();
+    for value in IMMEDIATES {
+        for form in [
+            "{v}(a0),a0",
+            "{v}(a0),a1",
+            "{v}(sp),sp",
+            "({v}.w,a0),a0",
+            "({v}.l,a0),a0",
+            "({v},a0,d0.w),a0",
+        ] {
+            let operands = form.replace("{v}", value);
+            sources.push(format!(" lea {operands}\nz equ 3\nw equ 300\nf: nop\ng:"));
+        }
+    }
+    sources.push(" lea (a0),a0".to_string());
+    sources.push(" xref x\n lea x(a0),a0".to_string());
+    sources.push(" opt o11-\n lea 4(a0),a0".to_string());
+    compare_each(&LEA_TO_QUICK, &sources)
+}
+
+#[test]
+fn test_assemble_word_immediates_match_vasm_o12() -> Result<(), Box<dyn Error>> {
+    let mut sources = Vec::new();
+    for mnemonic in [
+        "add", "adda", "sub", "suba", "cmp", "cmpa", "move", "movea", "addi", "and",
+    ] {
+        for size in [".l", ".w"] {
+            for value in IMMEDIATES {
+                for destination in ["a0", "d0"] {
+                    // vasm takes `movea #1,d0` as a `move`, but rasm-one doesn't.
+                    if mnemonic.ends_with('a') && destination == "d0" {
+                        continue;
+                    }
+                    let line = format!("{mnemonic}{size} #{value},{destination}");
+                    if !wrong_in_vasm(mnemonic, value, destination) {
+                        sources.push(format!(" {line}\nz equ 3\nw equ 300\nf: nop\ng:"));
+                    }
+                }
+            }
+        }
+    }
+    sources.push(" xref x\n move.l #x,a0".to_string());
+    sources.push(" opt o12-\n move.l #1,a0".to_string());
+    compare_each(&WORD_IMMEDIATE, &sources)
+}
+
+/// Each of these is a different calculation as vasm optimises it, so stays as written.
+#[test]
+fn test_assemble_subtracting_8000_from_address_register_stays_correct() {
+    for (line, expected, rule) in [
+        (
+            " sub.w #$8000,a0",
+            vec![0x90, 0xFC, 0x80, 0x00],
+            &ADD_TO_LEA,
+        ),
+        (
+            " sub.l #$8000,a0",
+            vec![0x41, 0xE8, 0x80, 0x00],
+            &ADD_TO_LEA,
+        ),
+        (
+            " sub.l #$8000,a0",
+            vec![0x91, 0xFC, 0x00, 0x00, 0x80, 0x00],
+            &WORD_IMMEDIATE,
+        ),
+    ] {
+        let bytes = ours(line, "68000", Format::Bin, rule, false);
+        assert_eq!(bytes.ok(), Some(expected), "{line}");
+    }
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 

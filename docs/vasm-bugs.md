@@ -156,3 +156,15 @@ still fails with `undefined symbol <foo>`.
 CPUs, and reports `branch destination out of range`. `bra.w *+1` assembles to `6000 ffff`.
 
 **rasm-one:** writes the word form. `test_assemble_branch_to_odd_next_byte_uses_word_on_68020`.
+
+## 14. Subtracting $8000 from an address register changes meaning
+
+**Source:** `sub.w #$8000,a0` with `-opt-o10+`, and `sub.l #$8000,a0` with `-opt-o12+`.
+
+**Bug:** `sub.w #$8000,a0` sign-extends its operand, so it adds $8000 to `a0`. vasm writes
+`lea $8000(a0),a0` (`41e8 8000`), whose displacement sign-extends too, so it subtracts $8000.
+`sub.l #$8000,a0` subtracts $8000, but vasm writes `suba.w #$8000,a0` (`90fc 8000`), which adds it.
+`suba` has the same problem.
+
+**rasm-one:** leaves `sub.w` and the `-opt-o12+` case as written, and `sub.l #$8000,a0` still
+becomes a correct `lea`. `test_assemble_subtracting_8000_from_address_register_stays_correct`.

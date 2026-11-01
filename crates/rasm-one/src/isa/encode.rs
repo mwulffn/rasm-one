@@ -38,8 +38,8 @@ pub(crate) struct Instruction {
     pub shortens_absolutes: bool,
     /// What `move.l #x,Dn` can become, if this is one and optimisation applies.
     pub quick_move: Option<QuickMoves>,
-    /// The `addq` or `subq` row this can become if its immediate fits.
-    pub quick_row: Option<&'static InsnRow>,
+    /// What this can become, depending on its values.
+    pub rewrites: Option<Rewrites>,
     /// True if a short branch that would have a displacement of 0 can be a no-op.
     pub short_next_is_no_op: bool,
     /// True if a base displacement of zero without a width can be left out.
@@ -48,6 +48,21 @@ pub(crate) struct Instruction {
     pub drops_zero_outer: bool,
     /// The form of a resizable branch, which layout chooses.
     pub branch_form: Cell<BranchForm>,
+}
+
+/// The rows of the instructions another one can be rewritten as.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Rewrites {
+    /// `addq` or `subq`, for an immediate of 1 to 8.
+    pub quick: Option<&'static InsnRow>,
+    /// `lea`, for an immediate to an address register.
+    pub lea: Option<&'static InsnRow>,
+    /// The same instruction in `.w`, for an immediate to an address register.
+    pub word: Option<&'static InsnRow>,
+    /// `addq` and `subq`, for a small `lea` of a register to itself.
+    pub lea_to_quick: Option<(&'static InsnRow, &'static InsnRow)>,
+    /// True for a subtraction.
+    pub subtracts: bool,
 }
 
 /// Which replacements for `move.l #x,Dn` a CPU gets.
@@ -553,19 +568,67 @@ impl Instruction {
 
     /// This as another instruction, if its values now allow one.
     fn rewritten(&self, sizer: &Sizer) -> Option<Instruction> {
-        let row = self.quick_row?;
-        let Mode::Immediate(expr) = &self.operands.first()?.mode else {
-            return None;
+        let rewrites = self.rewrites?;
+        let number = |expr: &Expr| {
+            let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup).ok()?;
+            match plain_disp_kind(value, self.fixed_addresses) {
+                DispKind::Number(number) => Some(number),
+                _ => None,
+            }
         };
-        let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup).ok()?;
-        let DispKind::Number(number) = plain_disp_kind(value, self.fixed_addresses) else {
-            return None;
-        };
-        (1..=8).contains(&number).then(|| Instruction {
+        let as_instruction = |row, size, operands| Instruction {
             row,
-            quick_row: None,
+            size,
+            operands,
+            rewrites: None,
             ..self.clone()
-        })
+        };
+        let first = self.operands.first()?;
+        let second = self.operands.get(1)?;
+        let immediate = |value: i64| Operand {
+            mode: Mode::Immediate(Expr::Num(value)),
+            span: first.span,
+        };
+        if let (Mode::Disp(expr, r) | Mode::DispWord(expr, r), Mode::AddrReg(target)) =
+            (&first.mode, &second.mode)
+        {
+            let (add, subtract) = rewrites.lea_to_quick?;
+            let value = number(expr)?;
+            if r != target || value == 0 || !(-8..=8).contains(&value) {
+                return None;
+            }
+            let row = if value > 0 { add } else { subtract };
+            let operands = vec![immediate(value.abs()), second.clone()];
+            return Some(as_instruction(row, Some(Size::Long), operands));
+        }
+        let Mode::Immediate(expr) = &first.mode else {
+            return None;
+        };
+        let value = number(expr)?;
+        if let (Some(row), true) = (rewrites.quick, (1..=8).contains(&value)) {
+            return Some(as_instruction(row, self.size, self.operands.clone()));
+        }
+        let subtracts = rewrites.subtracts;
+        if let (Some(row), Mode::AddrReg(r)) = (rewrites.lea, &second.mode) {
+            let offset = if subtracts { -value } else { value };
+            // `sub.w #$8000,An` sign-extends, so adds $8000, which `lea` can't do.
+            let adds_8000 = subtracts && self.size == Some(Size::Word) && value == 0x8000;
+            if fits_word(offset) && !adds_8000 {
+                let source = Operand {
+                    mode: Mode::Disp(Expr::Num(offset), *r),
+                    span: first.span,
+                };
+                let operands = vec![source, second.clone()];
+                return Some(as_instruction(row, row.default_size, operands));
+            }
+        }
+        if let (Some(row), true) = (rewrites.word, fits_word(value)) {
+            // Like vasm, this doesn't turn subtracting -$8000 into `.w`, which would do.
+            if !(subtracts && value == -0x8000) {
+                return Some(as_instruction(row, Some(Size::Word), self.operands.clone()));
+            }
+        }
+        None
     }
 
     /// Length in bytes, with symbols as they are known now.

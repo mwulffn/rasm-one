@@ -170,7 +170,7 @@ pub struct Options {
 /// Which optimisations apply, numbered like vasm's `-opt-oN` and `opt oN`.
 ///
 /// Only some of vasm's rules exist yet, so this is not yet what vasm does by default.
-/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`; 5, `addq` and `subq`; 7, short branches to what follows; 8, base displacements of zero; 9, outer displacements of zero.
+/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`; 5, `addq` and `subq`; 7, short branches to what follows; 8, base displacements of zero; 9, outer displacements of zero; 10, `lea` for address arithmetic; 11, small `lea`; 12, word immediates to address registers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Optimisations {
@@ -187,7 +187,10 @@ impl Optimisations {
         | 1 << RULE_QUICK_ARITHMETIC
         | 1 << RULE_SHORT_NEXT
         | 1 << RULE_NULL_BASE
-        | 1 << RULE_NULL_OUTER;
+        | 1 << RULE_NULL_OUTER
+        | 1 << RULE_ADD_TO_LEA
+        | 1 << RULE_LEA_TO_QUICK
+        | 1 << RULE_WORD_IMMEDIATE;
 
     /// Every rule that exists, which can be changed with `opt`.
     pub fn all() -> Self {
@@ -249,6 +252,15 @@ pub(crate) const RULE_NULL_BASE: u32 = 8;
 
 /// Rule 9: an outer displacement of zero is left out.
 pub(crate) const RULE_NULL_OUTER: u32 = 9;
+
+/// Rule 10: adding to or subtracting from an address register uses `lea`.
+pub(crate) const RULE_ADD_TO_LEA: u32 = 10;
+
+/// Rule 11: a small `lea` of a register to itself uses `addq` or `subq`.
+pub(crate) const RULE_LEA_TO_QUICK: u32 = 11;
+
+/// Rule 12: `.l #x,An` becomes `.w` if the value fits.
+pub(crate) const RULE_WORD_IMMEDIATE: u32 = 12;
 
 impl Options {
     /// Options for assembling `main` for a 68000.

@@ -9,7 +9,7 @@ use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
 use crate::float::FloatLiteral;
-use crate::isa::encode::{BranchForm, Instruction, QuickMoves};
+use crate::isa::encode::{BranchForm, Instruction, QuickMoves, Rewrites};
 use crate::isa::table::{
     rows_for, Coprocessor, EaSet, Encoding, InsnRow, MmuRegisterHome, CONTROL_REGISTERS,
     CPU_020_UP, MMU_REGISTERS,
@@ -21,9 +21,9 @@ use crate::lexer::{LexError, Lexer, Punct, Tok};
 use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
 use crate::{
-    Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_BRANCHES,
-    RULE_DISPLACEMENTS, RULE_NULL_BASE, RULE_NULL_OUTER, RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES,
-    RULE_SHORT_NEXT,
+    Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_ADD_TO_LEA,
+    RULE_BRANCHES, RULE_DISPLACEMENTS, RULE_LEA_TO_QUICK, RULE_NULL_BASE, RULE_NULL_OUTER,
+    RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES, RULE_SHORT_NEXT, RULE_WORD_IMMEDIATE,
 };
 
 /// A symbol being collected.
@@ -2741,7 +2741,7 @@ impl LineParser<'_, '_, '_> {
         } else {
             QuickMoves::WithSecondInstruction
         });
-        let quick_row = self.quick_row_for(mnemonic, size.or(row.default_size), &operands);
+        let rewrites = self.rewrites_for(mnemonic, size.or(row.default_size), &operands);
         // What can't be a word, such as a branch target, isn't shortable after all.
         let mut operands = operands;
         for (operand, allowed) in operands.iter_mut().zip(row.operands) {
@@ -2762,7 +2762,7 @@ impl LineParser<'_, '_, '_> {
             drops_zero_base: self.parser.optimisations.rule(RULE_NULL_BASE),
             drops_zero_outer: self.parser.optimisations.rule(RULE_NULL_OUTER),
             short_next_is_no_op: self.parser.optimisations.rule(RULE_SHORT_NEXT),
-            quick_row,
+            rewrites,
             branch_form: Cell::new(BranchForm::Word),
             size: size.or(row.default_size),
             operands,
@@ -2773,32 +2773,76 @@ impl LineParser<'_, '_, '_> {
         })
     }
 
-    /// The row of the quick form of an addition or subtraction, under rule 5.
-    fn quick_row_for(
+    /// What an instruction can be rewritten as, under the rules that apply.
+    fn rewrites_for(
         &self,
         mnemonic: &str,
         size: Option<Size>,
         operands: &[Operand],
-    ) -> Option<&'static InsnRow> {
-        let quick = match mnemonic {
-            "add" | "adda" | "addi" => "addq",
-            "sub" | "suba" | "subi" => "subq",
-            _ => return None,
+    ) -> Option<Rewrites> {
+        let rule = |rule| self.parser.optimisations.rule(rule);
+        let matching = |name: &str, size: Size, operands: &[Operand]| {
+            rows_for(name)?.iter().find(|row| {
+                row.sizes.contains(&size)
+                    && row.operands.len() == operands.len()
+                    && row
+                        .operands
+                        .iter()
+                        .zip(operands)
+                        .all(|(set, operand)| set.intersects(operand.mode.class()))
+            })
         };
-        if !self.parser.optimisations.rule(RULE_QUICK_ARITHMETIC)
-            || !matches!(operands.first()?.mode, Mode::Immediate(_))
-        {
+        let size = size.unwrap_or(Size::Word);
+        let [first, second] = operands else {
+            return None;
+        };
+        let to_address = matches!(second.mode, Mode::AddrReg(_));
+        let mut rewrites = Rewrites {
+            quick: None,
+            lea: None,
+            word: None,
+            lea_to_quick: None,
+            subtracts: false,
+        };
+        if mnemonic == "lea" {
+            if rule(RULE_LEA_TO_QUICK) {
+                let quick_operands = [
+                    Operand {
+                        mode: Mode::Immediate(Expr::Num(1)),
+                        span: first.span,
+                    },
+                    second.clone(),
+                ];
+                let add = matching("addq", Size::Long, &quick_operands)?;
+                let subtract = matching("subq", Size::Long, &quick_operands)?;
+                rewrites.lea_to_quick = Some((add, subtract));
+                return Some(rewrites);
+            }
             return None;
         }
-        rows_for(quick)?.iter().find(|row| {
-            row.sizes.contains(&size.unwrap_or(Size::Word))
-                && row.operands.len() == operands.len()
-                && row
-                    .operands
-                    .iter()
-                    .zip(operands)
-                    .all(|(set, operand)| set.intersects(operand.mode.class()))
-        })
+        if !matches!(first.mode, Mode::Immediate(_)) {
+            return None;
+        }
+        let arithmetic = match mnemonic {
+            "add" | "adda" | "addi" => Some(("addq", false)),
+            "sub" | "suba" | "subi" => Some(("subq", true)),
+            _ => None,
+        };
+        if let Some((quick, subtracts)) = arithmetic {
+            rewrites.subtracts = subtracts;
+            if rule(RULE_QUICK_ARITHMETIC) {
+                rewrites.quick = matching(quick, size, operands);
+            }
+            if rule(RULE_ADD_TO_LEA) && to_address && !mnemonic.ends_with('i') {
+                rewrites.lea = rows_for("lea")?.first();
+            }
+        }
+        let widens = matches!(mnemonic, "add" | "adda" | "sub" | "suba" | "cmp" | "cmpa")
+            || matches!(mnemonic, "move" | "movea");
+        if rule(RULE_WORD_IMMEDIATE) && widens && to_address && size == Size::Long {
+            rewrites.word = matching(mnemonic, Size::Word, operands);
+        }
+        Some(rewrites)
     }
 
     fn parse_operand(&mut self) -> Result<Operand, Diagnostic> {
