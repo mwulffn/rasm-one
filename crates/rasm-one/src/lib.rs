@@ -123,7 +123,7 @@ mod atom;
 mod error;
 mod expr;
 mod float;
-pub mod isa;
+mod isa;
 mod layout;
 mod lexer;
 mod output;
@@ -138,8 +138,9 @@ pub use output::listing::write_listing;
 pub use source::{FileId, FileProvider, MemoryProvider, Span};
 pub use types::{Cpu, CpuSet, MemKind, SectionKind, Size};
 
-/// Assembly settings.
+/// Assembly settings. Create these with [`Options::new`], then set fields.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Options {
     /// Path of the main source, as understood by the [`FileProvider`].
     pub main: String,
@@ -156,6 +157,12 @@ pub struct Options {
     /// from labels can then use their smallest form on 68020 and later, whereas a
     /// relocatable file needs room for a 32-bit relocation.
     pub fixed_addresses: bool,
+    /// The most bytes all sections may hold in total, so that a few characters of
+    /// source can't exhaust memory. More is an error.
+    pub max_output_bytes: i64,
+    /// The most statements that may be generated, which macros and `rept` could
+    /// otherwise multiply without bound. More is an error.
+    pub max_atoms: usize,
 }
 
 impl Options {
@@ -168,11 +175,14 @@ impl Options {
             mmu_68851: false,
             include_dirs: Vec::new(),
             fixed_addresses: false,
+            max_output_bytes: 256 * 1024 * 1024,
+            max_atoms: 4_000_000,
         }
     }
 }
 
 /// Whether a floating-point unit is available.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FpuChoice {
     /// Only if the CPU has one built in.
@@ -185,6 +195,7 @@ pub enum FpuChoice {
 }
 
 /// What a relocation's value means.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelocKind {
     /// The field gets the target's address added.
@@ -194,6 +205,7 @@ pub enum RelocKind {
 }
 
 /// What a relocation refers to.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelocTarget {
     /// A section, by index.
@@ -255,6 +267,7 @@ pub struct Symbol {
 }
 
 /// What caused an [`Expansion`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpansionKind {
     /// An `include` directive.
@@ -319,6 +332,9 @@ pub struct Assembly {
     pub expansions: Vec<Expansion>,
     /// Errors and warnings.
     pub diagnostics: Vec<Diagnostic>,
+    /// The limit from [`Options::max_output_bytes`], which also applies to a raw
+    /// binary's gaps.
+    pub max_output_bytes: i64,
 }
 
 impl Assembly {
@@ -384,10 +400,11 @@ pub fn assemble(options: &Options, provider: &dyn FileProvider) -> Assembly {
             ..Assembly::default()
         };
     }
-    let built = layout::build(parser.finish());
+    let built = layout::build(parser.finish(options.max_output_bytes));
     Assembly {
         files: built.files,
         unit_name: built.unit_name,
+        max_output_bytes: built.max_output_bytes,
         sections: built.sections,
         symbols: built.symbols,
         line_table: built.line_table,
@@ -718,9 +735,155 @@ mod tests {
             assembly.sections[0].data,
             [
                 0x89, 0xF6, 0x01, 0x70, 0x00, 0x01, 0x86, 0xA0, // divs
-                0x4E, 0xFB, 0x01, 0x70, 0x00, 0x01, 0x86, 0x96, // jmp, from offset 10
+                // In a relocatable section a constant is the displacement itself.
+                0x4E, 0xFB, 0x01, 0x70, 0x00, 0x01, 0x86, 0xA0, // jmp
             ]
         );
+    }
+
+    fn run_on(source: &str, cpu: Cpu, fixed: bool) -> Assembly {
+        let mut files = MemoryProvider::new();
+        files.insert("t.s", source);
+        let mut options = Options::new("t.s");
+        options.cpu = cpu;
+        options.fixed_addresses = fixed;
+        assemble(&options, &files)
+    }
+
+    #[test]
+    fn test_unresolved_float_immediates_are_errors_not_panics() {
+        for source in [
+            " fmove.d #foo,fp0\n",
+            " fmove.x #foo,fp0\n",
+            " fmove.p #1/0,fp0\n",
+        ] {
+            assert!(run_on(source, Cpu::M68040, false).has_errors(), "{source}");
+        }
+    }
+
+    #[test]
+    fn test_deep_parentheses_are_an_error_not_a_crash() {
+        let source = format!(" dc.w {}1{}\n", "(".repeat(5000), ")".repeat(5000));
+        assert!(run(&source).has_errors());
+    }
+
+    #[test]
+    fn test_reasonable_parentheses_are_accepted() {
+        let source = format!(" dc.w {}1{}\n", "(".repeat(30), ")".repeat(30));
+        assert!(!run(&source).has_errors());
+    }
+
+    #[test]
+    fn test_deep_unary_operators_are_an_error_not_a_crash() {
+        assert!(run(&format!(" dc.w {}1\n", "-".repeat(5000))).has_errors());
+    }
+
+    #[test]
+    fn test_long_operator_chains_are_an_error_not_a_crash() {
+        assert!(run(&format!(" dc.w 1{}\n", "+1".repeat(20000))).has_errors());
+    }
+
+    #[test]
+    fn test_deep_rept_is_an_error_not_a_crash() {
+        let source = format!("{}{}", " rept 1\n".repeat(5000), " endr\n".repeat(5000));
+        assert!(run(&source).has_errors());
+    }
+
+    #[test]
+    fn test_limits_stop_runaway_sources() {
+        let sources = [
+            " ds.b $7fffffff\n",
+            " cnop $7fffffff,2\n ds.b $7fffffff\n",
+            " rept $7fffffffffff\n endr\n",
+            "m macro\n m\n m\n endm\n m\n",
+            " rept 100000\n rept 100000\n nop\n endr\n endr\n",
+            " offset\n ds.b $7fffffff\n",
+        ];
+        for source in sources {
+            let mut files = MemoryProvider::new();
+            files.insert("t.s", source);
+            let mut options = Options::new("t.s");
+            // The default limit is much higher, which would only make this slower.
+            options.max_atoms = 50_000;
+            options.max_output_bytes = 1024 * 1024;
+            let assembly = assemble(&options, &files);
+            assert!(
+                assembly
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "limit-exceeded"),
+                "{source}"
+            );
+        }
+        for source in [" cnop $ffffffffffff,2\n", " cnop 0,$7fffffffffffffff\n"] {
+            assert!(run(source).has_errors(), "{source}");
+        }
+    }
+
+    #[test]
+    fn test_write_bin_gap_beyond_limit_is_error() {
+        let assembly = run(" org 0\n nop\n org $ffffffff\n nop\n");
+        assert_eq!(write_bin(&assembly), Err(OutputError::TooLarge));
+    }
+
+    #[test]
+    fn test_write_bin_empty_org_inside_a_section_is_overlap() {
+        let assembly = run(" org $1000\n dc.l 1,2,3,4\n org $1008\n");
+        assert!(matches!(
+            write_bin(&assembly),
+            Err(OutputError::Overlap(..))
+        ));
+    }
+
+    #[test]
+    fn test_extreme_addresses_do_not_overflow() {
+        for source in [
+            " offset $7fffffffffffffff\n ds.b 2\nx:\n",
+            " nop\n rorg -$7fffffffffffffff-1\n",
+            " nop\n bra -$7fffffffffffffff-1\n",
+            " nop\n lea (-$7fffffffffffffff-1)(pc),a0\n",
+        ] {
+            for fixed in [false, true] {
+                run_on(source, Cpu::M68020, fixed);
+            }
+        }
+    }
+
+    #[test]
+    fn test_values_over_32_bits_are_errors() {
+        for source in [
+            " jmp $123456789\n",
+            " bra.l $123456789\n",
+            " move.l (100000000000,a0),d0\n",
+        ] {
+            assert!(run_on(source, Cpu::M68020, true).has_errors(), "{source}");
+        }
+    }
+
+    #[test]
+    fn test_long_equate_chain_settles() {
+        let mut source = String::from(" dc.w s0\n");
+        for link in 0..40 {
+            source.push_str(&format!("s{link} equ s{}\n", link + 1));
+        }
+        source.push_str("s40 equ 1\n");
+        let assembly = run(&source);
+        assert!(!assembly.has_errors(), "{:?}", assembly.diagnostics.first());
+    }
+
+    #[test]
+    fn test_macro_substituted_lines_report_the_line_not_a_false_column() {
+        let source = "m macro\n move.l \\1,zz\n endm\n m d0_very_long_argument_replacement\n";
+        let assembly = run(source);
+        let span = assembly.diagnostics[0].span;
+        assert_eq!(span.map(|s| (s.line, s.col)), Some((2, 1)));
+    }
+
+    #[test]
+    fn test_macro_lines_without_parameters_keep_exact_columns() {
+        let assembly = run("m macro\n bogus\n endm\n m\n");
+        let span = assembly.diagnostics[0].span;
+        assert_eq!(span.map(|s| (s.line, s.col)), Some((2, 2)));
     }
 
     #[test]

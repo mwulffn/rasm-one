@@ -38,10 +38,17 @@ pub fn write_bin(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     let mut out = Vec::new();
     let mut previous: Option<(u64, &str)> = None;
     let first = pieces.first().map_or(0, |(start, _)| *start);
+    let last = pieces
+        .iter()
+        .map(|(start, section)| start + section.data.len() as u64)
+        .max()
+        .unwrap_or(first);
+    if (last - first) as i64 > assembly.max_output_bytes {
+        return Err(OutputError::TooLarge);
+    }
     for (start, section) in pieces {
         if let Some((end, name)) = previous {
-            // Sections that hold no bytes can't collide with anything.
-            if start < end && !section.data.is_empty() {
+            if start < end {
                 return Err(OutputError::Overlap(name.to_string(), section.name.clone()));
             }
         }

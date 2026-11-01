@@ -12,10 +12,14 @@ const BYTES_SHOWN: usize = 8;
 /// include expansions appear where their bytes are. Source text is read from
 /// `provider`; a file it can no longer read just leaves the text blank.
 pub fn write_listing(assembly: &Assembly, provider: &dyn FileProvider) -> String {
-    let sources: Vec<Vec<u8>> = assembly
+    let contents: Vec<Vec<u8>> = assembly
         .files
         .iter()
         .map(|file| provider.read(file, None).unwrap_or_default())
+        .collect();
+    let sources: Vec<Vec<&[u8]>> = contents
+        .iter()
+        .map(|source| source.split(|&b| b == b'\n').collect())
         .collect();
     let mut out = String::new();
     for (index, section) in assembly.sections.iter().enumerate() {
@@ -35,7 +39,7 @@ pub fn write_listing(assembly: &Assembly, provider: &dyn FileProvider) -> String
     out
 }
 
-fn write_entry(out: &mut String, assembly: &Assembly, sources: &[Vec<u8>], entry: &LineEntry) {
+fn write_entry(out: &mut String, assembly: &Assembly, sources: &[Vec<&[u8]>], entry: &LineEntry) {
     let start = entry.offset as usize;
     let end = start + entry.len as usize;
     let section = &assembly.sections[entry.section];
@@ -60,14 +64,11 @@ fn write_entry(out: &mut String, assembly: &Assembly, sources: &[Vec<u8>], entry
     );
 }
 
-fn source_line(sources: &[Vec<u8>], entry: &LineEntry) -> String {
+fn source_line(sources: &[Vec<&[u8]>], entry: &LineEntry) -> String {
     let line = sources
         .get(entry.span.file as usize)
-        .and_then(|source| {
-            source
-                .split(|&b| b == b'\n')
-                .nth(entry.span.line as usize - 1)
-        })
+        .and_then(|lines| lines.get(entry.span.line as usize - 1))
+        .copied()
         .unwrap_or(&[]);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     String::from_utf8_lossy(line).into_owned()

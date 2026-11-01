@@ -17,6 +17,7 @@ pub enum FileError {
 
 /// Failure while writing an output format.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OutputError {
     /// Assembly reported errors, so no output can be written.
     #[error("assembly has errors")]
@@ -24,6 +25,9 @@ pub enum OutputError {
     /// Two sections would occupy the same addresses in a raw binary.
     #[error("sections {0} and {1} overlap")]
     Overlap(String, String),
+    /// A raw binary would be larger than the limit, because of gaps between `org`s.
+    #[error("the raw binary would exceed the size limit")]
+    TooLarge,
     /// `org` gives fixed addresses, but this format is relocatable.
     #[error("org cannot be used in a relocatable format")]
     FixedAddress,
@@ -51,6 +55,7 @@ pub enum OutputError {
 
 /// Severity of a [`Diagnostic`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Severity {
     /// A message the source asked to show, with `printt` and similar.
     Info,

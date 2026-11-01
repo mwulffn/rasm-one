@@ -77,6 +77,13 @@ const ACCEPTED: &[&str] = &[
     " bss\n ds.w 1\n section BSS,bss\n ds.w 1",
     "x equ 1\nl: nop\ny equ 2",
     "n equ 1\nl: nop\n dc.l l+n",
+    // A constant PC displacement is used as it is, wherever the instruction is.
+    " nop\n nop\n jmp 2(pc,d0.w)\n move.w 4(pc),d0\n lea 6(pc),a0",
+    " nop\n lea 4(pc),a0",
+    // Local labels on an instruction's line belong to the label before them.
+    "foo: nop\n.x: nop\nbar: bra .x\n.x: rts",
+    "foo: nop\n1$: nop\nbar: bra 1$\n1$: rts",
+    "foo: nop\n.x: nop\nbar: lea .x(pc),a0\n.x: rts",
     // Relocations.
     " move.l #s,s\ns: dc.l s",
     " move.l s,s\n dc.l s\ns:",
@@ -176,6 +183,14 @@ fn test_write_hunk_exe_rejected_sources_match_vasm_rejection() -> Result<(), Box
     }
     assert!(failures.is_empty(), "we accepted {failures:?}");
     Ok(())
+}
+
+/// See docs/vasm-bugs.md: vasm writes a displacement of 0 for these.
+#[test]
+fn test_write_hunk_exe_branch_to_constant_is_error() {
+    for source in [" bra 4\n", " dbra d0,4\n", " bsr.s 4\n"] {
+        assert!(ours(source).is_err(), "{source}");
+    }
 }
 
 #[test]

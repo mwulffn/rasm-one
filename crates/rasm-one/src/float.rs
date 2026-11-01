@@ -9,6 +9,9 @@ use crate::types::Size;
 /// big integers involved. Extended precision reaches about 1e4932.
 const MAX_DECIMAL_EXPONENT: i64 = 5000;
 
+/// More digits than anyone writes, far more than the formats can hold.
+const MAX_DIGITS: usize = 1000;
+
 /// A floating-point literal, as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FloatLiteral {
@@ -130,6 +133,10 @@ fn parse_decimal(text: &str) -> Option<Decimal> {
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let digits = format!("{whole}{fraction}");
+    // Big's cost grows with the square of this.
+    if digits.len() > MAX_DIGITS {
+        return None;
+    }
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
