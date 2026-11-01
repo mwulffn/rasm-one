@@ -92,6 +92,10 @@ const ACCEPTED: &[&str] = &[
     " opt l-\n dc.l f\nf:",
     " opt d-\nstart: nop\nb: nop\n xdef start",
     " opt x+\nstart: nop\nb: nop\n xdef start",
+    " opt nodebug\nstart: nop",
+    " opt xdebug\nstart: nop\nb: nop\n xdef start",
+    " opt l0\nstart: nop",
+    " opt l1\nstart: nop",
     // idnt and section aliases.
     " idnt foo\n nop",
     " idnt \"a b\"\n nop",

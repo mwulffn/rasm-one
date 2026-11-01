@@ -347,6 +347,12 @@ const ACCEPTED: &[&str] = &[
     " opt p+\nf: nop\n opt p-\n lea f,a0",
     " opt l+\n nop",
     " opt d-\n nop",
+    " opt autopc\n opt noautopc\n opt case\n opt nocase\n nop",
+    " opt symtab\n opt nosymtab\n opt type\n opt notype\n nop",
+    " opt warn\n opt nowarn\n opt CASE,DEBUG\n nop",
+    " opt chkpc\n opt nochkpc\nf: lea f,a0",
+    " opt chkpc\nf: lea f(pc),a0",
+    " opt l0\n opt l1\n nop",
     // Habits seen in real sources.
     "l:rts",
     "l::rts",
@@ -420,6 +426,7 @@ const ACCEPTED: &[&str] = &[
 /// Valid syntax that both assemblers must reject.
 const REJECTED: &[&str] = &[
     " opt p+\nf: lea f,a0",
+    " opt chkpc\nf: lea f,a0",
     " opt p+\nf: dc.l f",
     " opt p+\nf: move.l #f,d0",
     " opt p+\nf: move.l f,d0",
@@ -557,7 +564,6 @@ const STRICTER_THAN_VASM: &[&str] = &[
     " opt nosuch\n nop",
     " opt ,c-\n nop",
     " opt \"c-\"\n nop",
-    " opt case\n nop",
     " idnt",
     " printt",
     " so.s 1",
