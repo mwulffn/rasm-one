@@ -19,9 +19,11 @@ sha256() {
 # usage: fetch <Aminet path without .lha> <directory> <sha256>
 fetch() {
     archive=$dir/$2.lha
-    if [ -d "$dir/$2" ]; then
+    # A build cache can keep the directory but not what is in it.
+    if [ -f "$dir/$2/.fetched" ]; then
         return
     fi
+    rm -rf "$dir/$2"
     curl -sSfL --retry 3 -o "$archive" "http://aminet.net/$1.lha"
     actual=$(sha256 "$archive")
     if [ "$actual" != "$3" ]; then
@@ -30,6 +32,7 @@ fetch() {
     fi
     mkdir "$dir/$2"
     (cd "$dir/$2" && lha -xq "$archive" >/dev/null)
+    touch "$dir/$2/.fetched"
 }
 
 fetch dev/asm/ACCSources acc 5165ad85cf074f2875108495ce6b5edccb179b275316b0372b675a9569d91e6b

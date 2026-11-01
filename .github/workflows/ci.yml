@@ -27,18 +27,24 @@ jobs:
       - run: echo "RASM_CORPUS=$(scripts/fetch-corpus.sh)" >> "$GITHUB_ENV"
       # Nearly all of the sweep's time is waiting for vasm, whose answers can't change unless
       # the sweep's lines or vasm do, so they are cached. The key only decides when to start a
-      # new copy, because each entry is found by a hash of what vasm was given.
+      # new copy, because each entry is found by a hash of what vasm was given. They go in one
+      # tar file, because actions/cache fails on this many files.
       - uses: actions/cache@v4
         if: github.event_name != 'schedule'
         with:
-          path: ~/vasm-cache
+          path: ~/vasm-cache.tar
           key: vasm-answers-${{ hashFiles('scripts/fetch-vasm.sh', 'crates/rasm-one/tests/sweep_cpus.rs') }}
           restore-keys: vasm-answers-
       - if: github.event_name != 'schedule'
-        run: echo "RASM_VASM_CACHE=$HOME/vasm-cache" >> "$GITHUB_ENV"
+        run: |
+          mkdir -p ~/vasm-cache
+          if [ -f ~/vasm-cache.tar ]; then tar -xf ~/vasm-cache.tar -C ~/vasm-cache; fi
+          echo "RASM_VASM_CACHE=$HOME/vasm-cache" >> "$GITHUB_ENV"
       # The sweep takes minutes unoptimised, so it runs only in the release build.
       - run: cargo test --workspace -- --skip test_assemble_sweep
       - run: cargo test --release -p rasm-one --test sweep_cpus
+      - if: github.event_name != 'schedule'
+        run: tar -cf ~/vasm-cache.tar -C ~/vasm-cache .
       - run: cargo test --release -p rasm-one --test perf_budget -- --nocapture
       - run: cargo build -p rasm-one -p rasm-one-wasm --target wasm32-unknown-unknown
       - run: scripts/wasm-smoke.sh
