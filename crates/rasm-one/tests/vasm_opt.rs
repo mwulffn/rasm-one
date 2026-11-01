@@ -469,6 +469,104 @@ fn test_assemble_coprocessor_absolutes_match_vasm_o3() -> Result<(), Box<dyn Err
     compare_rule(&sources, &ABSOLUTES, true)
 }
 
+const QUICK_MOVES: Rule = Rule {
+    number: 4,
+    flag: "-opt-o4+",
+};
+
+#[test]
+fn test_assemble_quick_moves_match_vasm_o4() -> Result<(), Box<dyn Error>> {
+    let mut sources: Vec<String> = [
+        " move.w #1,d0",
+        " move.b #1,d0",
+        " move #1,d0",
+        " move.l #1,a0",
+        " move.l #1,(a0)",
+        " move.l d1,d0",
+        " move.l #1,d7",
+        " move.l #$10000,d7",
+        " move.l #2000,d7",
+        " move.l #254,d7",
+        " move.l #z,d0\nz equ 5",
+        " move.l #z,d0\nz equ 500",
+        "z equ 5\n move.l #z,d0",
+        " move.l #g-f,d0\nf: nop\ng:",
+        " xref x\n move.l #x,d0",
+        " section a,code\nf: move.l #f,d0",
+        " opt o4-\n move.l #1,d0",
+        " opt o4+\n move.l #1,d0",
+        " opt o4-\n move.l #1,d0\n opt o4+\n move.l #1,d0",
+        " opt p=68040\n move.l #254,d0",
+        " opt p=68040\n move.l #1,d0",
+        " opt p=68040\n move.l #254,d0\n opt p=68060\n move.l #254,d0",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    for value in (-300..300)
+        .step_by(7)
+        .chain(-260..-250)
+        .chain(120..132)
+        .chain(250..260)
+    {
+        sources.push(format!(" move.l #{value},d0"));
+    }
+    for value in [
+        0x7FFF_FFFFu32,
+        0x8000_0000,
+        0xFFFF_FFFF,
+        0xFFFF_FFFE,
+        0xFF00,
+        0xFFFF,
+        0x8000,
+        0x1_0000,
+        0x1_0001,
+        0x7F_0000,
+        0x80_0000,
+        0x1FE_0000,
+        0xFF80_0000,
+        0xFFFF_0000,
+        0xFFFE_0000,
+        0xFFFE_FFFF,
+        0xFFFD_FFFF,
+        0xFF80_FFFF,
+        0xFF7F_FFFF,
+        0xFF_0000,
+        0x100_0000,
+        0x1234_0000,
+    ] {
+        sources.push(format!(" move.l #{value},d0"));
+    }
+    compare_rule(&sources, &QUICK_MOVES, false)
+}
+
+#[test]
+fn test_assemble_quick_move_labels_match_vasm_o4_in_binary() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    for source in [
+        " move.l #f,d0\nf:",
+        " move.l #f,d0\n ds.b 120\nf:",
+        " move.l #f,d0\n ds.b 122\nf:",
+        " move.l #f,d0\n ds.b 124\nf:",
+        " move.l #f,d0\n ds.b 126\nf:",
+        " move.l #f,d0\n ds.b 248\nf:",
+        " move.l #f,d0\n ds.b 250\nf:",
+        " move.l #f,d0\n ds.b 252\nf:",
+        " move.l #f,d0\n dc.b 1\nf:",
+        "f: move.l #f,d0",
+        " org $100\nf: move.l #f,d0",
+        " org $10000\nf: move.l #f,d0",
+    ] {
+        for cpu in CPUS {
+            let found = compare(&vasm, source, cpu, Format::Bin, &QUICK_MOVES, false)?;
+            assert_eq!(found, None);
+        }
+    }
+    Ok(())
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 

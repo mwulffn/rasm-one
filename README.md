@@ -34,7 +34,7 @@ Integer instructions for the 68000 to 68060, the FPU and the MMU are complete an
 compared with vasm. Output is compared byte for byte against `vasm -no-opt`, which is also
 the default. Optimisation rules are being added one at a time: `-opt-o1+` or `opt o1+` makes
 unsized branches as short as they can be, `-opt-o2+` drops `0(An)`'s displacement, `-opt-o3+` writes addresses that fit in a word as
-one, and `-opt-o-` turns all rules off for `opt` to
+one, `-opt-o4+` shortens `move.l #x,Dn`, and `-opt-o-` turns all rules off for `opt` to
 choose. Where vasm has a bug, rasm-one does the correct thing instead; see `docs/vasm-bugs.md`.
 
 ## Testing
