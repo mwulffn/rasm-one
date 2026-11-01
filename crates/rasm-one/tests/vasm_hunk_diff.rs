@@ -84,6 +84,18 @@ const ACCEPTED: &[&str] = &[
     "foo: nop\n.x: nop\nbar: bra .x\n.x: rts",
     "foo: nop\n1$: nop\nbar: bra 1$\n1$: rts",
     "foo: nop\n.x: nop\nbar: lea .x(pc),a0\n.x: rts",
+    // opt settings that change the file.
+    "start: nop\nb: nop\n xdef start\n opt d-",
+    " opt d-\nstart: nop\nb: nop\n opt d+",
+    " opt x+\nstart: nop\nb: nop\n xdef start",
+    " opt x+\nstart: nop\nb: nop\n xdef start\n opt x-",
+    " opt x+,d-\nstart: nop\nb: nop\n xdef start",
+    "start: nop\nb: nop\n xdef start\n opt l+",
+    " opt l+\n xref y\n dc.l y",
+    " opt d\nstart: nop",
+    " opt x\nstart: nop",
+    " opt l\nstart: nop",
+    " opt p-\nstart: nop",
     // Relocations.
     " move.l #s,s\ns: dc.l s",
     " move.l s,s\n dc.l s\ns:",

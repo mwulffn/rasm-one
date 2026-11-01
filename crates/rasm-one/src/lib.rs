@@ -315,11 +315,25 @@ pub struct LineEntry {
     pub expansion: Option<u32>,
 }
 
+/// Settings for hunk output that a source chose with `opt`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HunkSettings {
+    /// `d-`: write no symbol table.
+    pub no_symbols: bool,
+    /// `x+`: list only exported symbols in the symbol table.
+    pub exported_symbols_only: bool,
+    /// `l+` or `l-`: write an object or an executable, whichever was asked for.
+    pub linkable: Option<bool>,
+}
+
 /// Result of an assembly. Holds whatever could be produced even after errors.
 #[derive(Debug, Clone, Default)]
 pub struct Assembly {
     /// Names of the source files; a [`FileId`] indexes this list.
     pub files: Vec<String>,
+    /// Hunk output settings from `opt`.
+    pub hunk_settings: HunkSettings,
     /// Name given by `idnt`, used for the unit of an object file.
     pub unit_name: Option<String>,
     /// Sections in order of first appearance.
@@ -404,6 +418,7 @@ pub fn assemble(options: &Options, provider: &dyn FileProvider) -> Assembly {
     Assembly {
         files: built.files,
         unit_name: built.unit_name,
+        hunk_settings: built.hunk_settings,
         max_output_bytes: built.max_output_bytes,
         sections: built.sections,
         symbols: built.symbols,
@@ -884,6 +899,29 @@ mod tests {
         let assembly = run("m macro\n bogus\n endm\n m\n");
         let span = assembly.diagnostics[0].span;
         assert_eq!(span.map(|s| (s.line, s.col)), Some((2, 2)));
+    }
+
+    #[test]
+    fn test_opt_warns_for_each_ignored_option() {
+        let assembly = run(" opt c-,o+\n nop\n");
+        let messages: Vec<_> = assembly
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(messages, ["option c- is ignored", "option o+ is ignored"]);
+        assert_eq!(assembly.diagnostics[0].severity, Severity::Warning);
+        assert_eq!(write_bin(&assembly), Ok(vec![0x4E, 0x71]));
+    }
+
+    #[test]
+    fn test_opt_p_changes_the_processor() {
+        let assembly = run(" opt p=68020/68881\n bfextu d0{1:2},d1\n fnop\n");
+        assert!(
+            assembly.diagnostics.is_empty(),
+            "{:?}",
+            assembly.diagnostics
+        );
     }
 
     #[test]

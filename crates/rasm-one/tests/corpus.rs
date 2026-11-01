@@ -14,19 +14,13 @@ use rasm_oracle::Vasm;
 
 /// Fewer than this means the corpus or the test has gone wrong. Hosts differ: on a
 /// case-sensitive filesystem some of these sources can't find their includes.
-const MINIMUM_MATCHES: usize = 80;
+const MINIMUM_MATCHES: usize = 85;
 
 /// Files vasm accepts that are errors here, reviewed, with the error's code.
 const EXPECTED_REJECTIONS: &[(&str, &str)] = &[
     // `sp equ $c00` makes a register name a symbol.
     ("ACCSources/Source17/Trev/hw.s", "reserved-name"),
 ];
-
-/// Codes that are accepted for any file, because rasm-one rejects them by design.
-fn rejected_by_design(code: &str) -> bool {
-    // `opt` could change what a source means, so it isn't silently ignored.
-    code == "unsupported-opt"
-}
 
 /// Not really source: a binary file that happens to be named `.s`.
 const NOT_SOURCE: &[&str] = &["ACCSources/Source23/M.Bateson/Graphics/alien.s"];
@@ -127,7 +121,7 @@ fn test_corpus_matches_vasm() -> Result<(), Box<dyn Error>> {
                     .find(|d| d.severity == rasm_one::Severity::Error)
                     .map_or("output", |d| d.code);
                 let expected = EXPECTED_REJECTIONS.contains(&(short, code));
-                if !expected && !rejected_by_design(code) {
+                if !expected {
                     failures.push(format!("{short}: {:?}", assembly.diagnostics.first()));
                 }
             }

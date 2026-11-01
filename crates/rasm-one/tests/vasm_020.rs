@@ -148,6 +148,8 @@ const BINARY: &[&str] = &[
     " moves.l (a0),d0",
     // CPU selection in the source.
     " mc68020\n bfextu d0{1:2},d1",
+    " opt p=68020\n bfextu d0{1:2},d1",
+    " opt c-,p=68030\n pflusha",
     " mc68010\n movec vbr,d0",
     " machine 68020\n bfextu d0{1:2},d1",
     " machine mc68020\n bfextu d0{1:2},d1",

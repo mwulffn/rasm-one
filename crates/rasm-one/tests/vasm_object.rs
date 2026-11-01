@@ -86,6 +86,12 @@ const ACCEPTED: &[&str] = &[
     " section c,code\n nop\n move.w t(pc,d0.w),d1\n section d,code\n dc.w 1\nt: dc.w 1",
     " section c,code\n nop\n bsr.s t\n section d,code\n dc.w 1\nt: dc.w 1",
     " section c,code\n nop\n bsr t\n bsr u\n bsr t\n section d,code\nt: dc.w 1\n section e,code\nu: dc.w 1",
+    // opt settings that change the file.
+    "start: nop\nb: nop\n xdef start\n opt l-",
+    " opt l-\nstart: nop\n opt l+",
+    " opt l-\n dc.l f\nf:",
+    " opt d-\nstart: nop\nb: nop\n xdef start",
+    " opt x+\nstart: nop\nb: nop\n xdef start",
     // idnt and section aliases.
     " idnt foo\n nop",
     " idnt \"a b\"\n nop",
@@ -102,6 +108,9 @@ const ACCEPTED: &[&str] = &[
 ];
 
 const REJECTED: &[&str] = &[
+    " opt l-\n xref y\n dc.l y",
+    " opt p+\n xref x\n jmp x",
+    " opt p+\n xref x\n dc.l x",
     " xref x,y\n dc.l x-y",
     " xref x\n dc.l x*2",
     " xref x\n ds.b x",
