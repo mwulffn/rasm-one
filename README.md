@@ -9,7 +9,7 @@ issues for progress.
 Build with `cargo build --release`, which produces the `rasm-one` command:
 
 ```
-rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-I<dir>]... [-L <listing>]
+rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-I<dir>]... [-L <listing>]
 ```
 
 | Option | Output |
@@ -18,6 +18,9 @@ rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-I<dir
 | `-kick1hunks` | Make an executable that also loads on Kickstart 1.x. By default, as in vasm, the compact relocations need Kickstart 2.0 or later |
 | `-Fhunk` | Amiga hunk object file, for linking |
 | `-Fbin` | Raw binary, for bootblocks and trackloaded code |
+| `-m68000` ... `-m68060` | Target CPU; 68000 by default |
+| `-m68881`, `-m68882` | A floating-point coprocessor alongside a 68020 or 68030 |
+| `-no-fpu` | No floating-point instructions, even on a 68040 or 68060 |
 | `-I<dir>` | Also search this directory for `include` and `incbin` files |
 | `-L <file>` | Write a listing |
 
@@ -26,9 +29,10 @@ For the library API, including diagnostics, symbols and the line table, run
 
 ## Status
 
-The 68000 instruction set is complete and compared with vasm. Output is compared
-byte for byte against `vasm -no-opt`, so nothing is optimised yet. Other CPUs,
-the FPU and the MMU are not yet checked; see the issues.
+Integer instructions for the 68000 to 68060 and the FPU are complete and compared
+with vasm. Output is compared byte for byte against `vasm -no-opt`, so nothing is
+optimised yet. Where vasm has a bug, rasm-one does the correct thing instead; see
+`docs/vasm-bugs.md`. The MMU is not done yet; see the issues.
 
 ## Testing
 

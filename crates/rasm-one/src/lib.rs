@@ -122,6 +122,7 @@
 mod atom;
 mod error;
 mod expr;
+mod float;
 pub mod isa;
 mod layout;
 mod lexer;
@@ -144,6 +145,9 @@ pub struct Options {
     pub main: String,
     /// Target CPU.
     pub cpu: Cpu,
+    /// Whether a floating-point unit is available. By default only the 68040 and
+    /// 68060, which have one built in, can use FPU instructions.
+    pub fpu: FpuChoice,
     /// Directories to search for `include` and `incbin` files.
     pub include_dirs: Vec<String>,
     /// Set this for a raw binary, where labels are final addresses. Displacements
@@ -158,10 +162,23 @@ impl Options {
         Self {
             main: main.into(),
             cpu: Cpu::default(),
+            fpu: FpuChoice::default(),
             include_dirs: Vec::new(),
             fixed_addresses: false,
         }
     }
+}
+
+/// Whether a floating-point unit is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FpuChoice {
+    /// Only if the CPU has one built in.
+    #[default]
+    BuiltIn,
+    /// A 68881 or 68882 alongside a 68020 or 68030.
+    Coprocessor,
+    /// Not even if the CPU has one built in.
+    None,
 }
 
 /// What a relocation's value means.

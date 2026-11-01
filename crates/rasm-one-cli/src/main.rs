@@ -5,11 +5,11 @@ use std::fs;
 use anyhow::{bail, Context, Result};
 use rasm_one::{
     assemble, write_bin, write_hunk_exe_with, write_hunk_object, write_listing, Cpu, FileError,
-    FileProvider, HunkExeOptions, Options, Severity,
+    FileProvider, FpuChoice, HunkExeOptions, Options, Severity,
 };
 
 const USAGE: &str =
-    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-I<dir>]... [-L <listing>]";
+    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-I<dir>]... [-L <listing>]";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -38,6 +38,7 @@ struct Args {
     listing: Option<String>,
     kickstart1: bool,
     cpu: Cpu,
+    fpu: FpuChoice,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
@@ -47,6 +48,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut listing = None;
     let mut kickstart1 = false;
     let mut cpu = Cpu::default();
+    let mut fpu = FpuChoice::default();
     let mut args = args;
     while let Some(arg) = args.next() {
         if arg == "-o" {
@@ -63,6 +65,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             format = Format::Bin;
         } else if let Some(directory) = arg.strip_prefix("-I") {
             include_dirs.push(directory.to_string());
+        } else if arg == "-m68881" || arg == "-m68882" {
+            fpu = FpuChoice::Coprocessor;
+        } else if arg == "-no-fpu" {
+            fpu = FpuChoice::None;
         } else if let Some(found) = arg
             .strip_prefix("-m")
             .and_then(|number| number.parse().ok())
@@ -84,6 +90,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             listing,
             kickstart1,
             cpu,
+            fpu,
         }),
         _ => bail!("{USAGE}"),
     }
@@ -94,6 +101,7 @@ fn main() -> Result<()> {
     let mut options = Options::new(args.source);
     options.include_dirs = args.include_dirs;
     options.cpu = args.cpu;
+    options.fpu = args.fpu;
     options.fixed_addresses = args.format == Format::Bin;
     let assembly = assemble(&options, &NativeProvider);
     if let Some(path) = &args.listing {

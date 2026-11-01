@@ -6,7 +6,7 @@ use crate::types::{CpuSet, Size};
 
 /// A set of effective address classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EaSet(pub u32);
+pub struct EaSet(pub u64);
 
 impl EaSet {
     /// `Dn`
@@ -49,6 +49,20 @@ impl EaSet {
     pub const CONTROL_REG: EaSet = EaSet(1 << 18);
     /// A cache name, for `cinv` and `cpush`.
     pub const CACHE: EaSet = EaSet(1 << 19);
+    /// A floating-point register.
+    pub const FP: EaSet = EaSet(1 << 20);
+    /// `fpc:fps`
+    pub const FP_PAIR: EaSet = EaSet(1 << 21);
+    /// A list of more than one floating-point register.
+    pub const FP_LIST: EaSet = EaSet(1 << 22);
+    /// One of FPCR, FPSR and FPIAR.
+    pub const FP_CONTROL: EaSet = EaSet(1 << 23);
+    /// More than one of FPCR, FPSR and FPIAR.
+    pub const FP_CONTROL_LIST: EaSet = EaSet(1 << 24);
+    /// FPIAR, the one control register that an address register can move to.
+    pub const FP_IAR: EaSet = EaSet(1 << 25);
+    /// A floating-point literal.
+    pub const FLOAT: EaSet = EaSet(1 << 26);
     /// A branch target: an address expression written without a mode.
     pub const LABEL: EaSet = EaSet::ABS_L;
 
@@ -91,7 +105,17 @@ impl EaSet {
 
     /// The bit-field form of these classes, such as `(a0){1:2}`.
     pub const fn bitfield(self) -> EaSet {
-        EaSet(self.0 << 20)
+        EaSet(self.0 << 32)
+    }
+
+    /// The `{k}` form of these classes, for `fmove.p`.
+    pub const fn packed_store(self) -> EaSet {
+        EaSet(self.0 << 44)
+    }
+
+    /// The union of two sets.
+    pub const fn or(self, other: EaSet) -> EaSet {
+        EaSet(self.0 | other.0)
     }
 
     /// True if the classes overlap.
@@ -218,6 +242,46 @@ pub enum Encoding {
     CacheOp,
     /// Opcode, extension word, then an unsigned 16-bit immediate
     Lpstop,
+    /// `F200`, then `src << 10 | dst << 7 | opmode`, for two FP registers
+    FpRegisters,
+    /// `F200`, then `src << 10 | src << 7 | opmode`, for one FP register
+    FpSingleRegister,
+    /// `F200`, then `src << 10 | opmode`, with no destination
+    FpTestRegister,
+    /// `F200 | ea0`, then the source format, `dst << 7` and opmode
+    FpFromEa,
+    /// `F200 | ea0`, then the source format and opmode, with no destination
+    FpTestEa,
+    /// `F200 | ea1`, then the format and `src << 7`
+    FpStore,
+    /// `F200 | ea1`, then the format `src << 7` and k-factor
+    FpStorePacked,
+    /// `F200 | ea0`, then the control register bits, to a control register
+    FpControlLoad,
+    /// `F200 | ea1`, then the control register bits, from a control register
+    FpControlStore,
+    /// `F200 | ea1`, then registers to memory
+    FpMovemStore,
+    /// `F200 | ea0`, then memory to registers
+    FpMovemLoad,
+    /// `F200`, then the constant ROM offset and `dst << 7`
+    Fmovecr,
+    /// `F200`, then `src << 10`, `fps << 7`, `fpc`
+    FpSinCosRegisters,
+    /// `F200 | ea0`, then the source format, `fps << 7`, `fpc`
+    FpSinCosEa,
+    /// Opcode with condition, 16-bit displacement
+    FpBranch,
+    /// Opcode with condition, 32-bit displacement
+    FpBranchLong,
+    /// `reg0`, condition word, 16-bit displacement
+    FpDecrementBranch,
+    /// `ea0`, condition word
+    FpSet,
+    /// Condition word
+    FpTrap,
+    /// Condition word, then the immediate
+    FpTrapImmediate,
 }
 
 /// One form of an instruction.
@@ -254,6 +318,12 @@ impl InsnRow {
         self
     }
 
+    /// This row, needing a floating-point unit.
+    pub const fn fpu(mut self) -> InsnRow {
+        self.coprocessor = Coprocessor::Fpu;
+        self
+    }
+
     /// This row, with fixed extension word bits.
     pub const fn ext(mut self, extension: u16) -> InsnRow {
         self.extension = extension;
@@ -267,6 +337,18 @@ const L: &[Size] = &[Size::Long];
 const W: &[Size] = &[Size::Word];
 const B: &[Size] = &[Size::Byte];
 const BRANCH: &[Size] = &[Size::Short, Size::Byte, Size::Word];
+const FP_ALL: &[Size] = &[
+    Size::Byte,
+    Size::Word,
+    Size::Long,
+    Size::Single,
+    Size::Double,
+    Size::Extended,
+    Size::Packed,
+];
+const FP_INT: &[Size] = &[Size::Byte, Size::Word, Size::Long, Size::Single];
+const X: &[Size] = &[Size::Extended];
+const P: &[Size] = &[Size::Packed];
 
 const UP010: CpuSet = CpuSet(0x3E);
 const UP020: CpuSet = CpuSet(0x3C);
@@ -322,6 +404,18 @@ const CREG: EaSet = EaSet::CONTROL_REG;
 const CACHE: EaSet = EaSet::CACHE;
 const IND: EaSet = EaSet::IND;
 const ABSL: EaSet = EaSet::ABS_L;
+const FP: EaSet = EaSet::FP;
+const FP_REGS: EaSet = EaSet(EaSet::FP.0 | EaSet::FP_LIST.0);
+const FP_C: EaSet = EaSet(EaSet::FP_CONTROL.0 | EaSet::FP_IAR.0);
+/// Memory modes and immediates, as FP sources.
+const FP_MEM: EaSet = EaSet((DATA.0 & !DN.0) | EaSet::FLOAT.0);
+/// Memory modes and integer immediates, as control register sources.
+const FP_CONTROL_MEM: EaSet = EaSet(DATA.0 & !DN.0);
+const EXTENDED: Option<Size> = Some(Size::Extended);
+/// Control modes and postincrement, as `fmovem` sources.
+const FM_LOAD: EaSet = EaSet(CTRL.0 | POST.0);
+/// Writable control modes and predecrement, as `fmovem` destinations.
+const FM_STORE: EaSet = EaSet(EaSet::CONTROL_ALTERABLE.0 | PRE.0);
 /// Bit fields that are only read.
 const BF_READ: EaSet = EaSet(DN.0 | CTRL.0).bitfield();
 /// Bit fields that are written.
@@ -1002,6 +1096,3872 @@ pub const TABLE: &[InsnRow] = &[
     row("traple", &[], None, &[], 0x5FFC, Encoding::Fixed).on(UP020),
     row("traple", W, WORD, &[IMM], 0x5FFA, Encoding::ImmediateOnly).on(UP020),
     row("traple", L, WORD, &[IMM], 0x5FFB, Encoding::ImmediateOnly).on(UP020),
+    row(
+        "fint",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x01),
+    row(
+        "fint",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x01),
+    row("fint", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x01),
+    row(
+        "fint",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x01),
+    row(
+        "fsinh",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x02),
+    row(
+        "fsinh",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x02),
+    row("fsinh", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x02),
+    row(
+        "fsinh",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x02),
+    row(
+        "fintrz",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x03),
+    row(
+        "fintrz",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x03),
+    row(
+        "fintrz",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x03),
+    row(
+        "fintrz",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x03),
+    row(
+        "fsqrt",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x04),
+    row(
+        "fsqrt",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x04),
+    row("fsqrt", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x04),
+    row(
+        "fsqrt",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x04),
+    row(
+        "flognp1",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x06),
+    row(
+        "flognp1",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x06),
+    row(
+        "flognp1",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x06),
+    row(
+        "flognp1",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x06),
+    row(
+        "fetoxm1",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x08),
+    row(
+        "fetoxm1",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x08),
+    row(
+        "fetoxm1",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x08),
+    row(
+        "fetoxm1",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x08),
+    row(
+        "ftanh",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x09),
+    row(
+        "ftanh",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x09),
+    row("ftanh", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x09),
+    row(
+        "ftanh",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x09),
+    row(
+        "fatan",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0A),
+    row(
+        "fatan",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0A),
+    row("fatan", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x0A),
+    row(
+        "fatan",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0A),
+    row(
+        "fasin",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0C),
+    row(
+        "fasin",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0C),
+    row("fasin", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x0C),
+    row(
+        "fasin",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0C),
+    row(
+        "fatanh",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0D),
+    row(
+        "fatanh",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0D),
+    row(
+        "fatanh",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0D),
+    row(
+        "fatanh",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0D),
+    row(
+        "fsin",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0E),
+    row(
+        "fsin",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0E),
+    row("fsin", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x0E),
+    row(
+        "fsin",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0E),
+    row(
+        "ftan",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0F),
+    row(
+        "ftan",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0F),
+    row("ftan", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x0F),
+    row(
+        "ftan",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0F),
+    row(
+        "fetox",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x10),
+    row(
+        "fetox",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x10),
+    row("fetox", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x10),
+    row(
+        "fetox",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x10),
+    row(
+        "ftwotox",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x11),
+    row(
+        "ftwotox",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x11),
+    row(
+        "ftwotox",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x11),
+    row(
+        "ftwotox",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x11),
+    row(
+        "ftentox",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x12),
+    row(
+        "ftentox",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x12),
+    row(
+        "ftentox",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x12),
+    row(
+        "ftentox",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x12),
+    row(
+        "flogn",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x14),
+    row(
+        "flogn",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x14),
+    row("flogn", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x14),
+    row(
+        "flogn",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x14),
+    row(
+        "flog10",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x15),
+    row(
+        "flog10",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x15),
+    row(
+        "flog10",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x15),
+    row(
+        "flog10",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x15),
+    row(
+        "flog2",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x16),
+    row(
+        "flog2",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x16),
+    row("flog2", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x16),
+    row(
+        "flog2",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x16),
+    row(
+        "fabs",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x18),
+    row(
+        "fabs",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x18),
+    row("fabs", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x18),
+    row(
+        "fabs",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x18),
+    row(
+        "fcosh",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x19),
+    row(
+        "fcosh",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x19),
+    row("fcosh", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x19),
+    row(
+        "fcosh",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x19),
+    row(
+        "fneg",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1A),
+    row(
+        "fneg",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1A),
+    row("fneg", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x1A),
+    row(
+        "fneg",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1A),
+    row(
+        "facos",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1C),
+    row(
+        "facos",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1C),
+    row("facos", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x1C),
+    row(
+        "facos",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1C),
+    row(
+        "fcos",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1D),
+    row(
+        "fcos",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1D),
+    row("fcos", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x1D),
+    row(
+        "fcos",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1D),
+    row(
+        "fgetexp",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1E),
+    row(
+        "fgetexp",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1E),
+    row(
+        "fgetexp",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1E),
+    row(
+        "fgetexp",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1E),
+    row(
+        "fgetman",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1F),
+    row(
+        "fgetman",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1F),
+    row(
+        "fgetman",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1F),
+    row(
+        "fgetman",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1F),
+    row(
+        "fdiv",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x20),
+    row("fdiv", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x20),
+    row(
+        "fdiv",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x20),
+    row(
+        "fmod",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x21),
+    row("fmod", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x21),
+    row(
+        "fmod",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x21),
+    row(
+        "fadd",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x22),
+    row("fadd", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x22),
+    row(
+        "fadd",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x22),
+    row(
+        "fmul",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x23),
+    row("fmul", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x23),
+    row(
+        "fmul",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x23),
+    row(
+        "fsgldiv",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x24),
+    row(
+        "fsgldiv",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x24),
+    row(
+        "fsgldiv",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x24),
+    row(
+        "frem",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x25),
+    row("frem", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x25),
+    row(
+        "frem",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x25),
+    row(
+        "fscale",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x26),
+    row(
+        "fscale",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x26),
+    row(
+        "fscale",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x26),
+    row(
+        "fsglmul",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x27),
+    row(
+        "fsglmul",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x27),
+    row(
+        "fsglmul",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x27),
+    row(
+        "fsub",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x28),
+    row("fsub", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x28),
+    row(
+        "fsub",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x28),
+    row(
+        "fcmp",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x38),
+    row("fcmp", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x38),
+    row(
+        "fcmp",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x38),
+    row(
+        "fssqrt",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x41),
+    row(
+        "fssqrt",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x41),
+    row(
+        "fssqrt",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x41),
+    row(
+        "fssqrt",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x41),
+    row(
+        "fdsqrt",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x45),
+    row(
+        "fdsqrt",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x45),
+    row(
+        "fdsqrt",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x45),
+    row(
+        "fdsqrt",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x45),
+    row(
+        "fsabs",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x58),
+    row(
+        "fsabs",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x58),
+    row("fsabs", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x58),
+    row(
+        "fsabs",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x58),
+    row(
+        "fdabs",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x5C),
+    row(
+        "fdabs",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x5C),
+    row("fdabs", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x5C),
+    row(
+        "fdabs",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x5C),
+    row(
+        "fsneg",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x5A),
+    row(
+        "fsneg",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x5A),
+    row("fsneg", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x5A),
+    row(
+        "fsneg",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x5A),
+    row(
+        "fdneg",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x5E),
+    row(
+        "fdneg",
+        X,
+        EXTENDED,
+        &[FP],
+        0xF200,
+        Encoding::FpSingleRegister,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x5E),
+    row("fdneg", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x5E),
+    row(
+        "fdneg",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x5E),
+    row(
+        "fsmove",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x40),
+    row(
+        "fsmove",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x40),
+    row(
+        "fsmove",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x40),
+    row(
+        "fdmove",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x44),
+    row(
+        "fdmove",
+        FP_INT,
+        WORD,
+        &[DN, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x44),
+    row(
+        "fdmove",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x44),
+    row(
+        "fsdiv",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x60),
+    row("fsdiv", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x60),
+    row(
+        "fsdiv",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x60),
+    row(
+        "fsadd",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x62),
+    row("fsadd", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x62),
+    row(
+        "fsadd",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x62),
+    row(
+        "fsmul",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x63),
+    row("fsmul", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x63),
+    row(
+        "fsmul",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x63),
+    row(
+        "fddiv",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x64),
+    row("fddiv", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x64),
+    row(
+        "fddiv",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x64),
+    row(
+        "fdadd",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x66),
+    row("fdadd", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x66),
+    row(
+        "fdadd",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x66),
+    row(
+        "fdmul",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x67),
+    row("fdmul", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x67),
+    row(
+        "fdmul",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x67),
+    row(
+        "fssub",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x68),
+    row("fssub", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x68),
+    row(
+        "fssub",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x68),
+    row(
+        "fdsub",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x6C),
+    row("fdsub", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP040)
+        .fpu()
+        .ext(0x6C),
+    row(
+        "fdsub",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP040)
+    .fpu()
+    .ext(0x6C),
+    row(
+        "fmove",
+        X,
+        EXTENDED,
+        &[FP, FP],
+        0xF200,
+        Encoding::FpRegisters,
+    )
+    .on(UP020)
+    .fpu(),
+    row("fmove", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fmove",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, FP],
+        0xF200,
+        Encoding::FpFromEa,
+    )
+    .on(UP020)
+    .fpu(),
+    row("fmove", FP_INT, WORD, &[FP, DN], 0xF200, Encoding::FpStore)
+        .on(UP020)
+        .fpu(),
+    row("fmove", FP_ALL, WORD, &[FP, MEM], 0xF200, Encoding::FpStore)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fmove",
+        P,
+        Some(Size::Packed),
+        &[FP, MEM.packed_store()],
+        0xF200,
+        Encoding::FpStorePacked,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmove",
+        L,
+        LONG,
+        &[FP_C, DN.or(MEM)],
+        0xF200,
+        Encoding::FpControlStore,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmove",
+        L,
+        LONG,
+        &[EaSet::FP_IAR, AN],
+        0xF200,
+        Encoding::FpControlStore,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmove",
+        L,
+        LONG,
+        &[DN.or(FP_CONTROL_MEM), FP_C],
+        0xF200,
+        Encoding::FpControlLoad,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmove",
+        L,
+        LONG,
+        &[AN, EaSet::FP_IAR],
+        0xF200,
+        Encoding::FpControlLoad,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        X,
+        EXTENDED,
+        &[FP_REGS.or(DN), FM_STORE],
+        0xF200,
+        Encoding::FpMovemStore,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        X,
+        EXTENDED,
+        &[IMM, FM_STORE],
+        0xF200,
+        Encoding::FpMovemStore,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        X,
+        EXTENDED,
+        &[FM_LOAD, FP_REGS.or(DN)],
+        0xF200,
+        Encoding::FpMovemLoad,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        X,
+        EXTENDED,
+        &[FM_LOAD, IMM],
+        0xF200,
+        Encoding::FpMovemLoad,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        L,
+        LONG,
+        &[FP_C, DN.or(MEM)],
+        0xF200,
+        Encoding::FpControlStore,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        L,
+        LONG,
+        &[EaSet::FP_IAR, AN],
+        0xF200,
+        Encoding::FpControlStore,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        L,
+        LONG,
+        &[EaSet::FP_CONTROL_LIST, MEM],
+        0xF200,
+        Encoding::FpControlStore,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        L,
+        LONG,
+        &[DN.or(FP_CONTROL_MEM), FP_C],
+        0xF200,
+        Encoding::FpControlLoad,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        L,
+        LONG,
+        &[AN, EaSet::FP_IAR],
+        0xF200,
+        Encoding::FpControlLoad,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovem",
+        L,
+        LONG,
+        &[EaSet(FP_CONTROL_MEM.0 & !IMM.0), EaSet::FP_CONTROL_LIST],
+        0xF200,
+        Encoding::FpControlLoad,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fmovecr",
+        X,
+        EXTENDED,
+        &[IMM, FP],
+        0xF200,
+        Encoding::Fmovecr,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fsincos",
+        X,
+        EXTENDED,
+        &[FP, EaSet::FP_PAIR],
+        0xF200,
+        Encoding::FpSinCosRegisters,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fsincos",
+        FP_INT,
+        WORD,
+        &[DN, EaSet::FP_PAIR],
+        0xF200,
+        Encoding::FpSinCosEa,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fsincos",
+        FP_ALL,
+        WORD,
+        &[FP_MEM, EaSet::FP_PAIR],
+        0xF200,
+        Encoding::FpSinCosEa,
+    )
+    .on(UP020)
+    .fpu(),
+    row("ftst", X, EXTENDED, &[FP], 0xF200, Encoding::FpTestRegister)
+        .on(UP020)
+        .fpu()
+        .ext(0x3A),
+    row("ftst", FP_INT, WORD, &[DN], 0xF200, Encoding::FpTestEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x3A),
+    row("ftst", FP_ALL, WORD, &[FP_MEM], 0xF200, Encoding::FpTestEa)
+        .on(UP020)
+        .fpu()
+        .ext(0x3A),
+    row("fnop", &[], None, &[], 0xF280, Encoding::FpTrap)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fsave",
+        &[],
+        None,
+        &[EaSet::CONTROL_ALTERABLE.or(PRE)],
+        0xF300,
+        Encoding::Ea0,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "frestore",
+        &[],
+        None,
+        &[CTRL.or(POST)],
+        0xF340,
+        Encoding::Ea0,
+    )
+    .on(UP020)
+    .fpu(),
+    row("fbf", W, WORD, &[EaSet::LABEL], 0xF280, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbf",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C0,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbf",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x00),
+    row("fsf", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x00),
+    row("ftrapf", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x00),
+    row("ftrapf", W, WORD, &[IMM], 0xF27A, Encoding::FpTrapImmediate)
+        .on(UP020)
+        .fpu()
+        .ext(0x00),
+    row("ftrapf", L, WORD, &[IMM], 0xF27B, Encoding::FpTrapImmediate)
+        .on(UP020)
+        .fpu()
+        .ext(0x00),
+    row("fbeq", W, WORD, &[EaSet::LABEL], 0xF281, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbeq",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C1,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbeq",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x01),
+    row("fseq", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x01),
+    row("ftrapeq", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x01),
+    row(
+        "ftrapeq",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x01),
+    row(
+        "ftrapeq",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x01),
+    row(
+        "fbogt",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF282,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbogt",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C2,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbogt",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x02),
+    row("fsogt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x02),
+    row("ftrapogt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x02),
+    row(
+        "ftrapogt",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x02),
+    row(
+        "ftrapogt",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x02),
+    row(
+        "fboge",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF283,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fboge",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C3,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdboge",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x03),
+    row("fsoge", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x03),
+    row("ftrapoge", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x03),
+    row(
+        "ftrapoge",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x03),
+    row(
+        "ftrapoge",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x03),
+    row(
+        "fbolt",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF284,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbolt",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C4,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbolt",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x04),
+    row("fsolt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x04),
+    row("ftrapolt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x04),
+    row(
+        "ftrapolt",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x04),
+    row(
+        "ftrapolt",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x04),
+    row(
+        "fbole",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF285,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbole",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C5,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbole",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x05),
+    row("fsole", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x05),
+    row("ftrapole", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x05),
+    row(
+        "ftrapole",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x05),
+    row(
+        "ftrapole",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x05),
+    row(
+        "fbogl",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF286,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbogl",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C6,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbogl",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x06),
+    row("fsogl", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x06),
+    row("ftrapogl", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x06),
+    row(
+        "ftrapogl",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x06),
+    row(
+        "ftrapogl",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x06),
+    row("fbor", W, WORD, &[EaSet::LABEL], 0xF287, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbor",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C7,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbor",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x07),
+    row("fsor", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x07),
+    row("ftrapor", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x07),
+    row(
+        "ftrapor",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x07),
+    row(
+        "ftrapor",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x07),
+    row("fbun", W, WORD, &[EaSet::LABEL], 0xF288, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbun",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C8,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbun",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x08),
+    row("fsun", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x08),
+    row("ftrapun", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x08),
+    row(
+        "ftrapun",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x08),
+    row(
+        "ftrapun",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x08),
+    row(
+        "fbueq",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF289,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbueq",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2C9,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbueq",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x09),
+    row("fsueq", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x09),
+    row("ftrapueq", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x09),
+    row(
+        "ftrapueq",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x09),
+    row(
+        "ftrapueq",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x09),
+    row(
+        "fbugt",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF28A,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbugt",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2CA,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbugt",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0A),
+    row("fsugt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x0A),
+    row("ftrapugt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x0A),
+    row(
+        "ftrapugt",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0A),
+    row(
+        "ftrapugt",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0A),
+    row(
+        "fbuge",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF28B,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbuge",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2CB,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbuge",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0B),
+    row("fsuge", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x0B),
+    row("ftrapuge", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x0B),
+    row(
+        "ftrapuge",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0B),
+    row(
+        "ftrapuge",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0B),
+    row(
+        "fbult",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF28C,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbult",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2CC,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbult",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0C),
+    row("fsult", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x0C),
+    row("ftrapult", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x0C),
+    row(
+        "ftrapult",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0C),
+    row(
+        "ftrapult",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0C),
+    row(
+        "fbule",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF28D,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbule",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2CD,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbule",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0D),
+    row("fsule", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x0D),
+    row("ftrapule", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x0D),
+    row(
+        "ftrapule",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0D),
+    row(
+        "ftrapule",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0D),
+    row("fbne", W, WORD, &[EaSet::LABEL], 0xF28E, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbne",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2CE,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbne",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0E),
+    row("fsne", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x0E),
+    row("ftrapne", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x0E),
+    row(
+        "ftrapne",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0E),
+    row(
+        "ftrapne",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0E),
+    row("fbt", W, WORD, &[EaSet::LABEL], 0xF28F, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbt",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2CF,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbt",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x0F),
+    row("fst", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x0F),
+    row("ftrapt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x0F),
+    row("ftrapt", W, WORD, &[IMM], 0xF27A, Encoding::FpTrapImmediate)
+        .on(UP020)
+        .fpu()
+        .ext(0x0F),
+    row("ftrapt", L, WORD, &[IMM], 0xF27B, Encoding::FpTrapImmediate)
+        .on(UP020)
+        .fpu()
+        .ext(0x0F),
+    row("fbsf", W, WORD, &[EaSet::LABEL], 0xF290, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbsf",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D0,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbsf",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x10),
+    row("fssf", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x10),
+    row("ftrapsf", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x10),
+    row(
+        "ftrapsf",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x10),
+    row(
+        "ftrapsf",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x10),
+    row(
+        "fbseq",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF291,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbseq",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D1,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbseq",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x11),
+    row("fsseq", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x11),
+    row("ftrapseq", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x11),
+    row(
+        "ftrapseq",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x11),
+    row(
+        "ftrapseq",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x11),
+    row("fbgt", W, WORD, &[EaSet::LABEL], 0xF292, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbgt",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D2,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbgt",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x12),
+    row("fsgt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x12),
+    row("ftrapgt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x12),
+    row(
+        "ftrapgt",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x12),
+    row(
+        "ftrapgt",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x12),
+    row("fbge", W, WORD, &[EaSet::LABEL], 0xF293, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbge",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D3,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbge",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x13),
+    row("fsge", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x13),
+    row("ftrapge", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x13),
+    row(
+        "ftrapge",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x13),
+    row(
+        "ftrapge",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x13),
+    row("fblt", W, WORD, &[EaSet::LABEL], 0xF294, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fblt",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D4,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdblt",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x14),
+    row("fslt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x14),
+    row("ftraplt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x14),
+    row(
+        "ftraplt",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x14),
+    row(
+        "ftraplt",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x14),
+    row("fble", W, WORD, &[EaSet::LABEL], 0xF295, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fble",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D5,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdble",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x15),
+    row("fsle", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x15),
+    row("ftraple", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x15),
+    row(
+        "ftraple",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x15),
+    row(
+        "ftraple",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x15),
+    row("fbgl", W, WORD, &[EaSet::LABEL], 0xF296, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbgl",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D6,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbgl",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x16),
+    row("fsgl", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x16),
+    row("ftrapgl", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x16),
+    row(
+        "ftrapgl",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x16),
+    row(
+        "ftrapgl",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x16),
+    row(
+        "fbgle",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF297,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbgle",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D7,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbgle",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x17),
+    row("fsgle", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x17),
+    row("ftrapgle", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x17),
+    row(
+        "ftrapgle",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x17),
+    row(
+        "ftrapgle",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x17),
+    row(
+        "fbngle",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF298,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbngle",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D8,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbngle",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x18),
+    row("fsngle", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x18),
+    row("ftrapngle", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x18),
+    row(
+        "ftrapngle",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x18),
+    row(
+        "ftrapngle",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x18),
+    row(
+        "fbngl",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF299,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbngl",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2D9,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbngl",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x19),
+    row("fsngl", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x19),
+    row("ftrapngl", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x19),
+    row(
+        "ftrapngl",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x19),
+    row(
+        "ftrapngl",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x19),
+    row(
+        "fbnle",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF29A,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbnle",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2DA,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbnle",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1A),
+    row("fsnle", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x1A),
+    row("ftrapnle", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x1A),
+    row(
+        "ftrapnle",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1A),
+    row(
+        "ftrapnle",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1A),
+    row(
+        "fbnlt",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF29B,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbnlt",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2DB,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbnlt",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1B),
+    row("fsnlt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x1B),
+    row("ftrapnlt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x1B),
+    row(
+        "ftrapnlt",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1B),
+    row(
+        "ftrapnlt",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1B),
+    row(
+        "fbnge",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF29C,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbnge",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2DC,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbnge",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1C),
+    row("fsnge", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x1C),
+    row("ftrapnge", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x1C),
+    row(
+        "ftrapnge",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1C),
+    row(
+        "ftrapnge",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1C),
+    row(
+        "fbngt",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF29D,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbngt",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2DD,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbngt",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1D),
+    row("fsngt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x1D),
+    row("ftrapngt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x1D),
+    row(
+        "ftrapngt",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1D),
+    row(
+        "ftrapngt",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1D),
+    row(
+        "fbsne",
+        W,
+        WORD,
+        &[EaSet::LABEL],
+        0xF29E,
+        Encoding::FpBranch,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fbsne",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2DE,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbsne",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1E),
+    row("fssne", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x1E),
+    row("ftrapsne", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x1E),
+    row(
+        "ftrapsne",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1E),
+    row(
+        "ftrapsne",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1E),
+    row("fbst", W, WORD, &[EaSet::LABEL], 0xF29F, Encoding::FpBranch)
+        .on(UP020)
+        .fpu(),
+    row(
+        "fbst",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF2DF,
+        Encoding::FpBranchLong,
+    )
+    .on(UP020)
+    .fpu(),
+    row(
+        "fdbst",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF248,
+        Encoding::FpDecrementBranch,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1F),
+    row("fsst", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .on(UP020)
+        .fpu()
+        .ext(0x1F),
+    row("ftrapst", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .on(UP020)
+        .fpu()
+        .ext(0x1F),
+    row(
+        "ftrapst",
+        W,
+        WORD,
+        &[IMM],
+        0xF27A,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1F),
+    row(
+        "ftrapst",
+        L,
+        WORD,
+        &[IMM],
+        0xF27B,
+        Encoding::FpTrapImmediate,
+    )
+    .on(UP020)
+    .fpu()
+    .ext(0x1F),
     set("st", 0),
     set("sf", 1),
     set("shi", 2),

@@ -9,17 +9,31 @@ pub enum Size {
     Word,
     /// `.l`
     Long,
-    /// `.s`, the short branch form.
+    /// `.s`: the short form of a branch, or single precision on an FPU operand
+    /// or in data. The parser turns it into [`Size::Single`] where that applies.
     Short,
+    /// `.s` as single precision.
+    Single,
+    /// `.d`
+    Double,
+    /// `.x`
+    Extended,
+    /// `.p`
+    Packed,
+    /// `.q`
+    Quad,
 }
 
 impl Size {
-    /// Width of a data element in bytes. `.s` counts as a byte.
+    /// Width of a data element in bytes. `.s` counts as a byte until the parser
+    /// has decided that it means single precision.
     pub fn bytes(self) -> u32 {
         match self {
             Size::Byte | Size::Short => 1,
             Size::Word => 2,
-            Size::Long => 4,
+            Size::Long | Size::Single => 4,
+            Size::Double | Size::Quad => 8,
+            Size::Extended | Size::Packed => 12,
         }
     }
 
@@ -29,6 +43,10 @@ impl Size {
             "w" => Some(Size::Word),
             "l" => Some(Size::Long),
             "s" => Some(Size::Short),
+            "d" => Some(Size::Double),
+            "x" => Some(Size::Extended),
+            "p" => Some(Size::Packed),
+            "q" => Some(Size::Quad),
             _ => None,
         }
     }

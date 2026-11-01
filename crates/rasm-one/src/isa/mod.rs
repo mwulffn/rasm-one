@@ -4,6 +4,7 @@ pub(crate) mod encode;
 pub mod table;
 
 use crate::expr::Expr;
+use crate::float::FloatLiteral;
 use crate::source::Span;
 
 /// Index register of an indexed mode.
@@ -105,6 +106,22 @@ pub(crate) enum Mode {
     IndirectPair(u8, u8),
     ControlReg(u16),
     Cache(u8),
+    /// A floating-point literal, as an immediate.
+    Float(FloatLiteral),
+    FpReg(u8),
+    /// `fpc:fps`
+    FpPair(u8, u8),
+    /// A list of floating-point registers; bit 0 is FP0.
+    FpList(u8),
+    /// One of FPCR, FPSR and FPIAR, as its bit in a control register list.
+    FpControl(u16),
+    /// More than one of FPCR, FPSR and FPIAR.
+    FpControlList(u16),
+    /// `<ea>{#k}` or `<ea>{Dn}`, for `fmove.p`.
+    PackedStore {
+        ea: Box<Mode>,
+        factor: BitFieldArg,
+    },
     BitField {
         ea: Box<Mode>,
         offset: BitFieldArg,
@@ -141,6 +158,15 @@ impl Mode {
             Mode::IndirectPair(..) => EaSet::INDIRECT_PAIR,
             Mode::ControlReg(_) => EaSet::CONTROL_REG,
             Mode::Cache(_) => EaSet::CACHE,
+            Mode::Float(_) => EaSet::FLOAT,
+            Mode::FpReg(_) => EaSet::FP,
+            Mode::FpPair(..) => EaSet::FP_PAIR,
+            Mode::FpList(_) => EaSet::FP_LIST,
+            // Only FPIAR can move to and from an address register.
+            Mode::FpControl(0x0400) => EaSet::FP_IAR,
+            Mode::FpControl(_) => EaSet::FP_CONTROL,
+            Mode::FpControlList(_) => EaSet::FP_CONTROL_LIST,
+            Mode::PackedStore { ea, .. } => ea.class().packed_store(),
             Mode::BitField { ea, .. } => ea.class().bitfield(),
         }
     }
