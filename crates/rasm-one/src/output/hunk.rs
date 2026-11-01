@@ -35,6 +35,7 @@ const MEM_FAST: u32 = 0x8000_0000;
 
 /// Largest section offset the short relocation format can hold.
 const MAX_SHORT_OFFSET: u32 = 0xFFFF;
+const MAX_SHORT_HUNK: u32 = 0xFFFF;
 
 /// Name of the hunk used if only constants are exported.
 const DEFAULT_HUNK_NAME: &str = "CODE";
@@ -313,7 +314,7 @@ fn write_exe_relocs(
         let hunk = target_hunk(section, reloc, target, numbers)?;
         if reloc.size == 4 && reloc.kind == RelocKind::PcRelative {
             // This type has only the compact form, and Kickstart 1.x lacks it.
-            if options.kickstart1 || reloc.offset > MAX_SHORT_OFFSET {
+            if options.kickstart1 || reloc.offset > MAX_SHORT_OFFSET || hunk > MAX_SHORT_HUNK {
                 return Err(unsupported(section, reloc));
             }
             add_offset(&mut relative, hunk, reloc.offset);
@@ -322,7 +323,7 @@ fn write_exe_relocs(
         if reloc.size != 4 {
             return Err(unsupported(section, reloc));
         }
-        if reloc.offset <= MAX_SHORT_OFFSET && !options.kickstart1 {
+        if reloc.offset <= MAX_SHORT_OFFSET && hunk <= MAX_SHORT_HUNK && !options.kickstart1 {
             add_offset(&mut short, hunk, reloc.offset);
         } else {
             add_offset(&mut long, hunk, reloc.offset);

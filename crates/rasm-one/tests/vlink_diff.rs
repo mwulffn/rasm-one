@@ -340,6 +340,44 @@ fn test_link_result_runs_under_vamos() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn test_link_allows_offset_blocks() {
+    let inputs = inputs(
+        &[" offset\nx ds.w 1\n section c,code\n dc.w x", " nop"],
+        &Options::unoptimised("t.s"),
+    );
+    let linked = link(&inputs);
+    assert!(!linked.has_errors(), "{:?}", linked.diagnostics);
+}
+
+#[test]
+fn test_link_enforces_the_size_limit() {
+    let mut options = Options::unoptimised("t.s");
+    options.max_output_bytes = 1000;
+    let inputs = inputs(&[" ds.b 800", " ds.b 800"], &options);
+    assert!(!inputs[0].has_errors());
+    let linked = link(&inputs);
+    assert!(linked
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "limit-exceeded"));
+}
+
+#[test]
+fn test_link_first_definition_is_named_for_every_duplicate() {
+    let program = [" xdef a\na: nop", " xdef a\na: nop", " xdef a\na: nop"];
+    let linked = link(&inputs(&program, &Options::unoptimised("t.s")));
+    let duplicates: Vec<_> = linked
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "duplicate-symbol")
+        .collect();
+    assert_eq!(duplicates.len(), 2);
+    for duplicate in duplicates {
+        assert_eq!(duplicate.related[0].span.file, 0);
+    }
+}
+
+#[test]
 fn test_link_undefined_symbol_names_the_use() {
     let inputs = inputs(
         &[" nop", " xref gone\n jsr gone"],

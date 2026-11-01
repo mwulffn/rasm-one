@@ -1136,6 +1136,19 @@ fn test_assemble_one_operand_asl_keeps_its_register() {
     assert_eq!(bytes.ok(), Some(vec![0xD2, 0x41]));
 }
 
+/// An address in `movem` is memory unless it's in the list's place.
+#[test]
+fn test_assemble_movem_with_a_long_address_stays_movem() {
+    for (line, expected) in [
+        (" movem.l d0-d1,0.l", vec![0x48, 0xF9, 0, 3, 0, 0, 0, 0]),
+        (" movem.l 0.l,d0-d1", vec![0x4C, 0xF9, 0, 3, 0, 0, 0, 0]),
+        (" movem.l d0,$100.l", vec![0x48, 0xF9, 0, 1, 0, 0, 1, 0]),
+    ] {
+        let bytes = ours(line, "68000", Format::Bin, &ALL, false);
+        assert_eq!(bytes.ok(), Some(expected), "{line}");
+    }
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 

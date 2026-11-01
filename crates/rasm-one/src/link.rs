@@ -48,9 +48,19 @@ pub fn link(inputs: &[Assembly]) -> Assembly {
         .max()
         .unwrap_or(i64::MAX);
     let file_bases = merge_sources(inputs, &mut linked);
+    check_inputs(inputs, &file_bases, &mut linked);
+    if !fits_limit(inputs, linked.max_output_bytes) {
+        linked.diagnostics.push(general_error(
+            "limit-exceeded",
+            format!(
+                "linked output exceeds the limit of {} bytes",
+                linked.max_output_bytes
+            ),
+        ));
+        return linked;
+    }
     let expansion_bases = merge_expansions(inputs, &file_bases, &mut linked);
     let placements = place_sections(inputs, &mut linked);
-    check_inputs(inputs, &file_bases, &mut linked);
     let exports = collect_exports(inputs, &placements, &file_bases, &mut linked);
     merge_symbols(inputs, &placements, &file_bases, &mut linked);
     merge_lines(
@@ -62,6 +72,16 @@ pub fn link(inputs: &[Assembly]) -> Assembly {
     );
     apply_relocs(inputs, &placements, &file_bases, &exports, &mut linked);
     linked
+}
+
+/// Whether every section, padded to a longword, adds up to no more than the limit.
+fn fits_limit(inputs: &[Assembly], limit: i64) -> bool {
+    let sizes = inputs
+        .iter()
+        .flat_map(|input| &input.sections)
+        .filter(|section| !section.dummy)
+        .map(|section| (section.data.len() as i64).saturating_add(3));
+    sizes.fold(0i64, i64::saturating_add) <= limit.min(i64::from(u32::MAX))
 }
 
 fn moved(span: Span, base: u32) -> Span {
@@ -198,7 +218,7 @@ fn check_inputs(inputs: &[Assembly], file_bases: &[u32], linked: &mut Assembly) 
         let uses_org = input
             .sections
             .iter()
-            .any(|section| section.origin.is_some());
+            .any(|section| !section.dummy && section.origin.is_some());
         if uses_org {
             linked.diagnostics.push(general_error(
                 "link-org",
@@ -236,7 +256,11 @@ fn collect_exports(
                 value: symbol.value,
                 span,
             };
-            if let Some(earlier) = exports.insert(symbol.name.clone(), export) {
+            let earlier = exports.get(&symbol.name).copied();
+            if earlier.is_none() {
+                exports.insert(symbol.name.clone(), export);
+            }
+            if let Some(earlier) = earlier {
                 let mut error = Diagnostic::error(
                     "duplicate-symbol",
                     format!("{} is defined more than once", symbol.name),
@@ -269,7 +293,9 @@ fn merge_symbols(
             }
             linked.symbols.push(Symbol {
                 section: place.map(|place| place.section),
-                value: symbol.value + place.map_or(0, |place| i64::from(place.offset)),
+                value: symbol
+                    .value
+                    .saturating_add(place.map_or(0, |place| i64::from(place.offset))),
                 span: moved(symbol.span, file_bases[index]),
                 ..symbol.clone()
             });
@@ -373,7 +399,7 @@ fn resolve(
             let export = exports.get(name)?;
             Some(match export.place {
                 Some((section, offset)) => {
-                    Resolved::Place(section, export.value + i64::from(offset))
+                    Resolved::Place(section, export.value.saturating_add(i64::from(offset)))
                 }
                 None => Resolved::Constant(export.value),
             })
@@ -429,7 +455,7 @@ fn add_to_field(reloc: &Reloc, addition: i64, section: usize, linked: &mut Assem
     let bits = u32::from(reloc.size) * 8;
     let sign = 1i64 << (bits - 1);
     let current = (current ^ sign) - sign;
-    let result = current + addition;
+    let result = current.saturating_add(addition);
     let fits = match reloc.kind {
         // A signed number, or the same bits as an unsigned one.
         RelocKind::Absolute => (-sign..sign * 2).contains(&result),

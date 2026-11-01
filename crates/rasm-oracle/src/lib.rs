@@ -8,6 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 use thiserror::Error;
 
@@ -61,12 +62,16 @@ pub struct Output {
 #[derive(Debug, Clone)]
 pub struct Vasm {
     path: PathBuf,
+    binary_hash: OnceLock<u64>,
 }
 
 impl Vasm {
     /// Uses the binary at `path`.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            binary_hash: OnceLock::new(),
+        }
     }
 
     /// Reads `RASM_VASM`. Returns `Ok(None)` if unset, so tests can skip
@@ -152,6 +157,16 @@ impl Vasm {
         result
     }
 
+    /// A hash of the binary, which is read once.
+    fn binary_hash(&self) -> Result<u64, OracleError> {
+        if let Some(hash) = self.binary_hash.get() {
+            return Ok(*hash);
+        }
+        let mut hasher = DefaultHasher::new();
+        fs::read(&self.path)?.hash(&mut hasher);
+        Ok(*self.binary_hash.get_or_init(|| hasher.finish()))
+    }
+
     /// Like [`Vasm::assemble_with_args`], but keeps vasm's answer on disk, by a hash of the
     /// vasm binary and everything given to it, and reuses it next time. vasm has no other
     /// inputs, so the answer can't go stale. `RASM_VASM_CACHE` names the directory; without
@@ -167,7 +182,7 @@ impl Vasm {
             return self.assemble_with_args(source, cpu, format, args);
         };
         let mut hasher = DefaultHasher::new();
-        fs::read(&self.path)?.hash(&mut hasher);
+        self.binary_hash()?.hash(&mut hasher);
         (source, cpu, format.flag(), args).hash(&mut hasher);
         let entry = directory.join(format!("{:016x}", hasher.finish()));
         if let Some(output) = fs::read(&entry).ok().and_then(|data| decode_output(&data)) {
@@ -177,8 +192,9 @@ impl Vasm {
         fs::create_dir_all(&directory)?;
         // Written whole and then renamed, as other threads may want the same entry.
         let partial = directory.join(format!(
-            "{:016x}.{:?}.tmp",
+            "{:016x}.{}.{:?}.tmp",
             hasher.finish(),
+            std::process::id(),
             std::thread::current().id()
         ));
         fs::write(&partial, encode_output(&output))?;

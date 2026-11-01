@@ -1,0 +1,255 @@
+//! Tries every combination of mnemonic, size, value and operand with the optimiser on, one
+//! line at a time, and compares each with vasm. Hand-picked examples missed real bugs here.
+//!
+//! Set `RASM_VASM_CACHE` to keep vasm's answers, as this runs it for every line.
+
+use std::error::Error;
+use std::sync::Mutex;
+
+use rasm_one::{assemble, write_hunk_object, Cpu, MemoryProvider, Options};
+use rasm_oracle::{Format, Vasm};
+
+const CPUS: &[&str] = &["68000", "68010", "68020", "68060"];
+const SIZES: &[&str] = &["", ".b", ".w", ".l"];
+const VALUES: &[&str] = &[
+    "0",
+    "z",
+    "1",
+    "8",
+    "9",
+    "-1",
+    "-8",
+    "-9",
+    "127",
+    "128",
+    "254",
+    "255",
+    "$7fff",
+    "$8000",
+    "$ffff",
+    "$ffff8000",
+    "$ffff7fff",
+    "$10000",
+    "$7f0000",
+    "$ffffffff",
+    "f",
+];
+const DESTINATIONS: &[&str] = &[
+    "d3", "a3", "sp", "(a3)", "(a3)+", "-(a3)", "4(a3)", "0(a3)", "4", "4.l", "$10000", "f",
+];
+const LISTS: &[&str] = &[
+    "d0", "a1", "d0-d1", "a1/a2", "a0/a1", "#0", "#1", "#$200", "#$600", "$200", "0",
+];
+const MEMORY: &[&str] = &[
+    "(a0)", "(a1)", "(a0)+", "(a1)+", "-(a0)", "4(a1)", "0(a1)", "0", "0.l", "$100", "$100.l",
+    "0.w", "$200", "f", "f(pc)",
+];
+const ADDRESSES: &[&str] = &[
+    "0",
+    "0.w",
+    "0.l",
+    "4",
+    "4.l",
+    "$8000",
+    "f",
+    "f.l",
+    "(a0)",
+    "(a1)",
+    "0(a0)",
+    "0(a1)",
+    "4(a0)",
+    "-8(a0)",
+    "9(a0)",
+    "4(a1)",
+    "32767(a0)",
+    "32768(a1)",
+    "100000(a0)",
+    "100000(a1)",
+    "(f,pc)",
+    "(0,a0,d1.w)",
+];
+
+fn lines() -> Vec<String> {
+    let mut lines = Vec::new();
+    for mnemonic in [
+        "add", "adda", "addi", "sub", "suba", "subi", "cmp", "cmpa", "cmpi", "and", "andi", "or",
+        "ori", "eor", "eori", "move", "movea",
+    ] {
+        for size in SIZES {
+            for value in VALUES {
+                for destination in DESTINATIONS {
+                    lines.push(format!(" {mnemonic}{size} #{value},{destination}"));
+                }
+            }
+        }
+    }
+    for size in ["", ".w", ".l"] {
+        for list in LISTS {
+            for memory in MEMORY {
+                lines.push(format!(" movem{size} {list},{memory}"));
+                lines.push(format!(" movem{size} {memory},{list}"));
+            }
+        }
+    }
+    for address in ADDRESSES {
+        for register in ["a0", "a1", "sp"] {
+            lines.push(format!(" lea {address},{register}"));
+        }
+        lines.push(format!(" jmp {address}"));
+        lines.push(format!(" jsr {address}"));
+        lines.push(format!(" pea {address}"));
+    }
+    for mnemonic in ["clr", "tst", "not", "neg"] {
+        for size in SIZES {
+            for destination in DESTINATIONS {
+                lines.push(format!(" {mnemonic}{size} {destination}"));
+            }
+        }
+    }
+    for mnemonic in ["asl", "asr", "lsl", "lsr", "rol"] {
+        for size in SIZES {
+            for count in ["#1", "#2", "#8", "d1"] {
+                lines.push(format!(" {mnemonic}{size} {count},d3"));
+            }
+            lines.push(format!(" {mnemonic}{size} d3"));
+            lines.push(format!(" {mnemonic}{size} (a3)"));
+        }
+    }
+    for size in ["", ".w", ".l"] {
+        for value in [
+            "0", "z", "-4", "32767", "-32768", "-32769", "32768", "$10000",
+        ] {
+            lines.push(format!(" link{size} a6,#{value}"));
+        }
+    }
+    lines
+}
+
+/// What vasm gets wrong, or rasm-one refuses by choice.
+fn known_difference(line: &str, cpu: &str) -> bool {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let (Some(mnemonic), Some(operands)) = (words.first(), words.get(1)) else {
+        return false;
+    };
+    let base = mnemonic.split('.').next().unwrap_or(mnemonic);
+    let size = mnemonic.split('.').nth(1);
+    let single_register = operands.len() == 2 && operands.starts_with('d');
+    // vasm bug 17: `asl d1` becomes `add d1,d0`.
+    if base == "asl" && single_register && operands != &"d0" && cpu != "68060" {
+        return true;
+    }
+    // vasm bug 15: `eor.b #$ffff,d0` isn't an error with `og`.
+    let low_byte_set = ["#$ffff,", "#$7fff,", "#$ffff7fff,"];
+    let out_of_range = low_byte_set.iter().any(|value| operands.starts_with(value));
+    if matches!(base, "eor" | "eori") && size == Some("b") && out_of_range {
+        return true;
+    }
+    // rasm-one refuses `movea` to anything but an address register, by choice.
+    if base == "movea" && !to_address(operands) {
+        return true;
+    }
+    // Two bare addresses, either of which could be the list. Writing no registers does nothing
+    // either way, so it doesn't matter that vasm keeps the instruction.
+    if base == "movem" {
+        let bare = |text: &str| {
+            text.chars()
+                .next()
+                .is_some_and(|c| c == '$' || c.is_ascii_digit())
+        };
+        if operands.split(',').all(bare) {
+            return true;
+        }
+    }
+    // vasm bug 14: subtracting $8000 from an address register.
+    if matches!(base, "sub" | "suba") && operands.starts_with("#$8000,") && to_address(operands) {
+        return true;
+    }
+    false
+}
+
+fn to_address(operands: &str) -> bool {
+    operands.ends_with(",a3") || operands.ends_with(",sp")
+}
+
+fn ours(line: &str, cpu: &str) -> Result<Vec<u8>, rasm_one::OutputError> {
+    let mut files = MemoryProvider::new();
+    files.insert("t.s", format!("{line}\nf: nop\nz equ 0\n"));
+    let mut options = Options::new("t.s");
+    options.cpu = cpu
+        .parse()
+        .ok()
+        .and_then(Cpu::from_number)
+        .unwrap_or_default();
+    write_hunk_object(&assemble(&options, &files))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let start = bytes
+        .windows(4)
+        .position(|window| window == [0, 0, 3, 0xE9])
+        .map_or(0, |at| at + 8);
+    let end = (start + 16).min(bytes.len());
+    bytes[start..end]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[test]
+fn test_assemble_every_combination_matches_optimising_vasm() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let lines = lines();
+    let found = Mutex::new(Vec::new());
+    let threads = std::thread::available_parallelism().map_or(4, usize::from);
+    std::thread::scope(|scope| {
+        for chunk in lines.chunks(lines.len() / threads + 1) {
+            let (vasm, found) = (&vasm, &found);
+            scope.spawn(move || {
+                for line in chunk {
+                    for cpu in CPUS {
+                        if known_difference(line, cpu) {
+                            continue;
+                        }
+                        let source = format!("{line}\nf: nop\nz equ 0\n");
+                        let Ok(theirs) =
+                            vasm.assemble_cached(&source, cpu, Format::HunkObject, &["-opt-o+"])
+                        else {
+                            continue;
+                        };
+                        let mine = ours(line, cpu);
+                        let same = match &mine {
+                            Ok(bytes) => theirs.success && *bytes == theirs.bytes,
+                            Err(_) => !theirs.success,
+                        };
+                        if !same {
+                            let text = match &mine {
+                                Ok(bytes) => hex(bytes),
+                                Err(_) => "refused".to_string(),
+                            };
+                            let answer = if theirs.success {
+                                hex(&theirs.bytes)
+                            } else {
+                                "refused".to_string()
+                            };
+                            if let Ok(mut found) = found.lock() {
+                                found.push(format!("{cpu} {line}: vasm {answer} ours {text}"));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let mut found = found.into_inner().map_err(|_| "a thread panicked")?;
+    found.sort();
+    assert!(
+        found.is_empty(),
+        "{} differences in {} lines:\n{}",
+        found.len(),
+        lines.len(),
+        found.join("\n")
+    );
+    Ok(())
+}

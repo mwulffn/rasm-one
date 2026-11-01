@@ -143,6 +143,8 @@
 //! assert_eq!(write_bin(&assembly), Ok(vec![7]));
 //! ```
 
+#![warn(missing_docs)]
+
 mod atom;
 mod error;
 mod expr;
@@ -650,6 +652,45 @@ mod tests {
         let mut files = MemoryProvider::new();
         files.insert("t.s", source);
         assemble(&Options::unoptimised("t.s"), &files)
+    }
+
+    #[test]
+    fn test_assemble_export_of_import_is_error() {
+        let assembly = run(" xdef y\n xref z\ny equ z+4\n nop\n");
+        assert!(assembly
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "export-of-import"));
+    }
+
+    #[test]
+    fn test_assemble_size_shrinking_forever_stops() {
+        let assembly = run("a: ds.b 2000000000-n\nb:\nn equ 2000000000-(b-a)+1\n");
+        assert!(assembly
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "layout-not-settled"));
+    }
+
+    #[test]
+    fn test_assemble_huge_branch_target_does_not_panic() {
+        let mut files = MemoryProvider::new();
+        files.insert("t.s", " bra x\nx equ *+$7FFFFFFFFFFFFFFF\n");
+        let assembly = assemble(&Options::new("t.s"), &files);
+        let _ = write_hunk_exe(&assembly);
+    }
+
+    #[test]
+    fn test_write_hunk_exe_relocation_to_a_high_hunk_keeps_its_number() -> Result<(), OutputError> {
+        let mut source = String::from(" dc.l last\n");
+        for index in 0..70000 {
+            source += &format!(" section s{index},code\n nop\n");
+        }
+        source += "last: nop\n";
+        let bytes = write_hunk_exe(&run(&source))?;
+        let whole_number = 70000u32.to_be_bytes();
+        assert!(bytes.windows(4).any(|window| window == whole_number));
+        Ok(())
     }
 
     #[test]

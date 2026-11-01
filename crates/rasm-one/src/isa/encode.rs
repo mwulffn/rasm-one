@@ -85,7 +85,7 @@ pub(crate) enum QuickMoves {
 
 /// What `move.l #x,Dn` is written as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QuickMoveForm {
+pub(crate) enum QuickMoveForm {
     Moveq(i64),
     /// `moveq` of half the value, then `add.w Dn,Dn`.
     MoveqAdd(i64),
@@ -555,11 +555,13 @@ impl Instruction {
                 BranchForm::Long
             };
         }
-        let past_end = distance + 2 - self.form_bytes(current);
+        let past_end = distance
+            .saturating_add(2)
+            .saturating_sub(self.form_bytes(current));
         // Its own length no longer counts towards a target after it, if it shrinks.
         let shrink_to_short = (self.form_bytes(current) - 2).max(0);
         let short_distance = if past_end > 0 {
-            distance - shrink_to_short
+            distance.saturating_sub(shrink_to_short)
         } else {
             distance
         };
@@ -637,6 +639,15 @@ impl Instruction {
         }
     }
 
+    /// What this is written as instead, if anything, for its values now. This is the only
+    /// place that decides between the rewrites, and it's in vasm's order of preference.
+    fn resolve(&self, sizer: &Sizer) -> Option<Rewritten> {
+        self.quick_move_form(sizer)
+            .map(Rewritten::QuickMove)
+            .or_else(|| self.rewritten(sizer).map(Rewritten::One))
+            .or_else(|| self.generic_rewrite(sizer))
+    }
+
     /// This as another instruction, if its values now allow one.
     fn rewritten(&self, sizer: &Sizer) -> Option<Instruction> {
         let rewrites = self.rewrites?;
@@ -704,11 +715,10 @@ impl Instruction {
 
     /// Length in bytes, with symbols as they are known now.
     pub fn len(&self, sizer: &Sizer) -> i64 {
-        if let Some(rewritten) = self.rewritten(sizer) {
-            return rewritten.len(sizer);
-        }
-        match self.generic_rewrite(sizer) {
+        match self.resolve(sizer) {
             Some(Rewritten::Deleted) => return 0,
+            Some(Rewritten::QuickMove(QuickMoveForm::Moveq(_))) => return 2,
+            Some(Rewritten::QuickMove(_)) => return 4,
             Some(Rewritten::One(rewritten)) => return rewritten.len(sizer),
             Some(Rewritten::Two(first, second)) => {
                 let after = Sizer {
@@ -720,11 +730,6 @@ impl Instruction {
                 };
                 return first.len(sizer) + second.len(&after);
             }
-            None => {}
-        }
-        match self.quick_move_form(sizer) {
-            Some(QuickMoveForm::Moveq(_)) => return 2,
-            Some(_) => return 4,
             None => {}
         }
         if self.resizable_branch {
@@ -1016,11 +1021,24 @@ pub(crate) fn encode(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
 
 fn encode_fields(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     ctx.instruction_start = ctx.offset();
-    if let Some(rewritten) = insn.rewritten(&sizer_for(ctx)) {
-        return encode_fields(&rewritten, span, ctx);
-    }
-    match insn.generic_rewrite(&sizer_for(ctx)) {
+    match insn.resolve(&sizer_for(ctx)) {
         Some(Rewritten::Deleted) => return,
+        Some(Rewritten::QuickMove(form)) => {
+            let register = mode_reg(&insn.operands[1].mode).1;
+            let moveq = |data: i64| 0x7000 | register << 9 | (data & 0xFF) as u16;
+            match form {
+                QuickMoveForm::Moveq(data) => ctx.put_word(moveq(data)),
+                QuickMoveForm::MoveqAdd(data) => {
+                    ctx.put_word(moveq(data));
+                    ctx.put_word(0xD040 | register << 9 | register);
+                }
+                QuickMoveForm::MoveqSwap(data) => {
+                    ctx.put_word(moveq(data));
+                    ctx.put_word(0x4840 | register);
+                }
+            }
+            return;
+        }
         Some(Rewritten::One(rewritten)) => return encode_fields(&rewritten, span, ctx),
         Some(Rewritten::Two(first, second)) => {
             if insn.row.mnemonic == "lea" {
@@ -1044,22 +1062,6 @@ fn encode_fields(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     match insn.row.encoding {
         Encoding::Fixed => ctx.put_word(base),
         Encoding::Branch => encode_branch(insn, span, ctx),
-        Encoding::Move if insn.quick_move_form(&sizer_for(ctx)).is_some() => {
-            let register = reg(1);
-            let moveq = |data: i64| 0x7000 | register << 9 | (data & 0xFF) as u16;
-            match insn.quick_move_form(&sizer_for(ctx)) {
-                Some(QuickMoveForm::Moveq(data)) => ctx.put_word(moveq(data)),
-                Some(QuickMoveForm::MoveqAdd(data)) => {
-                    ctx.put_word(moveq(data));
-                    ctx.put_word(0xD040 | register << 9 | register);
-                }
-                Some(QuickMoveForm::MoveqSwap(data)) => {
-                    ctx.put_word(moveq(data));
-                    ctx.put_word(0x4840 | register);
-                }
-                None => {}
-            }
-        }
         Encoding::Move => {
             let size_code: u16 = match size {
                 Size::Byte | Size::Short => 1,

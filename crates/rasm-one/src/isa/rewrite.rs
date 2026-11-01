@@ -2,8 +2,8 @@
 //! depend on the values of its operands.
 
 use crate::expr::{eval, Expr, Value};
-use crate::isa::encode::{Instruction, Sizer};
-use crate::isa::table::{rows_for, InsnRow};
+use crate::isa::encode::{Instruction, QuickMoveForm, Sizer};
+use crate::isa::table::{rows_for, Encoding, InsnRow};
 use crate::isa::{Mode, Operand};
 use crate::types::{Cpu, Size};
 
@@ -13,6 +13,8 @@ pub(crate) enum Rewritten {
     Deleted,
     One(Instruction),
     Two(Instruction, Instruction),
+    /// A `move.l #x,Dn` as `moveq`, maybe with a second instruction.
+    QuickMove(QuickMoveForm),
 }
 
 /// What an operand's value is known to be.
@@ -153,16 +155,20 @@ impl Instruction {
                 let zero = operand(Mode::Immediate(Expr::Num(0)), register);
                 one(self.as_other("moveq", Size::Long, vec![zero, register.clone()]))
             }
-            [register, value] if mnemonic == "link" && size == Size::Long => {
+            [register, value] if mnemonic == "link" => {
                 let Mode::Immediate(expr) = &value.mode else {
                     return None;
                 };
-                match self.known(expr, sizer)? {
-                    Known::Number(number) if (-0x8000..=0x7FFF).contains(&number) => one(
-                        self.as_other("link", Size::Word, vec![register.clone(), value.clone()])
-                    ),
-                    _ => None,
-                }
+                let Known::Number(number) = self.known(expr, sizer)? else {
+                    return None;
+                };
+                let fits = (-0x8000..=0x7FFF).contains(&number);
+                let other = match size {
+                    Size::Long if fits => Size::Word,
+                    Size::Word if !fits => Size::Long,
+                    _ => return None,
+                };
+                one(self.as_other("link", other, vec![register.clone(), value.clone()]))
             }
             [source, target] if mnemonic == "lea" => self.rewrite_lea(source, target, sizer),
             _ => None,
@@ -184,29 +190,44 @@ impl Instruction {
             },
             _ => None,
         };
-        if mask(first) == Some(0) || mask(second) == Some(0) {
+        // The row says which way this goes, and so which operand is the list. The other one
+        // is memory, even if it's just an address.
+        let loading = self.row.encoding == Encoding::MovemLoad;
+        let list = if loading { second } else { first };
+        if mask(list) == Some(0) {
             return Some(Rewritten::Deleted);
         }
-        // Two address registers from `(Ax)+`, unless it's one of them.
-        if let (Mode::PostInc(from), Some(list)) = (&first.mode, mask(second)) {
-            let source = u32::from(*from) + 8;
-            if list.count_ones() == 2 && list & 0xFF == 0 && list & (1 << source) == 0 {
-                let low = list.trailing_zeros() as u8 - 8;
-                let high = 63 - list.leading_zeros() as u8 - 8;
-                let target = |n: u8| Operand {
-                    mode: Mode::AddrReg(n),
-                    span: second.span,
-                };
-                let load = |n: u8| self.as_other("move", size, vec![first.clone(), target(n)]);
-                return Some(Rewritten::Two(load(low)?, load(high)?));
-            }
+        if !loading {
+            return None;
         }
-        let single_address = match second.mode {
-            Mode::AddrReg(n) => Some(n),
-            _ => mask(second)
-                .filter(|mask| mask.count_ones() == 1 && (0x100..=0x8000).contains(mask))
-                .map(|mask| mask.trailing_zeros() as u8 - 8),
-        }?;
+        let bits = match second.mode {
+            Mode::DataReg(n) => 1 << n,
+            Mode::AddrReg(n) => 1 << (n + 8),
+            _ => mask(second)?,
+        };
+        // A register that `(Ax)+` also changes has to stay in `movem`.
+        let source = match first.mode {
+            Mode::PostInc(from) => Some(1i64 << (u32::from(from) + 8)),
+            _ => None,
+        };
+        if source.is_some_and(|source| bits & source != 0) {
+            return None;
+        }
+        // Two address registers from `(Ax)+`.
+        if source.is_some() && bits.count_ones() == 2 && bits & 0xFF == 0 {
+            let low = bits.trailing_zeros() as u8 - 8;
+            let high = 63 - bits.leading_zeros() as u8 - 8;
+            let target = |n: u8| Operand {
+                mode: Mode::AddrReg(n),
+                span: second.span,
+            };
+            let load = |n: u8| self.as_other("move", size, vec![first.clone(), target(n)]);
+            return Some(Rewritten::Two(load(low)?, load(high)?));
+        }
+        if bits.count_ones() != 1 || !(0x100..=0x8000).contains(&bits) {
+            return None;
+        }
+        let single_address = bits.trailing_zeros() as u8 - 8;
         let target = Operand {
             mode: Mode::AddrReg(single_address),
             span: second.span,
@@ -225,12 +246,13 @@ impl Instruction {
         };
         match &source.mode {
             Mode::Indirect(from) if *from == to => Some(Rewritten::Deleted),
-            Mode::AbsLong(expr) | Mode::AbsWord(expr) | Mode::AbsShortable(expr) => {
-                match self.known(expr, sizer)? {
-                    Known::Number(0) => clear(),
-                    _ => None,
-                }
-            }
+            Mode::AbsLong(expr)
+            | Mode::AbsWord(expr)
+            | Mode::AbsShortable(expr)
+            | Mode::AbsOrPc(expr) => match self.known(expr, sizer)? {
+                Known::Number(0) => clear(),
+                _ => None,
+            },
             Mode::Disp(expr, from) | Mode::DispWord(expr, from) => {
                 let Known::Number(number) = self.known(expr, sizer)? else {
                     return None;

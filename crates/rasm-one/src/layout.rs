@@ -21,6 +21,9 @@ const MAX_STALLED_PASSES: usize = 1000;
 /// they settle. Shrinking can take a pass per branch, so this doesn't count passes that help.
 const SHRINKING_STALLED_PASSES: usize = 200;
 
+/// The most passes of all, because a size can shrink a little on every pass.
+const MAX_PASSES: usize = 5000;
+
 /// Largest permitted `ds`/`blk` size in bytes.
 const MAX_SPACE: i64 = 0x7FFF_FFFF;
 
@@ -78,7 +81,7 @@ pub(crate) fn build(program: Program) -> Built {
     let mut smallest = i64::MAX;
     let mut stalled = 0;
     let mut pass = 0;
-    while stalled < MAX_STALLED_PASSES {
+    while stalled < MAX_STALLED_PASSES && pass < MAX_PASSES {
         let before = values.clone();
         let form_changed = Cell::new(false);
         let total = layout_pass(
@@ -115,6 +118,26 @@ pub(crate) fn build(program: Program) -> Built {
             span: None,
             related: Vec::new(),
         });
+    }
+
+    for (entry, value) in program.symbols.iter().zip(&values) {
+        let imported = matches!(
+            value.get(),
+            Some(Value {
+                base: Base::External(_),
+                ..
+            })
+        );
+        if let (Some(span), true, false) = (entry.exported_at, imported, entry.external) {
+            diagnostics.push(Diagnostic::error(
+                "export-of-import",
+                format!(
+                    "{} is exported, but its value depends on an imported symbol",
+                    entry.name
+                ),
+                span,
+            ));
+        }
     }
 
     // Checked after layout, so nothing has been allocated for an oversized result.
@@ -321,7 +344,7 @@ fn layout_pass(
                             || choice.label_sections[id as usize] == Some(section);
                         Some(if stale && moves {
                             Value {
-                                offset: value.offset + shift,
+                                offset: value.offset.saturating_add(shift),
                                 ..value
                             }
                         } else {

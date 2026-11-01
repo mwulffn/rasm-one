@@ -33,7 +33,7 @@ jobs:
         if: github.event_name != 'schedule'
         with:
           path: ~/vasm-cache.tar
-          key: vasm-answers-${{ hashFiles('scripts/fetch-vasm.sh', 'crates/rasm-one/tests/sweep_cpus.rs') }}
+          key: vasm-answers-${{ hashFiles('scripts/fetch-vasm.sh', 'crates/rasm-one/tests/sweep_cpus.rs', 'crates/rasm-one/tests/vasm_opt_sweep.rs') }}
           restore-keys: vasm-answers-
       - if: github.event_name != 'schedule'
         run: |
