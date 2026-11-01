@@ -11,8 +11,8 @@ use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
 use crate::float::FloatLiteral;
 use crate::isa::encode::{BranchForm, Instruction};
 use crate::isa::table::{
-    rows_for, Coprocessor, Encoding, InsnRow, MmuRegisterHome, CONTROL_REGISTERS, CPU_020_UP,
-    MMU_REGISTERS,
+    rows_for, Coprocessor, EaSet, Encoding, InsnRow, MmuRegisterHome, CONTROL_REGISTERS,
+    CPU_020_UP, MMU_REGISTERS,
 };
 use crate::isa::{
     BitFieldArg, FullBase, FullDisp, FullMode, IndexReg, Indirection, Mode, Operand, Width,
@@ -21,7 +21,8 @@ use crate::lexer::{LexError, Lexer, Punct, Tok};
 use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
 use crate::{
-    Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_BRANCHES, RULE_DISPLACEMENTS,
+    Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_BRANCHES,
+    RULE_DISPLACEMENTS,
 };
 
 /// A symbol being collected.
@@ -595,6 +596,9 @@ pub(crate) struct Parser<'f> {
     mmu_68851: bool,
     optimisations: Optimisations,
     fixed_addresses: bool,
+    /// The section used if the source doesn't name one, unless it later does. vasm
+    /// treats only that as being at a final address in a raw binary.
+    implicit_section: Option<usize>,
     provider: &'f dyn FileProvider,
     /// Directories to search for files, from options and `incdir`.
     include_dirs: Vec<String>,
@@ -645,6 +649,7 @@ impl<'f> Parser<'f> {
             mmu_68851: options.mmu_68851,
             optimisations: options.optimisations,
             fixed_addresses: options.fixed_addresses,
+            implicit_section: None,
             provider,
             include_dirs: options.include_dirs.clone(),
             file_stack: Vec::new(),
@@ -1209,6 +1214,7 @@ impl<'f> Parser<'f> {
         }
         let key = (DEFAULT_SECTION.to_string(), SectionKind::Code);
         let section = self.add_section(DEFAULT_SECTION, SectionKind::Code, MemKind::Any, None);
+        self.implicit_section = Some(section);
         self.sections_by_key.insert(key, section);
         self.current = Some(section);
         section
@@ -1262,6 +1268,9 @@ impl<'f> Parser<'f> {
                 section
             }
         };
+        if self.implicit_section == Some(section) {
+            self.implicit_section = None;
+        }
         self.current = Some(section);
         Ok(())
     }
@@ -2720,17 +2729,28 @@ impl LineParser<'_, '_, '_> {
                 span,
             ));
         }
+        // What can't be a word, such as a branch target, isn't shortable after all.
+        let mut operands = operands;
+        for (operand, allowed) in operands.iter_mut().zip(row.operands) {
+            if let Mode::AbsShortable(expr) = &operand.mode {
+                if !allowed.intersects(EaSet::ABS_W) {
+                    operand.mode = Mode::AbsLong(expr.clone());
+                }
+            }
+        }
         Ok(Instruction {
             row,
             resizable_branch: size.is_none()
                 && matches!(row.encoding, Encoding::Branch | Encoding::FpBranch)
                 && self.parser.optimisations.rule(RULE_BRANCHES),
             drops_zero_displacement: self.parser.optimisations.rule(RULE_DISPLACEMENTS),
+            shortens_absolutes: self.parser.optimisations.rule(RULE_ABSOLUTES),
             branch_form: Cell::new(BranchForm::Word),
             size: size.or(row.default_size),
             operands,
             wide,
-            fixed_addresses: self.parser.fixed_addresses,
+            fixed_addresses: self.parser.fixed_addresses
+                && self.parser.current == self.parser.implicit_section,
             mmu_68851: self.parser.mmu_68851,
         })
     }
@@ -2805,6 +2825,7 @@ impl LineParser<'_, '_, '_> {
         }
         match self.parse_size_suffix()? {
             Some(Size::Word) => Ok(Mode::AbsWord(expr)),
+            None if self.parser.optimisations.rule(RULE_ABSOLUTES) => Ok(Mode::AbsShortable(expr)),
             Some(Size::Long) | None => Ok(Mode::AbsLong(expr)),
             Some(_) => Err(self.error_at(
                 "bad-size",

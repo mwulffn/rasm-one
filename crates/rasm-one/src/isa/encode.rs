@@ -34,6 +34,8 @@ pub(crate) struct Instruction {
     pub resizable_branch: bool,
     /// True if a displacement of zero from an address register can be left out.
     pub drops_zero_displacement: bool,
+    /// True if any operand may be [`Mode::AbsShortable`].
+    pub shortens_absolutes: bool,
     /// The form of a resizable branch, which layout chooses.
     pub branch_form: Cell<BranchForm>,
 }
@@ -159,6 +161,8 @@ impl FullPlan {
 enum ExtensionPlan {
     /// `0(An)` written as `(An)`.
     NoDisplacement,
+    /// An address that fits a word, written as one.
+    ShortAbsolute,
     /// The brief forms and everything else of a fixed size.
     Fixed(i64),
     Full(FullPlan),
@@ -168,6 +172,7 @@ impl ExtensionPlan {
     fn bytes(self) -> i64 {
         match self {
             ExtensionPlan::NoDisplacement => 0,
+            ExtensionPlan::ShortAbsolute => 2,
             ExtensionPlan::Fixed(bytes) => bytes,
             ExtensionPlan::Full(plan) => plan.bytes(),
         }
@@ -269,6 +274,13 @@ fn plan_extension(
         | Mode::PcDispWord(_)
         | Mode::PcIndex(..) => ExtensionPlan::Fixed(2),
         Mode::AbsLong(_) => ExtensionPlan::Fixed(4),
+        Mode::AbsShortable(expr) => {
+            let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup);
+            match value.map(|value| plain_disp_kind(value, fixed)) {
+                Ok(DispKind::Number(number)) if fits_word(number) => ExtensionPlan::ShortAbsolute,
+                _ => ExtensionPlan::Fixed(4),
+            }
+        }
         Mode::Immediate(_) | Mode::Float(_) => ExtensionPlan::Fixed(i64::from(size.bytes().max(2))),
         Mode::PackedStore { ea, .. } => plan_extension(ea, size, pc, insn, sizer),
         _ => ExtensionPlan::Fixed(0),
@@ -1293,7 +1305,7 @@ fn mode_reg(mode: &Mode) -> (u16, u16) {
         Mode::Disp(_, r) => (5, u16::from(*r)),
         Mode::Index(_, r, _) => (6, u16::from(*r)),
         Mode::AbsWord(_) => (7, 0),
-        Mode::AbsLong(_) => (7, 1),
+        Mode::AbsLong(_) | Mode::AbsShortable(_) => (7, 1),
         Mode::PcDisp(_) => (7, 2),
         Mode::PcIndex(..) => (7, 3),
         Mode::Immediate(_) => (7, 4),
@@ -1376,7 +1388,7 @@ fn emit_extension(op: &Operand, size: Size, insn: &Instruction, ctx: &mut EmitCo
         Mode::AbsWord(expr) => {
             emit_short_field(expr, "absolute short address out of range", op.span, ctx);
         }
-        Mode::AbsLong(expr) => match ctx.evaluate(expr, pc, op.span) {
+        Mode::AbsLong(expr) | Mode::AbsShortable(expr) => match ctx.evaluate(expr, pc, op.span) {
             Some(value) => {
                 if !fits_long(value.offset) {
                     ctx.error("out-of-range", "address doesn't fit in 32 bits", op.span);
@@ -1455,13 +1467,23 @@ fn resolve_growth(mode: &Mode, plan: ExtensionPlan) -> Option<Mode> {
     };
     match (mode, plan) {
         (Mode::Disp(_, r), ExtensionPlan::NoDisplacement) => return Some(Mode::Indirect(*r)),
-        (Mode::PackedStore { ea, factor }, ExtensionPlan::NoDisplacement) => {
+        (Mode::AbsShortable(expr), ExtensionPlan::ShortAbsolute) => {
+            return Some(Mode::AbsWord(expr.clone()));
+        }
+        (Mode::AbsShortable(expr), _) => return Some(Mode::AbsLong(expr.clone())),
+        (
+            Mode::PackedStore { ea, factor },
+            ExtensionPlan::NoDisplacement | ExtensionPlan::ShortAbsolute | ExtensionPlan::Fixed(_),
+        ) => {
             return resolve_growth(ea, plan).map(|ea| Mode::PackedStore {
                 ea: Box::new(ea),
                 factor: factor.clone(),
             });
         }
-        (Mode::BitField { ea, offset, width }, ExtensionPlan::NoDisplacement) => {
+        (
+            Mode::BitField { ea, offset, width },
+            ExtensionPlan::NoDisplacement | ExtensionPlan::ShortAbsolute | ExtensionPlan::Fixed(_),
+        ) => {
             return resolve_growth(ea, plan).map(|ea| Mode::BitField {
                 ea: Box::new(ea),
                 offset: offset.clone(),
@@ -1500,7 +1522,7 @@ fn resolve_growth(mode: &Mode, plan: ExtensionPlan) -> Option<Mode> {
 
 /// A copy of the instruction with any grown modes resolved, if there are any.
 fn with_growth_resolved(insn: &Instruction, sizer: &Sizer) -> Option<Instruction> {
-    if !insn.wide && !insn.drops_zero_displacement {
+    if !insn.wide && !insn.drops_zero_displacement && !insn.shortens_absolutes {
         return None;
     }
     let size = insn.size.unwrap_or(Size::Word);
