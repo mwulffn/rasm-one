@@ -36,6 +36,8 @@ pub struct Options {
     pub main: String,
     /// Target CPU.
     pub cpu: Cpu,
+    /// Directories to search for `include` and `incbin` files.
+    pub include_dirs: Vec<String>,
 }
 
 impl Options {
@@ -44,6 +46,7 @@ impl Options {
         Self {
             main: main.into(),
             cpu: Cpu::default(),
+            include_dirs: Vec::new(),
         }
     }
 }
@@ -100,6 +103,33 @@ pub struct Symbol {
     pub span: Span,
 }
 
+/// What caused an [`Expansion`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpansionKind {
+    /// An `include` directive.
+    Include,
+}
+
+impl ExpansionKind {
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            ExpansionKind::Include => "included from here",
+        }
+    }
+}
+
+/// A place where source was brought in from elsewhere. Following `parent`
+/// leads out to the main source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Expansion {
+    /// What caused it.
+    pub kind: ExpansionKind,
+    /// The line that caused it.
+    pub site: Span,
+    /// The expansion containing that line, if any.
+    pub parent: Option<u32>,
+}
+
 /// Maps a contiguous run of emitted bytes to the source that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineEntry {
@@ -111,7 +141,7 @@ pub struct LineEntry {
     pub len: u32,
     /// Source position.
     pub span: Span,
-    /// Macro or include expansion the code came from. Reserved for macros.
+    /// Index into [`Assembly::expansions`] of what brought this code in.
     pub expansion: Option<u32>,
 }
 
@@ -126,6 +156,8 @@ pub struct Assembly {
     pub symbols: Vec<Symbol>,
     /// Address-to-source map, sorted by section and offset.
     pub line_table: Vec<LineEntry>,
+    /// Includes and macro expansions that [`LineEntry::expansion`] refers to.
+    pub expansions: Vec<Expansion>,
     /// Errors and warnings.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -179,29 +211,26 @@ impl Assembly {
 /// Assembles `options.main`. Failures are reported through
 /// [`Assembly::diagnostics`], never by panicking.
 pub fn assemble(options: &Options, provider: &dyn FileProvider) -> Assembly {
-    let source = match provider.read(&options.main, None) {
-        Ok(source) => source,
-        Err(error) => {
-            return Assembly {
-                diagnostics: vec![Diagnostic {
-                    severity: Severity::Error,
-                    code: "file-read",
-                    message: error.to_string(),
-                    span: None,
-                    related: Vec::new(),
-                }],
-                ..Assembly::default()
-            };
-        }
-    };
-    let mut parser = parser::Parser::new(options.cpu);
-    parser.parse_file(0, &source);
+    let mut parser = parser::Parser::new(options.cpu, provider, &options.include_dirs);
+    if let Err(error) = parser.parse_main(&options.main) {
+        return Assembly {
+            diagnostics: vec![Diagnostic {
+                severity: Severity::Error,
+                code: "file-read",
+                message: error.to_string(),
+                span: None,
+                related: Vec::new(),
+            }],
+            ..Assembly::default()
+        };
+    }
     let built = layout::build(parser.finish());
     Assembly {
-        files: vec![options.main.clone()],
+        files: built.files,
         sections: built.sections,
         symbols: built.symbols,
         line_table: built.line_table,
+        expansions: built.expansions,
         diagnostics: built.diagnostics,
     }
 }
@@ -356,6 +385,82 @@ mod tests {
         let assembly = run(" fail \"oops\"\n");
         assert_eq!(assembly.diagnostics[0].code, "fail");
         assert!(assembly.diagnostics[0].message.contains("oops"));
+    }
+
+    fn run_with(files: &[(&str, &str)]) -> Assembly {
+        let mut provider = MemoryProvider::new();
+        for (path, contents) in files {
+            provider.insert(*path, *contents);
+        }
+        assemble(&Options::new("t.s"), &provider)
+    }
+
+    #[test]
+    fn test_include_error_reports_file_and_include_chain() {
+        let assembly = run_with(&[
+            ("t.s", " nop\n include \"a.i\"\n"),
+            ("a.i", " include \"b.i\"\n"),
+            ("b.i", "\n bogus\n"),
+        ]);
+        let diagnostic = &assembly.diagnostics[0];
+        let span = diagnostic.span.map(|s| (s.file, s.line));
+        assert_eq!(span, Some((2, 2)));
+        assert_eq!(assembly.files[2], "b.i");
+        let chain: Vec<_> = diagnostic
+            .related
+            .iter()
+            .map(|r| (r.span.file, r.span.line))
+            .collect();
+        assert_eq!(chain, [(1, 1), (0, 2)]);
+    }
+
+    #[test]
+    fn test_include_emit_error_has_include_chain() {
+        let assembly = run_with(&[("t.s", " include \"a.i\"\n"), ("a.i", " dc.l nope\n")]);
+        assert_eq!(assembly.diagnostics[0].code, "undefined-symbol");
+        assert_eq!(assembly.diagnostics[0].related[0].span.line, 1);
+    }
+
+    #[test]
+    fn test_include_cycle_is_error() {
+        let assembly = run_with(&[("t.s", " include \"a.i\"\n"), ("a.i", " include \"t.s\"\n")]);
+        assert_eq!(assembly.diagnostics[0].code, "include-cycle");
+    }
+
+    #[test]
+    fn test_include_missing_file_is_located_at_directive() {
+        let assembly = run_with(&[("t.s", " nop\n include \"nope.i\"\n rts\n")]);
+        assert_eq!(assembly.diagnostics[0].code, "file-read");
+        assert_eq!(assembly.diagnostics[0].span.map(|s| s.line), Some(2));
+        assert_eq!(assembly.sections[0].data.len(), 4);
+    }
+
+    #[test]
+    fn test_line_table_maps_included_code_to_its_file_and_expansion() {
+        let assembly = run_with(&[("t.s", " include \"a.i\"\n rts\n"), ("a.i", " nop\n")]);
+        let included = assembly.line_for_address(0, 0);
+        assert_eq!(included.map(|e| (e.span.file, e.span.line)), Some((1, 1)));
+        let expansion = included.and_then(|e| e.expansion);
+        assert_eq!(expansion, Some(0));
+        assert_eq!(assembly.expansions[0].site.line, 1);
+        let main = assembly.line_for_address(0, 2);
+        assert_eq!(main.and_then(|e| e.expansion), None);
+    }
+
+    /// A provider failure other than a missing file must not be hidden.
+    #[test]
+    fn test_include_provider_failure_is_reported() {
+        struct Failing;
+        impl FileProvider for Failing {
+            fn read(&self, path: &str, from: Option<&str>) -> Result<Vec<u8>, FileError> {
+                match (path, from) {
+                    ("t.s", None) => Ok(b" include \"a.i\"\n".to_vec()),
+                    _ => Err(FileError::Other("disk on fire".to_string())),
+                }
+            }
+        }
+        let assembly = assemble(&Options::new("t.s"), &Failing);
+        assert!(assembly.diagnostics[0].message.contains("disk on fire"));
     }
 
     #[test]

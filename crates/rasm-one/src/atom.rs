@@ -47,4 +47,6 @@ pub(crate) struct Atom {
     pub span: Span,
     /// Index of the section it belongs to.
     pub section: usize,
+    /// The include or macro expansion it came from, if any.
+    pub expansion: Option<u32>,
 }

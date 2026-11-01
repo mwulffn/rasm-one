@@ -5,7 +5,7 @@ use std::fs;
 use anyhow::{bail, Context, Result};
 use rasm_one::{assemble, write_bin, write_hunk_exe, FileError, FileProvider, Options, Severity};
 
-const USAGE: &str = "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fbin]";
+const USAGE: &str = "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fbin] [-I<dir>]...";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -29,11 +29,13 @@ struct Args {
     source: String,
     output: String,
     format: Format,
+    include_dirs: Vec<String>,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut source, mut output) = (None, None);
     let mut format = Format::HunkExe;
+    let mut include_dirs = Vec::new();
     let mut args = args;
     while let Some(arg) = args.next() {
         if arg == "-o" {
@@ -42,6 +44,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             format = Format::HunkExe;
         } else if arg == "-Fbin" {
             format = Format::Bin;
+        } else if let Some(directory) = arg.strip_prefix("-I") {
+            include_dirs.push(directory.to_string());
         } else if arg.starts_with('-') {
             bail!("unknown option {arg}\n{USAGE}");
         } else if source.replace(arg).is_some() {
@@ -53,6 +57,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             source,
             output,
             format,
+            include_dirs,
         }),
         _ => bail!("{USAGE}"),
     }
@@ -60,7 +65,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
 
 fn main() -> Result<()> {
     let args = parse_args(std::env::args().skip(1))?;
-    let assembly = assemble(&Options::new(args.source), &NativeProvider);
+    let mut options = Options::new(args.source);
+    options.include_dirs = args.include_dirs;
+    let assembly = assemble(&options, &NativeProvider);
     for diagnostic in &assembly.diagnostics {
         eprintln!("{}", assembly.render_diagnostic(diagnostic));
     }
@@ -102,6 +109,13 @@ mod tests {
     fn test_parse_args_format_defaults_to_hunk_exe() -> Result<()> {
         assert_eq!(parse(&["a.s", "-o", "x"])?.format, Format::HunkExe);
         assert_eq!(parse(&["a.s", "-o", "x", "-Fbin"])?.format, Format::Bin);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_args_include_dirs_in_order() -> Result<()> {
+        let args = parse(&["a.s", "-o", "x", "-Ione", "-Itwo"])?;
+        assert_eq!(args.include_dirs, ["one", "two"]);
         Ok(())
     }
 

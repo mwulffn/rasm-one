@@ -6,9 +6,9 @@ use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::Diagnostic;
 use crate::expr::{eval, Value};
 use crate::isa::encode::{encode, EmitContext};
-use crate::parser::{Program, SectionEntry};
+use crate::parser::{add_expansion_chain, Program, SectionEntry};
 use crate::types::{SectionKind, Size};
-use crate::{LineEntry, Reloc, Section, Symbol};
+use crate::{Expansion, LineEntry, Reloc, Section, Symbol};
 
 /// Forward references in `ds` counts settle quickly; this bound only catches
 /// sources that can never settle.
@@ -28,6 +28,8 @@ pub(crate) struct Built {
     pub symbols: Vec<Symbol>,
     pub line_table: Vec<LineEntry>,
     pub diagnostics: Vec<Diagnostic>,
+    pub files: Vec<String>,
+    pub expansions: Vec<Expansion>,
 }
 
 /// Lays out a parsed program and generates its bytes.
@@ -62,6 +64,7 @@ pub(crate) fn build(program: Program) -> Built {
         let index = atom.section;
         let entry = &program.sections[index];
         let start = datas[index].len() as u32;
+        let first_new = diagnostics.len();
         let mut ctx = EmitContext {
             section: index,
             kind: entry.kind,
@@ -75,6 +78,11 @@ pub(crate) fn build(program: Program) -> Built {
             diagnostics: &mut diagnostics,
         };
         emit_atom(atom, &values, &mut ctx);
+        add_expansion_chain(
+            &mut diagnostics[first_new..],
+            atom.expansion,
+            &program.expansions,
+        );
         let len = datas[index].len() as u32 - start;
         if len > 0 {
             line_table.push(LineEntry {
@@ -82,7 +90,7 @@ pub(crate) fn build(program: Program) -> Built {
                 offset: start,
                 len,
                 span: atom.span,
-                expansion: None,
+                expansion: atom.expansion,
             });
         }
     }
@@ -124,6 +132,8 @@ pub(crate) fn build(program: Program) -> Built {
         symbols,
         line_table,
         diagnostics,
+        files: program.files,
+        expansions: program.expansions,
     }
 }
 

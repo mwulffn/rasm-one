@@ -90,6 +90,19 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Reads an unquoted word, which ends at a blank, `;` or the end of the line.
+    pub fn word(&mut self) -> &'a [u8] {
+        let start = self.pos;
+        while self
+            .src
+            .get(self.pos)
+            .is_some_and(|c| !matches!(c, b' ' | b'\t' | b';'))
+        {
+            self.pos += 1;
+        }
+        &self.src[start..self.pos]
+    }
+
     /// Everything left on the line.
     pub fn rest(&self) -> &'a [u8] {
         self.src.get(self.pos..).unwrap_or(&[])
