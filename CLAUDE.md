@@ -12,7 +12,7 @@
 
 ## Rust Edition and Toolchain
 - Edition: 2021 (always specify in Cargo.toml)
-- MSRV: 1.75.0 (stable, pinned in rust-toolchain.toml)
+- Toolchain: a recent stable, pinned exactly in rust-toolchain.toml and matched by `rust-version` in Cargo.toml. Update both together, deliberately
 - Do NOT use nightly features
 
 ## Error Handling

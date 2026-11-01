@@ -13,4 +13,4 @@ path = "src/main.rs"
 
 [dependencies]
 rasm-one = { path = "../rasm-one" }
-anyhow = "=1.0.86"
+anyhow = "=1.0.104"

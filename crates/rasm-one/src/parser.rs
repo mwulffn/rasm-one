@@ -1942,7 +1942,7 @@ impl LineParser<'_, '_, '_> {
                     .all(|(set, op)| set.intersects(op.mode.class()))
                 && row
                     .default_size
-                    .map_or(true, |default| row.sizes.contains(&size.unwrap_or(default)))
+                    .is_none_or(|default| row.sizes.contains(&size.unwrap_or(default)))
         };
         let mut matching = rows.iter().filter(|row| fits(row)).peekable();
         if matching.peek().is_none() {

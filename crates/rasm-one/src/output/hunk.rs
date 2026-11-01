@@ -44,7 +44,7 @@ struct Hunks<'a> {
 /// Sections become hunks in order of first appearance, leaving out those with
 /// neither bytes nor symbols. Any symbol counts, even a local label that won't
 /// be listed.
-fn select_hunks(assembly: &Assembly) -> Hunks {
+fn select_hunks(assembly: &Assembly) -> Hunks<'_> {
     let has_symbol = |index: usize| assembly.symbols.iter().any(|s| s.section == Some(index));
     let mut hunks = Hunks {
         list: Vec::new(),
