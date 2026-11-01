@@ -42,6 +42,8 @@ correct thing instead; see `docs/vasm-bugs.md`.
 
 `-linedebug`, or `Options::line_debug`, adds line information to hunk files in SAS/C's `LINE`
 format, as vasm does. File names become absolute on the command line unless `-noabspath` is given.
+`scripts/emulator-lines.py` sets breakpoints from that information on emulated Amigas and checks
+where they stop. It needs Kickstart ROMs, so it runs locally, not in CI.
 
 ## Linking
 
