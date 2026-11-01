@@ -146,6 +146,10 @@ pub struct Options {
     pub cpu: Cpu,
     /// Directories to search for `include` and `incbin` files.
     pub include_dirs: Vec<String>,
+    /// Set this for a raw binary, where labels are final addresses. Displacements
+    /// from labels can then use their smallest form on 68020 and later, whereas a
+    /// relocatable file needs room for a 32-bit relocation.
+    pub fixed_addresses: bool,
 }
 
 impl Options {
@@ -155,6 +159,7 @@ impl Options {
             main: main.into(),
             cpu: Cpu::default(),
             include_dirs: Vec::new(),
+            fixed_addresses: false,
         }
     }
 }
@@ -207,7 +212,7 @@ pub struct Section {
     pub dummy: bool,
     /// Contents.
     pub data: Vec<u8>,
-    /// Relocations, in increasing offset order.
+    /// Relocations, in the order vasm would list them: by source position.
     pub relocs: Vec<Reloc>,
 }
 
@@ -345,7 +350,7 @@ impl Assembly {
 /// Assembles `options.main`. Failures are reported through
 /// [`Assembly::diagnostics`], never by panicking.
 pub fn assemble(options: &Options, provider: &dyn FileProvider) -> Assembly {
-    let mut parser = parser::Parser::new(options.cpu, provider, &options.include_dirs);
+    let mut parser = parser::Parser::new(options, provider);
     if let Err(error) = parser.parse_main(&options.main) {
         return Assembly {
             diagnostics: vec![Diagnostic {
@@ -666,6 +671,35 @@ mod tests {
         assert!(assembly.line_table.is_empty());
         assert_eq!(assembly.symbols[1].value, 4);
         assert_eq!(assembly.symbols[1].section, None);
+    }
+
+    #[test]
+    fn test_assemble_zpc_displacement_is_not_pc_relative() {
+        let mut files = MemoryProvider::new();
+        files.insert("t.s", " move.w (4,zpc),d0\n");
+        let mut options = Options::new("t.s");
+        options.cpu = Cpu::M68020;
+        let assembly = assemble(&options, &files);
+        assert_eq!(
+            assembly.sections[0].data,
+            [0x30, 0x3B, 0x01, 0xE0, 0x00, 0x04]
+        );
+    }
+
+    #[test]
+    fn test_encode_grown_modes_use_the_full_format_mode_bits() {
+        let mut files = MemoryProvider::new();
+        files.insert("t.s", " divs (100000,a6),d4\n jmp (100000,pc)\n");
+        let mut options = Options::new("t.s");
+        options.cpu = Cpu::M68020;
+        let assembly = assemble(&options, &files);
+        assert_eq!(
+            assembly.sections[0].data,
+            [
+                0x89, 0xF6, 0x01, 0x70, 0x00, 0x01, 0x86, 0xA0, // divs
+                0x4E, 0xFB, 0x01, 0x70, 0x00, 0x01, 0x86, 0x96, // jmp, from offset 10
+            ]
+        );
     }
 
     #[test]

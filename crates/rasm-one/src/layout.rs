@@ -5,7 +5,7 @@ use std::cell::Cell;
 use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::Diagnostic;
 use crate::expr::{eval, Base, Value};
-use crate::isa::encode::{encode, EmitContext};
+use crate::isa::encode::{encode, EmitContext, Sizer};
 use crate::parser::{add_expansion_chain, is_internal_symbol, Program, SectionEntry};
 use crate::types::{SectionKind, Size};
 use crate::{Expansion, LineEntry, Reloc, Section, Symbol};
@@ -193,13 +193,14 @@ fn layout_pass(sections: &[SectionEntry], atoms: &[Atom], values: &SymbolValues)
                     values[*id as usize].set(Some(value));
                 }
             }
-            _ => offsets[section] += atom_len(atom, here, offset, entry, values),
+            _ => offsets[section] += atom_len(atom, section, here, offset, entry, values),
         }
     }
 }
 
 fn atom_len(
     atom: &Atom,
+    section: usize,
     here: Value,
     offset: i64,
     entry: &SectionEntry,
@@ -209,7 +210,15 @@ fn atom_len(
     match &atom.kind {
         AtomKind::Label(_) | AtomKind::Equate(..) => 0,
         AtomKind::AlignInstruction => here.offset & 1,
-        AtomKind::Instruction(instruction) => i64::from(instruction.len()),
+        AtomKind::Instruction(instruction) => {
+            let lookup = |id: u32| values[id as usize].get();
+            instruction.len(&Sizer {
+                section,
+                origin: entry.origin,
+                start: offset,
+                lookup: &lookup,
+            })
+        }
         AtomKind::Data { size, items } => items
             .iter()
             .map(|item| match item {

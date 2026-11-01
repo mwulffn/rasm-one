@@ -53,6 +53,19 @@ pub enum Cpu {
 }
 
 impl Cpu {
+    /// The CPU with this number, such as `68020`.
+    pub fn from_number(number: u32) -> Option<Cpu> {
+        match number {
+            68000 => Some(Cpu::M68000),
+            68010 => Some(Cpu::M68010),
+            68020 => Some(Cpu::M68020),
+            68030 => Some(Cpu::M68030),
+            68040 => Some(Cpu::M68040),
+            68060 => Some(Cpu::M68060),
+            _ => None,
+        }
+    }
+
     /// Mask with only this CPU set.
     pub const fn mask(self) -> CpuSet {
         CpuSet(match self {

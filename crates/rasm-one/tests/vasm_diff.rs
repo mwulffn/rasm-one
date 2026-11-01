@@ -8,7 +8,9 @@ use rasm_oracle::{Format, Vasm};
 fn ours(source: &str) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    assemble(&Options::new("t.s"), &files)
+    let mut options = Options::new("t.s");
+    options.fixed_addresses = true;
+    assemble(&options, &files)
 }
 
 /// Sources both assemblers must accept, with identical bytes.
@@ -497,6 +499,9 @@ const REJECTED: &[&str] = &[
 /// Deliberately stricter than vasm, which only warns or misreads these. The
 /// brief asks for a strict dialect in which anything else is a clear error.
 const STRICTER_THAN_VASM: &[&str] = &[
+    " machine 99",
+    " machine",
+    " cpu32",
     " opt o-\n nop",
     " idnt",
     " printt",

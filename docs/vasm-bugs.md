@@ -39,3 +39,42 @@ before they were removed, and a 3-second limit always stopped it.
 return within 60 seconds.
 
 **rasm-one:** reports `bad-count`. `test_ds_negative_count_is_error`.
+
+## 4. A suppressed PC still subtracts the PC
+
+**Source:** `move.w (4,zpc),d0`, and `(4,zpc,d1)` and `([4,zpc])`, on 68020 and later.
+
+**Bug:** vasm encodes the base displacement as 2, as if it were PC-relative, giving
+`303b 01e0 0002`. With the PC suppressed, nothing is added to the displacement, so the
+instruction reads address 2 rather than the 4 that was written.
+
+**rasm-one:** writes the value as given, `303b 01e0 0004`.
+`test_assemble_zpc_displacement_is_not_pc_relative`.
+
+## 5. Valid long displacements rejected for some instructions
+
+**Source:** on 68020 and later, `divs (100000,a6),d4`, the same with `divu`, `muls` and
+`mulu`, and `jmp (100000,pc)` and `jsr (100000,pc)`.
+
+**Bug:** vasm reports `displacement out of range` for these automatically sized full-format
+modes. It accepts the same modes with other instructions, such as
+`move.w (100000,a6),d0`, `lea (100000,pc),a0` and `pea (100000,pc)`.
+
+**rasm-one:** encodes them, for example `divs (100000,a6),d4` as `89f6 0170 0001 86a0` and
+`jmp (100000,pc)` as `4efb 0170 0001 869e`. `vasm_wrongly_rejects` in
+`tests/sweep_cpus.rs`, and `test_encode_grown_modes_use_the_full_format_mode_bits`.
+
+## 6. Relocation misplaced for an outer displacement after a word base displacement
+
+**Source:** `move.w ([4,a0],f),d0` with `f` a label (`-Fhunkexe` or `-Fhunk`), or an external
+`x` in its place, on 68020 and later.
+
+**Bug:** the base displacement `4` takes one word, so the 32-bit outer displacement is at
+offset 6, but vasm puts the relocation at offset 4, as if the base displacement were long.
+
+**Effect:** linking the external form with `vlink` and `x=$1234` gives
+`3030 0163 0004 1234 0000`, corrupting the base displacement and leaving the outer one
+wrong. The correct result is `3030 0163 0004 0000 1234`.
+
+**rasm-one:** puts the relocation at offset 6.
+`test_write_hunk_exe_outer_displacement_reloc_follows_word_base`.

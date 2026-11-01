@@ -12,7 +12,7 @@ mod report;
 
 use rasm_one::{
     assemble, write_bin, write_hunk_exe, write_hunk_exe_with, write_hunk_object, write_listing,
-    HunkExeOptions, MemoryProvider, Options,
+    Cpu, HunkExeOptions, MemoryProvider, Options,
 };
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -22,6 +22,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 pub struct Project {
     files: MemoryProvider,
     include_dirs: Vec<String>,
+    cpu: Option<Cpu>,
 }
 
 #[wasm_bindgen]
@@ -42,11 +43,21 @@ impl Project {
         self.include_dirs.push(directory.to_string());
     }
 
+    /// Chooses the CPU by number, such as 68020. Returns false if unknown.
+    pub fn set_cpu(&mut self, number: u32) -> bool {
+        self.cpu = Cpu::from_number(number);
+        self.cpu.is_some()
+    }
+
     /// Assembles `main` into `format`: `"hunkexe"`, `"hunkexe-kick1"` (which also
     /// loads on Kickstart 1.x), `"hunk"` or `"bin"`.
     pub fn assemble(&self, main: &str, format: &str) -> AssemblyResult {
         let mut options = Options::new(main);
         options.include_dirs = self.include_dirs.clone();
+        options.fixed_addresses = format == "bin";
+        if let Some(cpu) = self.cpu {
+            options.cpu = cpu;
+        }
         let assembly = assemble(&options, &self.files);
         let output = match format {
             "hunkexe" => write_hunk_exe(&assembly).map_err(|error| error.to_string()),
