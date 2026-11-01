@@ -60,6 +60,9 @@ instruction reads address 2 rather than the 4 that was written.
 modes. It accepts the same modes with other instructions, such as
 `move.w (100000,a6),d0`, `lea (100000,pc),a0` and `pea (100000,pc)`.
 
+The rejection also applies to other values that don't fit a word, such as
+`divu 65535(a6),d7`, and `.l` on the displacement avoids it.
+
 **rasm-one:** encodes them, for example `divs (100000,a6),d4` as `89f6 0170 0001 86a0` and
 `jmp (100000,pc)` as `4efb 0170 0001 869e`. `vasm_wrongly_rejects` in
 `tests/sweep_cpus.rs`, and `test_encode_grown_modes_use_the_full_format_mode_bits`.
@@ -81,20 +84,18 @@ wrong. The correct result is `3030 0163 0004 0000 1234`.
 
 ## 7. Floating-point values stored with the wrong meaning
 
-Seen on `-m68040`, in all of these vasm writes the bits of one format where the operand
-means another, without any message.
+Not everything here is a bug. vasm deliberately stores hex, octal, binary and symbol values
+as raw bits in floating-point data (`dc.s $3f800000`), while decimal expressions are numbers
+(`dc.s 1+1` is 2.0). rasm-one follows that. These go beyond it, with no message:
 
 | Source | vasm writes | Problem |
 |---|---|---|
 | `fmove.l #1.5,fp0` | `f23c 4000 3fc0 0000` | The single-precision bits of 1.5, loaded as the integer 1069547520 |
 | `dc.l 1.5` | `3fc00000` | The same, in data |
-| `dc.s label` | `00000004` | A label's address as raw bits, not as a number converted to float |
-| `dcb.s 1,1` and `blk.s 1,1` | `00000001` | The integer's bits, whereas `dc.s 1` correctly gives `3f800000` |
-| `dcb.s 1,1.5` | `00000001` | As above, and the `.5` is dropped too |
 | `dc.s 1e50` | `7f800000` | Infinity, with no out-of-range message |
+| `dcb.s 1,1.5` | `00000001` | The `.5` is dropped |
 
-**rasm-one:** `fmove.l #1.5` and `dc.l 1.5`, `dc.s label`, and `dc.s 1e50` are errors, and
-`dcb.s 1,1` gives `3f800000`. `tests/vasm_fpu.rs`.
+**rasm-one:** all are errors. `tests/vasm_fpu.rs`.
 
 ## 8. Extended precision depends on the host (limitation, not a logic bug)
 
@@ -108,13 +109,31 @@ exactly therefore differ between hosts.
 **rasm-one:** converts exactly on every host, so its comparison tests only use values that a
 double can represent. `test_float_bytes_extended_needs_full_precision`.
 
-## 9. `pload` with SFC or DFC rejected on the 68030
+## 9. Internal error on a raw packed value
 
-**Source:** `ploadr sfc,(a0)` or `ploadw dfc,(a0)` with `-m68030`.
+**Source:** `dc.p $1`.
 
-**Bug:** vasm rejects these with `illegal operand types`, but accepts them with `-m68851`, and
-accepts `pflush sfc,#2` on the 68030. The PRM's `PLOAD` page lists the SFC and DFC registers
-as function codes.
+**Bug:** `fatal error 5: internal error 0 in line 5607`, where `fmove.p #$1,fp0` works.
 
-**rasm-one:** accepts them, encoding `ploadr sfc,(a0)` as `f010 2200`, the bytes vasm gives
-with `-m68851`. `vasm_wrongly_rejects` in `tests/sweep_cpus.rs`.
+**rasm-one:** writes the raw bits, as with the other floating-point sizes.
+`test_dc_p_raw_value_is_written`.
+
+## 10. A branch to a constant in a relocatable section is silently wrong
+
+**Source:** `bra 4` with `-Fhunkexe` or `-Fhunk`, and `dbra d0,4` and `bra.l 4`.
+
+**Bug:** vasm writes a displacement of 0, `6000 0000`, with no message and no relocation, so the
+branch goes to the next instruction rather than anywhere near address 4. `bsr.s 4` does report
+an error.
+
+**rasm-one:** reports `absolute-branch`, since the distance isn't known.
+`test_write_hunk_exe_branch_to_constant_is_error`.
+
+## 11. Values over 32 bits saturate silently
+
+**Source:** `jmp $100000000`, also `jmp -$80000001`, `bra.l $123456789` and
+`move.l (100000000000,a0),d0`.
+
+**Bug:** vasm writes `7fffffff`, with no message. `dc.l` gives a warning for the same thing.
+
+**rasm-one:** reports `out-of-range`. `test_values_over_32_bits_are_errors`.

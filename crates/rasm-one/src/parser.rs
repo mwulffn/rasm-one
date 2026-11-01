@@ -58,6 +58,10 @@ pub(crate) struct Program {
     pub expansions: Vec<Expansion>,
     /// Name given by `idnt`.
     pub unit_name: Option<String>,
+    /// True if labels are final addresses, as in a raw binary.
+    pub fixed_addresses: bool,
+    /// The limit on the size of the output.
+    pub max_output_bytes: i64,
     pub symbols: Vec<SymbolEntry>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -178,9 +182,19 @@ fn section_shortcut(name: &str) -> Option<(&'static str, SectionKind, MemKind)> 
     })
 }
 
-/// Macro calls nested deeper than this are an error. Calls recurse in the
+/// Macro calls, `rept` blocks and includes nested deeper than this are an error. Calls recurse in the
 /// parser, so this also protects the stack, which is small under WASM.
-const MAX_MACRO_DEPTH: usize = 200;
+const MAX_EXPANSION_DEPTH: usize = 200;
+
+/// Parentheses and unary operators nested deeper than this are an error, since
+/// parsing and evaluating them recurse.
+const MAX_EXPRESSION_DEPTH: usize = 100;
+
+/// Binary operators in one expression; each deepens the tree that is evaluated.
+const MAX_EXPRESSION_CHAIN: usize = 1000;
+
+/// The largest offset or alignment for `cnop`.
+const MAX_ALIGNMENT: i64 = 0x8000_0000;
 
 /// Name of the symbol holding the argument count during a macro.
 const NARG: &str = "NARG";
@@ -191,6 +205,18 @@ const REPTN: &str = "REPTN";
 /// True for symbols the assembler maintains itself, which aren't exported.
 pub(crate) fn is_internal_symbol(name: &str) -> bool {
     matches!(name, NARG | REPTN | RS_COUNTER)
+}
+
+fn expr_has_division(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary(op, a, b) => {
+            matches!(op, BinaryOp::Div | BinaryOp::Rem)
+                || expr_has_division(a)
+                || expr_has_division(b)
+        }
+        Expr::Unary(_, inner) => expr_has_division(inner),
+        _ => false,
+    }
 }
 
 fn is_local_label(name: &str) -> bool {
@@ -220,6 +246,9 @@ fn is_if(word: &str) -> bool {
 struct SrcLine<'a> {
     number: u32,
     text: &'a [u8],
+    /// False if macro parameters changed the text, so that its columns don't match
+    /// the source file.
+    exact_columns: bool,
 }
 
 /// A macro body: line numbers and text from where it was defined.
@@ -587,6 +616,8 @@ pub(crate) struct Parser<'f> {
     /// Number for the next macro call, for `\\@`.
     macro_calls: u32,
     macro_depth: usize,
+    expansion_depth: usize,
+    max_atoms: usize,
     /// Argument count of the macro being expanded.
     narg: Option<i64>,
     /// Iteration of the `rept` being expanded.
@@ -623,6 +654,8 @@ impl<'f> Parser<'f> {
             macros: HashMap::new(),
             macro_calls: 1,
             macro_depth: 0,
+            expansion_depth: 0,
+            max_atoms: options.max_atoms,
             narg: None,
             reptn: None,
             conditionals: Vec::new(),
@@ -631,7 +664,9 @@ impl<'f> Parser<'f> {
         }
     }
 
-    pub fn finish(self) -> Program {
+    pub fn finish(mut self, max_output_bytes: i64) -> Program {
+        self.program.fixed_addresses = self.fixed_addresses;
+        self.program.max_output_bytes = max_output_bytes;
         self.program
     }
 
@@ -694,6 +729,7 @@ impl<'f> Parser<'f> {
     }
 
     fn include(&mut self, path: &str, site: Span) -> Result<(), Diagnostic> {
+        self.check_depth(site)?;
         let from = self.current_file().map(str::to_string);
         let (resolved, source) = self
             .find_file(path, from.as_deref())
@@ -726,6 +762,7 @@ impl<'f> Parser<'f> {
             .map(|(index, raw)| SrcLine {
                 number: index as u32 + 1,
                 text: raw.strip_suffix(b"\r").unwrap_or(raw),
+                exact_columns: true,
             })
             .collect();
         self.parse_lines(file, &lines);
@@ -748,6 +785,10 @@ impl<'f> Parser<'f> {
                     file,
                     line: line.number,
                     special: SpecialWords::None,
+                    exact_columns: line.exact_columns,
+                    expression_depth: 0,
+                    expression_is_raw: false,
+                    float_immediates: None,
                 }
                 .parse()
             };
@@ -859,7 +900,28 @@ impl<'f> Parser<'f> {
         self.push_atom(AtomKind::Equate(id, Expr::Num(value)), span);
     }
 
+    /// Fails if expansions are nested too deeply.
+    fn check_depth(&self, site: Span) -> Result<(), Diagnostic> {
+        if self.expansion_depth >= MAX_EXPANSION_DEPTH {
+            return Err(Diagnostic::error(
+                "macro-depth",
+                format!(
+                    "macros, rept blocks and includes nested more than \
+                     {MAX_EXPANSION_DEPTH} levels deep"
+                ),
+                site,
+            ));
+        }
+        Ok(())
+    }
+
     fn run_expansion(&mut self, kind: ExpansionKind, site: Span, file: FileId, lines: &[SrcLine]) {
+        if let Err(diagnostic) = self.check_depth(site) {
+            self.program.diagnostics.push(diagnostic);
+            self.macro_exit = false;
+            return;
+        }
+        self.expansion_depth += 1;
         self.program.expansions.push(Expansion {
             kind,
             site,
@@ -869,6 +931,7 @@ impl<'f> Parser<'f> {
         self.current_expansion = Some(self.program.expansions.len() as u32 - 1);
         self.parse_lines(file, lines);
         self.current_expansion = outer;
+        self.expansion_depth -= 1;
     }
 
     fn expand_macro(
@@ -877,23 +940,22 @@ impl<'f> Parser<'f> {
         call: &MacroCall,
         site: Span,
     ) -> Result<(), Diagnostic> {
-        if self.macro_depth >= MAX_MACRO_DEPTH {
-            return Err(Diagnostic::error(
-                "macro-depth",
-                format!("macro calls nested more than {MAX_MACRO_DEPTH} levels deep"),
-                site,
-            ));
-        }
-        let text: Vec<(u32, Vec<u8>)> = definition
+        self.check_depth(site)?;
+        let text: Vec<(u32, Vec<u8>, bool)> = definition
             .lines
             .iter()
-            .map(|(number, line)| (*number, self.substitute(line, call)))
+            .map(|(number, line)| {
+                let expanded = self.substitute(line, call);
+                let exact = expanded == *line;
+                (*number, expanded, exact)
+            })
             .collect();
         let lines: Vec<SrcLine> = text
             .iter()
-            .map(|(number, text)| SrcLine {
+            .map(|(number, text, exact)| SrcLine {
                 number: *number,
                 text,
+                exact_columns: *exact,
             })
             .collect();
 
@@ -1067,6 +1129,10 @@ impl<'f> Parser<'f> {
                     file,
                     line: line.number,
                     special: SpecialWords::None,
+                    exact_columns: line.exact_columns,
+                    expression_depth: 0,
+                    expression_is_raw: false,
+                    float_immediates: None,
                 };
                 let value = parser.parse_constant()?;
                 parser.expect_end()?;
@@ -1190,6 +1256,18 @@ impl<'f> Parser<'f> {
     }
 
     fn push_atom(&mut self, kind: AtomKind, span: Span) {
+        // Generated code has no natural limit, so stop rather than exhaust memory.
+        if self.program.atoms.len() >= self.max_atoms {
+            if !self.ended {
+                self.program.diagnostics.push(Diagnostic::error(
+                    "limit-exceeded",
+                    format!("source generates more than {} statements", self.max_atoms),
+                    span,
+                ));
+                self.ended = true;
+            }
+            return;
+        }
         let section = self.section();
         self.program.atoms.push(Atom {
             kind,
@@ -1274,10 +1352,27 @@ struct LineParser<'p, 'a, 'f> {
     file: FileId,
     line: u32,
     special: SpecialWords,
+    exact_columns: bool,
+    expression_depth: usize,
+    /// True once the expression being parsed has used a symbol, `*`, a string or
+    /// a number that isn't decimal. Otherwise it is a floating-point number.
+    expression_is_raw: bool,
+    /// The size being assembled, when immediates are floating-point numbers.
+    float_immediates: Option<Size>,
 }
 
 impl LineParser<'_, '_, '_> {
     fn span(&self, start: usize) -> Span {
+        // Text that macro parameters changed has no matching column in the source,
+        // so the span only says which line.
+        if !self.exact_columns {
+            return Span {
+                file: self.file,
+                line: self.line,
+                col: 1,
+                len: 1,
+            };
+        }
         Span {
             file: self.file,
             line: self.line,
@@ -1297,7 +1392,11 @@ impl LineParser<'_, '_, '_> {
             Span {
                 file: self.file,
                 line: self.line,
-                col: error.pos as u32 + 1,
+                col: if self.exact_columns {
+                    error.pos as u32 + 1
+                } else {
+                    1
+                },
                 len: 1,
             },
         )
@@ -1607,10 +1706,12 @@ impl LineParser<'_, '_, '_> {
                 self.expect(Punct::Comma, ",")?;
                 let alignment = self.parse_constant()?;
                 self.expect_end()?;
-                if alignment < 0 || offset < 0 {
+                if !(0..=MAX_ALIGNMENT).contains(&alignment)
+                    || !(0..=MAX_ALIGNMENT).contains(&offset)
+                {
                     return Err(Diagnostic::error(
                         "out-of-range",
-                        "cnop takes non-negative values",
+                        "cnop takes values from 0 to $80000000",
                         span,
                     ));
                 }
@@ -2003,6 +2104,13 @@ impl LineParser<'_, '_, '_> {
 
         if let Some(rows) = rows_for(&lower) {
             self.lexer.skip_blanks();
+            // A global label on this line starts a new scope for local labels,
+            // which the operands must see.
+            if let Some((name, _)) = &label {
+                if !is_local_label(name) {
+                    self.parser.label_scope = name.clone();
+                }
+            }
             let instruction = self.parse_instruction(&lower, rows, size, span);
             self.parser.push_atom(AtomKind::AlignInstruction, span);
             if let Some((label, label_span)) = label {
@@ -2169,6 +2277,13 @@ impl LineParser<'_, '_, '_> {
                     self.parse_constant()?
                 };
                 self.expect_end()?;
+                if !(-0xFFFF_FFFF..=0xFFFF_FFFF).contains(&base) {
+                    return Err(Diagnostic::error(
+                        "out-of-range",
+                        "offset base out of range",
+                        span,
+                    ));
+                }
                 let section =
                     self.parser
                         .add_section("offset", SectionKind::Bss, MemKind::Any, Some(base));
@@ -2373,6 +2488,13 @@ impl LineParser<'_, '_, '_> {
             }
         }
         self.special = special_words(mnemonic);
+        self.float_immediates = size.filter(|size| {
+            matches!(
+                size,
+                Size::Single | Size::Double | Size::Extended | Size::Packed
+            ) && self.special == SpecialWords::Fpu
+                && !matches!(mnemonic, "fmovem" | "fmovecr")
+        });
         let operands = self.parse_operands()?;
         let instruction = self.select_row(mnemonic, rows, size, operands, span)?;
         self.warn_if_trapped(mnemonic, &instruction, span);
@@ -2507,7 +2629,12 @@ impl LineParser<'_, '_, '_> {
             if let Some(text) = self.float_literal_if_fpu() {
                 return Ok(Mode::Float(FloatLiteral { text }));
             }
-            return Ok(Mode::Immediate(self.parse_expr()?));
+            let (expr, is_raw) = self.parse_expr_tracking_raw()?;
+            if self.float_immediates.is_some() && !is_raw {
+                let text = self.decimal_expression_text(&expr)?;
+                return Ok(Mode::Float(FloatLiteral { text }));
+            }
+            return Ok(Mode::Immediate(expr));
         }
         if self.special == SpecialWords::Fpu {
             if let Some(mode) = self.try_fp_operand()? {
@@ -2589,6 +2716,27 @@ impl LineParser<'_, '_, '_> {
                     }
             })
             .map(|(_, bits, _, _)| Mode::MmuReg(*bits))
+    }
+
+    /// Parses an expression and says whether it used anything but decimal numbers.
+    fn parse_expr_tracking_raw(&mut self) -> Result<(Expr, bool), Diagnostic> {
+        self.expression_is_raw = false;
+        let expr = self.parse_expr()?;
+        Ok((expr, self.expression_is_raw))
+    }
+
+    /// Writes the value of an expression of decimal numbers, for use as a
+    /// floating-point number. Integer division would give the wrong value.
+    fn decimal_expression_text(&mut self, expr: &Expr) -> Result<String, Diagnostic> {
+        let span = self.span(self.lexer.pos());
+        if expr_has_division(expr) {
+            return Err(Diagnostic::error(
+                "bad-float",
+                "division in a floating-point expression isn't supported; write the value",
+                span,
+            ));
+        }
+        Ok(self.parser.constant(expr, span)?.to_string())
     }
 
     /// Reads a floating-point literal, on an FPU instruction only.
@@ -3079,6 +3227,13 @@ impl LineParser<'_, '_, '_> {
             if let Some(text) = self.lexer.float_literal() {
                 return Ok(DataItem::Float(FloatLiteral { text }, self.span(start)));
             }
+            let (expr, is_raw) = self.parse_expr_tracking_raw()?;
+            let span = self.span(start);
+            if !is_raw {
+                let text = self.decimal_expression_text(&expr)?;
+                return Ok(DataItem::Float(FloatLiteral { text }, span));
+            }
+            return Ok(DataItem::Expr(expr, span));
         }
         if size == Size::Byte {
             if let Tok::Str(bytes) = self.peek()? {
@@ -3176,10 +3331,19 @@ impl LineParser<'_, '_, '_> {
             return self.parse_unary();
         }
         let mut left = self.parse_binary(level + 1)?;
+        let mut chain = 0;
         while let Tok::Punct(punct) = self.peek()? {
             let Some(op) = binary_op(punct, level) else {
                 break;
             };
+            chain += 1;
+            if chain > MAX_EXPRESSION_CHAIN {
+                return Err(self.error_at(
+                    "expression-depth",
+                    "expression too long",
+                    self.lexer.pos(),
+                ));
+            }
             self.advance()?;
             let right = self.parse_binary(level + 1)?;
             left = Expr::Binary(op, Box::new(left), Box::new(right));
@@ -3188,7 +3352,26 @@ impl LineParser<'_, '_, '_> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, Diagnostic> {
+        if self.expression_depth >= MAX_EXPRESSION_DEPTH {
+            return Err(self.error_at(
+                "expression-depth",
+                "expression nested too deeply",
+                self.lexer.pos(),
+            ));
+        }
+        self.expression_depth += 1;
+        let result = self.parse_unary_inner();
+        self.expression_depth -= 1;
+        result
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr, Diagnostic> {
         let start = self.lexer.pos();
+        // Decimal digits are the only thing that keeps an expression a number.
+        let first = self.lexer.rest().first().copied();
+        if !matches!(first, Some(b'0'..=b'9' | b'(' | b'-' | b'+' | b'~' | b'!')) {
+            self.expression_is_raw = true;
+        }
         let tok = self.peek()?;
         let op = match tok {
             Tok::Punct(Punct::Minus) => Some(UnaryOp::Neg),

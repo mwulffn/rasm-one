@@ -10,9 +10,11 @@
 
 mod report;
 
+use std::rc::Rc;
+
 use rasm_one::{
     assemble, write_bin, write_hunk_exe, write_hunk_exe_with, write_hunk_object, write_listing,
-    Cpu, FpuChoice, HunkExeOptions, MemoryProvider, Options,
+    Assembly, Cpu, FpuChoice, HunkExeOptions, MemoryProvider, Options,
 };
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -20,7 +22,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 #[wasm_bindgen]
 #[derive(Default)]
 pub struct Project {
-    files: MemoryProvider,
+    files: Rc<MemoryProvider>,
     include_dirs: Vec<String>,
     cpu: Option<Cpu>,
     has_coprocessor: bool,
@@ -37,7 +39,7 @@ impl Project {
 
     /// Adds or replaces a file.
     pub fn add_file(&mut self, path: &str, contents: &[u8]) {
-        self.files.insert(path, contents);
+        Rc::make_mut(&mut self.files).insert(path, contents);
     }
 
     /// Adds a directory to search for `include` and `incbin` files.
@@ -74,7 +76,7 @@ impl Project {
         if self.has_coprocessor {
             options.fpu = FpuChoice::Coprocessor;
         }
-        let assembly = assemble(&options, &self.files);
+        let assembly = assemble(&options, self.files.as_ref());
         let output = match format {
             "hunkexe" => write_hunk_exe(&assembly).map_err(|error| error.to_string()),
             "hunkexe-kick1" => {
@@ -92,7 +94,8 @@ impl Project {
         AssemblyResult {
             bytes,
             report: report::to_json(&assembly, output_error.as_deref()),
-            listing: write_listing(&assembly, &self.files),
+            assembly,
+            files: Rc::clone(&self.files),
         }
     }
 }
@@ -102,7 +105,8 @@ impl Project {
 pub struct AssemblyResult {
     bytes: Vec<u8>,
     report: String,
-    listing: String,
+    assembly: Assembly,
+    files: Rc<MemoryProvider>,
 }
 
 #[wasm_bindgen]
@@ -117,9 +121,9 @@ impl AssemblyResult {
         self.report.clone()
     }
 
-    /// A human-readable listing.
+    /// A human-readable listing, made when asked for since it costs time.
     pub fn listing(&self) -> String {
-        self.listing.clone()
+        write_listing(&self.assembly, self.files.as_ref())
     }
 }
 

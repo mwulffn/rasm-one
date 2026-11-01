@@ -119,6 +119,38 @@ const ON_68040: &[&str] = &[
     " ftrapne.l #1",
     // Floating-point data.
     " dc.s 1",
+    " dc.s 1+1",
+    " dc.s (1)",
+    " dc.s -1",
+    " dc.s +1",
+    " dc.s 2*3",
+    " dc.d 1+1",
+    " dc.d -1",
+    " dc.x 1+1",
+    " dc.x -1",
+    " dc.p 1+1",
+    // Everything but decimal numbers supplies the raw bits.
+    " dc.s $3f800000",
+    " dc.s %1",
+    " dc.s @1",
+    " dc.d $1",
+    " dc.d $4000000000000000",
+    " dc.x $1",
+    "a=1\n dc.s a",
+    "a=1\n dc.d a",
+    "a=1\n dc.x a",
+    " fmove.s #$3f800000,fp0",
+    " fmove.d #$ff00,fp0",
+    " fmove.x #$1,fp0",
+    " fmove.p #$1,fp0",
+    " fmove.s #1+1,fp0",
+    " fmove.s #-1,fp0",
+    " fmove.x #1+1,fp0",
+    "a=1\n fmove.s #a,fp0",
+    " dcb.s 1,$3f800000",
+    " dcb.s 1,-1",
+    " dcb.s 1,1",
+    " blk.s 1,1",
     " dc.s 1.5e2,-0.5",
     " dc.d 1.5,-2",
     " dc.d 0.1",
@@ -167,6 +199,8 @@ const WRONG_IN_VASM: &[&str] = &[
     " fmove.l #1.5,fp0",
     " dc.l 1.5",
     " dc.s f\nf:",
+    " dc.s 1/2",
+    " fmove.s #1/2,fp0",
     " dc.s 1e50",
     " dcb.s 1,1.5",
     " blk.s 1,1.5",
@@ -245,12 +279,9 @@ fn test_fpu_values_vasm_gets_wrong_are_errors() {
 }
 
 #[test]
-fn test_float_fill_is_converted_like_other_float_data() -> Result<(), Box<dyn Error>> {
-    let expected = [0x3F, 0x80, 0, 0];
-    for source in [" dc.s 1\n", " dcb.s 1,1\n", " blk.s 1,1\n"] {
-        let bytes = write_bin(&ours(source, Cpu::M68040, FpuChoice::BuiltIn))?;
-        assert_eq!(bytes, expected, "{source:?}");
-    }
+fn test_dc_p_raw_value_is_written() -> Result<(), Box<dyn Error>> {
+    let bytes = write_bin(&ours(" dc.p $1\n", Cpu::M68040, FpuChoice::BuiltIn))?;
+    assert_eq!(bytes, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     Ok(())
 }
 

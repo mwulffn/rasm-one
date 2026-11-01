@@ -50,6 +50,7 @@ fn diagnostic(diagnostic: &Diagnostic) -> String {
         Severity::Error => "error",
         Severity::Warning => "warning",
         Severity::Info => "info",
+        _ => "unknown",
     };
     let related = array(&diagnostic.related, |related| {
         format!(
@@ -96,6 +97,7 @@ pub(crate) fn to_json(assembly: &Assembly, output_error: Option<&str>) -> String
             SectionKind::Code => "code",
             SectionKind::Data => "data",
             SectionKind::Bss => "bss",
+            _ => "unknown",
         };
         format!(
             r#"{{"name":{},"kind":"{kind}","origin":{},"size":{}}}"#,
@@ -109,6 +111,7 @@ pub(crate) fn to_json(assembly: &Assembly, output_error: Option<&str>) -> String
             ExpansionKind::Include => "include",
             ExpansionKind::Macro => "macro",
             ExpansionKind::Repeat => "repeat",
+            _ => "unknown",
         };
         format!(
             r#"{{"kind":"{kind}","site":{},"parent":{}}}"#,

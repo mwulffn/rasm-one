@@ -60,21 +60,22 @@ const MACHINES: &[Machine] = &[
 ];
 
 const MNEMONICS: &[&str] = &[
-    "abcd", "add", "adda", "addi", "addq", "addx", "and", "andi", "asl", "asr", "bcc", "bchg",
-    "bclr", "bcs", "beq", "bfchg", "bfclr", "bfexts", "bfextu", "bfffo", "bfins", "bfset", "bftst",
-    "bge", "bgt", "bhi", "bhs", "bkpt", "ble", "blo", "bls", "blt", "bmi", "bne", "bpl", "bra",
-    "bset", "bsr", "btst", "bvc", "bvs", "callm", "cas", "cas2", "chk", "chk2", "cinva", "cinvl",
-    "cinvp", "clr", "cmp", "cmp2", "cmpa", "cmpi", "cmpm", "cpusha", "cpushl", "cpushp", "dbcc",
-    "dbcs", "dbeq", "dbf", "dbge", "dbgt", "dbhi", "dbhs", "dble", "dblo", "dbls", "dblt", "dbmi",
-    "dbne", "dbpl", "dbra", "dbt", "dbvc", "dbvs", "divs", "divsl", "divu", "divul", "eor", "eori",
-    "exg", "ext", "extb", "illegal", "jmp", "jsr", "lea", "link", "lpstop", "lsl", "lsr", "move",
-    "move16", "movea", "movec", "movem", "movep", "moveq", "moves", "muls", "mulu", "nbcd", "neg",
-    "negx", "nop", "not", "or", "ori", "pack", "pea", "reset", "rol", "ror", "roxl", "roxr", "rtd",
-    "rte", "rtm", "rtr", "rts", "sbcd", "scc", "scs", "seq", "sf", "sge", "sgt", "shi", "shs",
-    "sle", "slo", "sls", "slt", "smi", "sne", "spl", "st", "stop", "sub", "suba", "subi", "subq",
-    "subx", "svc", "svs", "swap", "tas", "trap", "trapcc", "trapcs", "trapeq", "trapf", "trapge",
-    "trapgt", "traphi", "traphs", "traple", "traplo", "trapls", "traplt", "trapmi", "trapne",
-    "trappl", "trapt", "trapv", "trapvc", "trapvs", "tst", "unlk", "unpk",
+    "halt", "pulse", "halt", "pulse", "abcd", "add", "adda", "addi", "addq", "addx", "and", "andi",
+    "asl", "asr", "bcc", "bchg", "bclr", "bcs", "beq", "bfchg", "bfclr", "bfexts", "bfextu",
+    "bfffo", "bfins", "bfset", "bftst", "bge", "bgt", "bhi", "bhs", "bkpt", "ble", "blo", "bls",
+    "blt", "bmi", "bne", "bpl", "bra", "bset", "bsr", "btst", "bvc", "bvs", "callm", "cas", "cas2",
+    "chk", "chk2", "cinva", "cinvl", "cinvp", "clr", "cmp", "cmp2", "cmpa", "cmpi", "cmpm",
+    "cpusha", "cpushl", "cpushp", "dbcc", "dbcs", "dbeq", "dbf", "dbge", "dbgt", "dbhi", "dbhs",
+    "dble", "dblo", "dbls", "dblt", "dbmi", "dbne", "dbpl", "dbra", "dbt", "dbvc", "dbvs", "divs",
+    "divsl", "divu", "divul", "eor", "eori", "exg", "ext", "extb", "illegal", "jmp", "jsr", "lea",
+    "link", "lpstop", "lsl", "lsr", "move", "move16", "movea", "movec", "movem", "movep", "moveq",
+    "moves", "muls", "mulu", "nbcd", "neg", "negx", "nop", "not", "or", "ori", "pack", "pea",
+    "reset", "rol", "ror", "roxl", "roxr", "rtd", "rte", "rtm", "rtr", "rts", "sbcd", "scc", "scs",
+    "seq", "sf", "sge", "sgt", "shi", "shs", "sle", "slo", "sls", "slt", "smi", "sne", "spl", "st",
+    "stop", "sub", "suba", "subi", "subq", "subx", "svc", "svs", "swap", "tas", "trap", "trapcc",
+    "trapcs", "trapeq", "trapf", "trapge", "trapgt", "traphi", "traphs", "traple", "traplo",
+    "trapls", "traplt", "trapmi", "trapne", "trappl", "trapt", "trapv", "trapvc", "trapvs", "tst",
+    "unlk", "unpk",
 ];
 
 /// A sample of the FPU's mnemonics. The condition codes are tested separately.
@@ -256,14 +257,7 @@ const THREE_OPERANDS: &[&str] = &[
 fn vasm_wrongly_rejects(line: &str) -> bool {
     let head = line.split_whitespace().next().unwrap_or("");
     let mnemonic = head.split('.').next().unwrap_or("");
-    let operands = line
-        .trim_start()
-        .split_once(' ')
-        .map_or("", |(_, rest)| rest);
-    (matches!(mnemonic, "ploadr" | "ploadw")
-        && (operands.starts_with("sfc,") || operands.starts_with("dfc,")))
-        || (matches!(mnemonic, "divs" | "divu" | "muls" | "mulu")
-            && line.ends_with(" (100000,a6),d4"))
+    (matches!(mnemonic, "divs" | "divu" | "muls" | "mulu") && line.ends_with(" (100000,a6),d4"))
         || (matches!(mnemonic, "jmp" | "jsr") && line.ends_with(" (100000,pc)"))
 }
 
@@ -360,17 +354,11 @@ struct VasmVerdict {
     lenient: HashSet<usize>,
 }
 
-/// vasm warnings that mean it ignored or guessed at part of a line. The dialect
-/// is strict, so we report those as errors.
-const LENIENT_WARNINGS: &[&str] = &[
-    "warning 2034 ",
-    "warning 2068 ",
-    "warning 7 ",
-    "warning 1004 ",
-    "warning 1005 ",
-    "warning 1007 ",
-    "warning 2007 ",
-];
+/// vasm warnings for lines it accepted that we reject on purpose. 2068 means it
+/// ignored text it couldn't parse. 2034 means a deprecated alias: `movea` to anything
+/// but an address register, and `divsl` or `divul` with one register, which the PRM
+/// doesn't define.
+const LENIENT_WARNINGS: &[&str] = &["warning 2068 ", "warning 2034 "];
 
 /// The line number in a vasm message, if it has one.
 fn message_line(message: &str) -> Option<usize> {
@@ -415,9 +403,21 @@ fn vasm_verdict(vasm: &Vasm, lines: &[String], machine: &Machine) -> Result<Vasm
                 if let Some(&index) = placed {
                     verdict.rejected.insert(index);
                 } else if let Some(name) = undefined_symbol(message) {
+                    // The message has no line, and its name may be a real word on
+                    // other lines, so ask about each candidate alone.
                     for &index in &remaining {
                         if lines[index].contains(name) {
-                            verdict.rejected.insert(index);
+                            let alone = vasm
+                                .assemble_with_args(
+                                    &format!("{}\n", lines[index]),
+                                    cpu,
+                                    Format::Bin,
+                                    machine.vasm_args,
+                                )
+                                .map_err(|error| error.to_string())?;
+                            if !alone.success {
+                                verdict.rejected.insert(index);
+                            }
                         }
                     }
                 } else {

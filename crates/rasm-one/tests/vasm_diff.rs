@@ -321,6 +321,13 @@ const ACCEPTED: &[&str] = &[
     "x rs 2\ny rs 0\n dc.b x,y",
     "n equ 3\nx rs.b n\ny rs.b 0\n dc.b y",
     " rs.b 4\ny rs.b 0\n dc.b y",
+    // Local labels on an instruction's line belong to the label before them.
+    "foo: nop\n.x: nop\nbar: bra .x\n.x: rts",
+    "foo: dc.w .x\n.x: nop\nbar: dc.w .x\n.x: rts",
+    // Immediates that are the 32-bit view of a negative number.
+    " move.w #$ffffff00,d0",
+    " move.w #$ffff8000,d0",
+    " move.b #$ffffff80,d0",
     // Habits seen in real sources.
     "l:rts",
     "l::rts",
@@ -393,6 +400,10 @@ const ACCEPTED: &[&str] = &[
 
 /// Valid syntax that both assemblers must reject.
 const REJECTED: &[&str] = &[
+    " move.w #$ffff0000,d0",
+    " move.w #$ffff7fff,d0",
+    " move.b #$ffffff00,d0",
+    " move.b #$ffffff7f,d0",
     " moveq #-129,d0",
     " addq.w #0,d0",
     " addq.w #9,d0",

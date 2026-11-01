@@ -335,6 +335,7 @@ pub struct InsnRow {
     /// Fixed bits of an extension word, for encodings that have one.
     pub extension: u16,
     /// Execution cycles. Reserved; not filled in yet.
+    #[allow(dead_code)] // The brief wants room for these, and nothing reads them yet.
     pub cycles: Option<u16>,
 }
 
@@ -585,6 +586,8 @@ pub const TABLE: &[InsnRow] = &[
     fixed("nop", 0x4E71),
     fixed("rts", 0x4E75),
     fixed("rte", 0x4E73),
+    fixed("halt", 0x4AC8).on(ONLY060),
+    fixed("pulse", 0x4ACC).on(ONLY060),
     fixed("rtr", 0x4E77),
     fixed("reset", 0x4E70),
     fixed("trapv", 0x4E76),
@@ -927,7 +930,7 @@ pub const TABLE: &[InsnRow] = &[
     .on(UP020),
     row("callm", &[], None, &[IMM, CTRL], 0x06C0, Encoding::Callm).on(ONLY020),
     row("rtm", &[], None, &[RN], 0x06C0, Encoding::Ea0).on(ONLY020),
-    row("rtd", &[], None, &[IMM], 0x4E74, Encoding::Stop).on(UP010),
+    row("rtd", &[], None, &[IMM], 0x4E74, Encoding::ImmediateOnly).on(UP010),
     row("movec", L, LONG, &[CREG, RN], 0x4E7A, Encoding::MovecFrom).on(UP010),
     row("movec", L, LONG, &[RN, CREG], 0x4E7B, Encoding::MovecTo).on(UP010),
     row("moves", BWL, WORD, &[RN, MEM], 0x0E00, Encoding::MovesStore)

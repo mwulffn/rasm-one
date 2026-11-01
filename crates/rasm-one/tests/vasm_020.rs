@@ -138,6 +138,8 @@ const BINARY: &[&str] = &[
     " cmp2.b f(pc),d0\nf:",
     " callm #255,(a0)",
     " rtd #$ffff",
+    " rtd #-4",
+    " rtd #-32768",
     " bkpt #7",
     " trapeq",
     " trapne.w #$ffff",
@@ -155,6 +157,10 @@ const BINARY: &[&str] = &[
 ];
 
 const REJECTED_ON_68020: &[&str] = &[
+    " bra.s *+1",
+    " beq.s *+1",
+    " rtd #65536",
+    " rtd #-32769",
     " unpk d0,d1,#-1",
     " pack d0,d1,#$10000",
     " move.w (1000.b,a0,d1),d0",
@@ -206,6 +212,10 @@ const HUNK: &[&str] = &[
     " move.w f(pc,d1),d0\nf:",
     " move.w f(pc),d0\n ds.b 40000\nf:",
     " bra.l f\nf:",
+    " nop\n lea (4.l,pc),a0",
+    " nop\n lea (100000,pc),a0",
+    " nop\n lea 100000(pc,d1),a0",
+    " nop\n lea ([4,pc]),a0",
     " section a,code\n bra.l f\n section b,code\nf: nop",
     " section a,code\n nop\n bsr.l f\n bsr.l g\n bsr.l f\n section b,code\nf: nop\n section c,code\ng: nop",
 ];

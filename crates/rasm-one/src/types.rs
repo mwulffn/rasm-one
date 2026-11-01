@@ -1,6 +1,7 @@
 //! Shared types.
 
 /// Operation or data size as written in source.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Size {
     /// `.b`
@@ -53,6 +54,7 @@ impl Size {
 }
 
 /// Target CPU.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Cpu {
     /// MC68000
@@ -112,6 +114,7 @@ impl CpuSet {
 }
 
 /// Kind of a section.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SectionKind {
     /// Code.
@@ -123,6 +126,7 @@ pub enum SectionKind {
 }
 
 /// Amiga memory requirement of a section.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemKind {
     /// No requirement.

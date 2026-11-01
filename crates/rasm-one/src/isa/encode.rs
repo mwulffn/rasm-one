@@ -36,18 +36,26 @@ pub(crate) struct Sizer<'a> {
     pub origin: Option<i64>,
     /// Section position of the instruction.
     pub start: i64,
+    /// True if labels are final addresses.
+    pub fixed_addresses: bool,
     pub lookup: &'a dyn Fn(SymId) -> Option<Value>,
 }
 
 impl Sizer<'_> {
     fn address_of(&self, offset: i64) -> Value {
         match self.origin {
-            Some(origin) => Value::abs(origin + offset),
+            Some(origin) => Value::abs(origin.saturating_add(offset)),
             None => Value {
                 base: Base::Section(self.section),
                 offset,
             },
         }
+    }
+
+    /// True if a constant target can be turned into a PC-relative distance. In a
+    /// relocatable section the distance to a constant isn't known.
+    fn has_final_addresses(&self) -> bool {
+        self.fixed_addresses || self.origin.is_some()
     }
 
     /// The value of an expression; anything not known yet counts as zero.
@@ -65,6 +73,11 @@ enum DispKind {
     Relocated,
     /// Something resolved later whose size the instruction doesn't dictate.
     Deferred,
+}
+
+/// True for what can be written in 32 bits, as a signed or an unsigned number.
+fn fits_long(number: i64) -> bool {
+    (-0x8000_0000..=0xFFFF_FFFF).contains(&number)
 }
 
 fn fits_byte(number: i64) -> bool {
@@ -88,9 +101,15 @@ fn plain_disp_kind(value: Value, fixed: bool) -> DispKind {
 /// Classifies a PC-relative displacement, whose PC is at section position `pc`.
 fn pc_disp_kind(value: Value, pc: i64, sizer: &Sizer) -> DispKind {
     match value.base {
-        Base::Absolute => DispKind::Number(value.offset - sizer.address_of(pc).offset),
+        Base::Absolute if !sizer.has_final_addresses() => {
+            DispKind::Number(sign_extend_32(value.offset))
+        }
+        Base::Absolute => {
+            let target = sign_extend_32(value.offset);
+            DispKind::Number(target.wrapping_sub(sizer.address_of(pc).offset))
+        }
         Base::Section(section) if section == sizer.section => {
-            DispKind::Number(value.offset - sizer.address_of(pc).offset)
+            DispKind::Number(value.offset.wrapping_sub(sizer.address_of(pc).offset))
         }
         _ => DispKind::Deferred,
     }
@@ -317,6 +336,8 @@ pub(crate) struct EmitContext<'a> {
     pub section: usize,
     /// Kind of that section.
     pub kind: SectionKind,
+    /// True if labels are final addresses, as in a raw binary.
+    pub fixed_addresses: bool,
     /// Fixed address of that section, if it has one. Its symbols are then
     /// constants, so addresses have to include this.
     pub origin: Option<i64>,
@@ -339,12 +360,17 @@ impl EmitContext<'_> {
     /// The address of a position in the section, as a value.
     pub fn address_of(&self, offset: i64) -> Value {
         match self.origin {
-            Some(origin) => Value::abs(origin + offset),
+            Some(origin) => Value::abs(origin.saturating_add(offset)),
             None => Value {
                 base: Base::Section(self.section),
                 offset,
             },
         }
+    }
+
+    /// True if a constant target can be turned into a PC-relative distance.
+    fn has_final_addresses(&self) -> bool {
+        self.fixed_addresses || self.origin.is_some()
     }
 
     /// The value of `*` in an operand.
@@ -420,7 +446,7 @@ impl EmitContext<'_> {
 
     /// Writes zeros in place of a value that failed to evaluate.
     pub fn put_zero(&mut self, bytes: u32) {
-        self.put(0, bytes);
+        self.data.resize(self.data.len() + bytes as usize, 0);
     }
 }
 
@@ -1135,6 +1161,7 @@ fn sizer_for<'a>(ctx: &'a EmitContext) -> Sizer<'a> {
         section: ctx.section,
         origin: ctx.origin,
         start: ctx.instruction_start,
+        fixed_addresses: ctx.fixed_addresses,
         lookup: ctx.lookup,
     }
 }
@@ -1176,7 +1203,12 @@ fn emit_extension(op: &Operand, size: Size, insn: &Instruction, ctx: &mut EmitCo
             emit_short_field(expr, "absolute short address out of range", op.span, ctx);
         }
         Mode::AbsLong(expr) => match ctx.evaluate(expr, pc, op.span) {
-            Some(value) => ctx.put_value(value, 4),
+            Some(value) => {
+                if !fits_long(value.offset) {
+                    ctx.error("out-of-range", "address doesn't fit in 32 bits", op.span);
+                }
+                ctx.put_value(value, 4);
+            }
             None => ctx.put_zero(4),
         },
         Mode::PcDisp(expr) | Mode::PcDispWord(expr) => {
@@ -1369,7 +1401,11 @@ fn emit_plain_disp(value: Option<Value>, width: Width, span: Span, ctx: &mut Emi
         return;
     };
     let offset = sign_extend_32(value.offset);
-    if width == Width::Word && !fits_word(offset) {
+    let fits = match width {
+        Width::Word => fits_word(offset),
+        Width::Long => fits_long(offset),
+    };
+    if !fits {
         ctx.error("out-of-range", "displacement out of range", span);
     }
     ctx.put_value(Value { offset, ..value }, bytes);
@@ -1456,20 +1492,48 @@ fn emit_pc_field(
                 span,
             });
         }
-        ctx.put((value.offset + ctx.offset() - pc) as u32, bytes);
+        ctx.put(value.offset.wrapping_add(ctx.offset() - pc) as u32, bytes);
         return None;
     }
-    let distance = value.offset - ctx.address_of(pc).offset;
+    // In a relocatable section a constant is the displacement itself.
+    let literal = value.base == Base::Absolute && !ctx.has_final_addresses();
+    if literal {
+        ctx.diagnostics.push(Diagnostic::warning(
+            "absolute-displacement",
+            "the constant is used as the displacement, not as an address",
+            span,
+        ));
+    }
+    let target = if value.base == Base::Absolute {
+        sign_extend_32(value.offset)
+    } else {
+        value.offset
+    };
+    let distance = if literal {
+        target
+    } else {
+        target.wrapping_sub(ctx.address_of(pc).offset)
+    };
     let (min, max) = match bytes {
         1 => (-0x80, 0x7F),
         2 => (-0x8000, 0x7FFF),
-        _ => (i64::MIN, i64::MAX),
+        _ => (-0x8000_0000, 0x7FFF_FFFF),
     };
     if !(min..=max).contains(&distance) {
         ctx.error("out-of-range", range_message, span);
     }
     ctx.put(distance as u32, bytes);
     Some(distance)
+}
+
+/// The bytes of an integer used directly as the bits of a floating-point value.
+pub(crate) fn raw_float_bits(value: i64, size: Size) -> Vec<u8> {
+    let width = size.bytes() as usize;
+    let fill = if value < 0 { 0xFF } else { 0 };
+    let mut bytes = vec![fill; width.saturating_sub(8)];
+    let all = value.to_be_bytes();
+    bytes.extend_from_slice(&all[8usize.saturating_sub(width)..]);
+    bytes
 }
 
 fn emit_immediate(expr: &Expr, size: Size, span: Span, ctx: &mut EmitContext) {
@@ -1483,21 +1547,17 @@ fn emit_immediate(expr: &Expr, size: Size, span: Span, ctx: &mut EmitContext) {
         size,
         Size::Single | Size::Double | Size::Extended | Size::Packed
     ) {
-        // An integer given to a floating-point operand becomes that number.
-        let bytes = (value.base == Base::Absolute)
-            .then(|| float_bytes(&value.offset.to_string(), size))
-            .flatten();
-        match bytes {
-            Some(bytes) => ctx.data.extend_from_slice(&bytes),
-            None => {
-                ctx.error(
-                    "bad-float",
-                    "floating-point immediate must be a constant",
-                    span,
-                );
-                ctx.data.resize(ctx.data.len() + size.bytes() as usize, 0);
-            }
+        // The parser turns decimal numbers into literals, so what is left here is
+        // hex, octal, binary or symbols, which supply the raw bits.
+        if value.base != Base::Absolute {
+            ctx.error(
+                "bad-float",
+                "floating-point immediate must be a constant",
+                span,
+            );
         }
+        ctx.data
+            .extend_from_slice(&raw_float_bits(value.offset, size));
         return;
     }
     if size == Size::Quad {
@@ -1511,6 +1571,15 @@ fn emit_immediate(expr: &Expr, size: Size, span: Span, ctx: &mut EmitContext) {
         Size::Byte | Size::Short => (-0x80, 0xFF),
         Size::Word => (-0x8000, 0xFFFF),
         _ => (-0x8000_0000, 0xFFFF_FFFF),
+    };
+    // In a byte or word the 32-bit view of a negative number counts as that number.
+    let value = if size == Size::Long {
+        value
+    } else {
+        Value {
+            offset: sign_extend_32(value.offset),
+            ..value
+        }
     };
     if !(min..=max).contains(&value.offset) {
         ctx.error("out-of-range", "immediate operand out of range", span);
@@ -1530,7 +1599,16 @@ fn branch_target(target: &Operand, ctx: &mut EmitContext) -> Option<Value> {
         return None;
     };
     let pc = ctx.star();
-    ctx.evaluate(expr, pc, target.span)
+    let value = ctx.evaluate(expr, pc, target.span)?;
+    if value.base == Base::Absolute && !ctx.has_final_addresses() {
+        ctx.error(
+            "absolute-branch",
+            "a branch can't reach a constant address in a relocatable section",
+            target.span,
+        );
+        return None;
+    }
+    Some(value)
 }
 
 const BRANCH_RANGE: &str = "branch destination out of range";
@@ -1548,8 +1626,10 @@ fn encode_branch(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
         let value = branch_target(target, ctx);
         let pc = ctx.instruction_start + 2;
         ctx.put(u32::from(opcode >> 8), 1);
-        // A zero displacement would mean a word branch.
-        if emit_pc_field(value, pc, 1, BRANCH_RANGE, span, ctx) == Some(0) {
+        // A displacement of 0 means a word follows, and on 68020 and later one of
+        // -1 means a long does.
+        let distance = emit_pc_field(value, pc, 1, BRANCH_RANGE, span, ctx);
+        if distance == Some(0) || (distance == Some(-1) && insn.wide) {
             ctx.error("out-of-range", BRANCH_RANGE, span);
         }
     } else {
