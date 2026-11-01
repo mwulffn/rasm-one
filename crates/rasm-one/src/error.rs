@@ -52,6 +52,8 @@ pub enum OutputError {
 /// Severity of a [`Diagnostic`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
+    /// A message the source asked to show, with `printt` and similar.
+    Info,
     /// Output can still be produced.
     Warning,
     /// Output cannot be produced.
@@ -90,6 +92,13 @@ impl Diagnostic {
             message: message.into(),
             span: Some(span),
             related: Vec::new(),
+        }
+    }
+
+    pub(crate) fn info(code: &'static str, message: impl Into<String>, span: Span) -> Self {
+        Self {
+            severity: Severity::Info,
+            ..Self::error(code, message, span)
         }
     }
 

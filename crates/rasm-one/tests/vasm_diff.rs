@@ -319,6 +319,29 @@ const ACCEPTED: &[&str] = &[
     "x rs 2\ny rs 0\n dc.b x,y",
     "n equ 3\nx rs.b n\ny rs.b 0\n dc.b y",
     " rs.b 4\ny rs.b 0\n dc.b y",
+    // so and fo.
+    "x so.w 1\ny so.b 0\n dc.b x,y",
+    " clrso\nx so.l 1\n dc.b x",
+    " setso 8\nx so.w 1\ny so.b 0\n dc.b x,y",
+    " so.w 2\nx so.b 0\n dc.b x",
+    " clrfo\nx fo.w 1\ny fo.b 1\n dc.w x,y",
+    " setfo 8\nx fo.w 1\n dc.w x",
+    // offset blocks.
+    " offset\nx ds.w 1\ny ds.b 0\n section c,code\n dc.b x,y",
+    " offset 4\nx ds.w 1\ny ds.b 0\n section c,code\n dc.b x,y",
+    " offset 4\nx ds.w 1\ny ds.b 0\n dc.b x,y",
+    " offset\nx ds.w 1\n dc.b 1",
+    " dc.b 1\n offset\n ds.w 1\n dc.b 2",
+    " section c,code\n nop\n offset\nx ds.l 1\ny ds.b 0\n section c,code\n dc.b y\n rts",
+    // Directives that make no bytes.
+    " idnt x\n nop",
+    " idnt \"x y\"\n nop",
+    " printt \"x\"\n nop",
+    " echo \"x\"\n nop",
+    " printv 1\n nop",
+    " text\n nop",
+    " cseg\n nop",
+    " dseg\n dc.w 1",
     // end and section shortcuts.
     " end\n bogus",
     " nop\n end\n nop",
@@ -474,6 +497,10 @@ const REJECTED: &[&str] = &[
 /// Deliberately stricter than vasm, which only warns or misreads these. The
 /// brief asks for a strict dialect in which anything else is a clear error.
 const STRICTER_THAN_VASM: &[&str] = &[
+    " opt o-\n nop",
+    " idnt",
+    " printt",
+    " so.s 1",
     " fail",
     " fail oops",
     " cnop 0",

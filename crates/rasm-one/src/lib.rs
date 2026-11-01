@@ -203,6 +203,8 @@ pub struct Section {
     pub mem: MemKind,
     /// Fixed address given by `org`. Its labels are constants.
     pub origin: Option<u32>,
+    /// True for an `offset` block, which only defines symbols. Holds no bytes.
+    pub dummy: bool,
     /// Contents.
     pub data: Vec<u8>,
     /// Relocations, in increasing offset order.
@@ -279,6 +281,8 @@ pub struct LineEntry {
 pub struct Assembly {
     /// Names of the source files; a [`FileId`] indexes this list.
     pub files: Vec<String>,
+    /// Name given by `idnt`, used for the unit of an object file.
+    pub unit_name: Option<String>,
     /// Sections in order of first appearance.
     pub sections: Vec<Section>,
     /// Defined symbols.
@@ -322,6 +326,7 @@ impl Assembly {
         let severity = match diagnostic.severity {
             Severity::Error => "error",
             Severity::Warning => "warning",
+            Severity::Info => "info",
         };
         let body = format!("{severity}[{}]: {}", diagnostic.code, diagnostic.message);
         match diagnostic.span {
@@ -356,6 +361,7 @@ pub fn assemble(options: &Options, provider: &dyn FileProvider) -> Assembly {
     let built = layout::build(parser.finish());
     Assembly {
         files: built.files,
+        unit_name: built.unit_name,
         sections: built.sections,
         symbols: built.symbols,
         line_table: built.line_table,
@@ -643,6 +649,23 @@ mod tests {
         let assembly = run("m macro\n endm\n m\n rept 1\n endr\nx rs.w 1\nl: nop\n");
         let names: Vec<_> = assembly.symbols.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["x", "l"]);
+    }
+
+    #[test]
+    fn test_printt_reports_text_as_info_not_error() {
+        let assembly = run(" printt \"hello\"\n printv 2+3\n nop\n");
+        assert_eq!(assembly.diagnostics[0].severity, Severity::Info);
+        assert_eq!(assembly.diagnostics[0].message, "hello");
+        assert!(assembly.diagnostics[1].message.starts_with("5 "));
+        assert_eq!(write_bin(&assembly), Ok(vec![0x4E, 0x71]));
+    }
+
+    #[test]
+    fn test_offset_block_has_no_bytes_or_lines() {
+        let assembly = run(" offset\nx ds.w 2\ny ds.b 0\n");
+        assert!(assembly.line_table.is_empty());
+        assert_eq!(assembly.symbols[1].value, 4);
+        assert_eq!(assembly.symbols[1].section, None);
     }
 
     #[test]

@@ -42,6 +42,7 @@
 - Do not add a crate to solve a problem that can be solved with std in under 20 lines
 
 ## Testing
+- vasm is the byte-for-byte reference, except where vasm has a bug. Never copy a bug: do the correct thing, add a test, and add it to `docs/vasm-bugs.md`
 - Unit tests: `#[cfg(test)]` module at the bottom of each file
 - Integration tests: `tests/` directory
 - Test naming: `test_<function_name>_<scenario>` pattern

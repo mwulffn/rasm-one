@@ -51,7 +51,7 @@ fn select_hunks(assembly: &Assembly) -> Hunks<'_> {
         numbers: vec![None; assembly.sections.len()],
     };
     for (index, section) in assembly.sections.iter().enumerate() {
-        if !section.data.is_empty() || has_symbol(index) {
+        if !section.dummy && (!section.data.is_empty() || has_symbol(index)) {
             hunks.numbers[index] = Some(hunks.list.len() as u32);
             hunks.list.push((index, section));
         }
@@ -63,7 +63,11 @@ fn check_writable(assembly: &Assembly) -> Result<(), OutputError> {
     if assembly.has_errors() {
         return Err(OutputError::HasErrors);
     }
-    if assembly.sections.iter().any(|s| s.origin.is_some()) {
+    if assembly
+        .sections
+        .iter()
+        .any(|s| !s.dummy && s.origin.is_some())
+    {
         return Err(OutputError::FixedAddress);
     }
     Ok(())
@@ -124,7 +128,11 @@ pub fn write_hunk_object(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     let mut out = Writer::default();
     out.long(HUNK_UNIT);
     let main = assembly.files.first().map_or("", String::as_str);
-    out.name(main.rsplit('/').next().unwrap_or(main), 0);
+    let unit = match &assembly.unit_name {
+        Some(name) => name.as_str(),
+        None => main.rsplit('/').next().unwrap_or(main),
+    };
+    out.name(unit, 0);
 
     let is_constant_export = |s: &&Symbol| s.exported && s.section.is_none();
     if hunks.list.is_empty() {
