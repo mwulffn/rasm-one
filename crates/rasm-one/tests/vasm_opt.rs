@@ -333,8 +333,7 @@ fn test_assemble_displacements_match_vasm_o2() -> Result<(), Box<dyn Error>> {
     compare_rule(&sources, &DISPLACEMENTS, false)
 }
 
-/// In a raw binary a label at address 0 is a displacement of 0. In a hunk file it's a
-/// word relocation, which is #51.
+/// In a raw binary a label at address 0 is a displacement of 0.
 #[test]
 fn test_assemble_label_displacements_match_vasm_o2_in_binary() -> Result<(), Box<dyn Error>> {
     let Some(vasm) = Vasm::from_env()? else {

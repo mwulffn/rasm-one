@@ -17,6 +17,7 @@ const HUNK_SYMBOL: u32 = 0x3F0;
 const HUNK_END: u32 = 0x3F2;
 const HUNK_HEADER: u32 = 0x3F3;
 const HUNK_RELOC32SHORT: u32 = 0x3F7;
+const HUNK_DREL16: u32 = 0x3F8;
 const HUNK_RELRELOC32: u32 = 0x3FD;
 
 const EXT_DEF: u8 = 0x01;
@@ -375,6 +376,7 @@ fn write_object_relocs(
     let mut pc16 = OffsetsByHunk::new();
     let mut pc8 = OffsetsByHunk::new();
     let mut pc32 = OffsetsByHunk::new();
+    let mut base16 = OffsetsByHunk::new();
     for reloc in relocs {
         let RelocTarget::Section(target) = reloc.target else {
             continue; // External references are written separately.
@@ -385,6 +387,7 @@ fn write_object_relocs(
             (RelocKind::PcRelative, 4) => add_offset(&mut pc32, hunk, reloc.offset),
             (RelocKind::PcRelative, 2) => add_offset(&mut pc16, hunk, reloc.offset),
             (RelocKind::PcRelative, 1) => add_offset(&mut pc8, hunk, reloc.offset),
+            (RelocKind::BaseRelative, 2) => add_offset(&mut base16, hunk, reloc.offset),
             _ => return Err(unsupported(section, reloc)),
         }
     }
@@ -392,6 +395,7 @@ fn write_object_relocs(
     write_long_relocs(HUNK_RELOC16, &pc16, out);
     write_long_relocs(HUNK_RELOC8, &pc8, out);
     write_long_relocs(HUNK_RELRELOC32, &pc32, out);
+    write_long_relocs(HUNK_DREL16, &base16, out);
     Ok(())
 }
 

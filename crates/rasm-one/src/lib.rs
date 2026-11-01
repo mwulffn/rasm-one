@@ -364,6 +364,9 @@ pub enum RelocKind {
     Absolute,
     /// The field gets the distance to the target's address added.
     PcRelative,
+    /// The field gets the target's offset from the start of its section added, as with a
+    /// label used as a word displacement from an address register.
+    BaseRelative,
 }
 
 /// What a relocation refers to.

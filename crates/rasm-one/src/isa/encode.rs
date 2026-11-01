@@ -1523,7 +1523,10 @@ fn encode_movep(opcode: u16, memory: &Operand, ctx: &mut EmitContext) {
     };
     ctx.put_word(opcode | u16::from(base));
     match displacement {
-        Some(expr) => emit_short_field(expr, "displacement out of range", memory.span, ctx),
+        Some(expr) => {
+            emit_short_field(expr, "displacement out of range", memory.span, ctx);
+            mark_base_relative(ctx);
+        }
         None => ctx.put_zero(2),
     }
 }
@@ -1650,6 +1653,7 @@ fn emit_extension(op: &Operand, size: Size, insn: &Instruction, ctx: &mut EmitCo
         }
         Mode::Disp(expr, _) | Mode::DispWord(expr, _) => {
             emit_short_field(expr, "displacement out of range", op.span, ctx);
+            mark_base_relative(ctx);
         }
         Mode::Index(expr, _, index) => {
             ctx.put(u32::from(index_bits(*index) >> 8), 1);
@@ -1965,6 +1969,17 @@ fn emit_short_field(expr: &Expr, range_message: &str, span: Span, ctx: &mut Emit
         },
         2,
     );
+}
+
+/// A label as a word displacement from an address register is relative to the base of its
+/// section, not an address, if the field that was just written has a relocation.
+fn mark_base_relative(ctx: &mut EmitContext) {
+    let field = ctx.data.len() as u32 - 2;
+    if let Some(reloc) = ctx.relocs.last_mut() {
+        if reloc.offset == field && matches!(reloc.target, RelocTarget::Section(_)) {
+            reloc.kind = RelocKind::BaseRelative;
+        }
+    }
 }
 
 /// Writes a PC-relative field, whose PC is at section position `pc`. A target
