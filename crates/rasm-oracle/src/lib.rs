@@ -82,8 +82,20 @@ impl Vasm {
 
     /// Assembles `source` for `cpu` (such as `"68000"`) with `-no-opt`.
     pub fn assemble(&self, source: &str, cpu: &str, format: Format) -> Result<Output, OracleError> {
+        self.assemble_with_files(source, cpu, format, &[])
+    }
+
+    /// Like [`Vasm::assemble`], with extra files beside the source, given as
+    /// relative paths and contents.
+    pub fn assemble_with_files(
+        &self,
+        source: &str,
+        cpu: &str,
+        format: Format,
+        files: &[(&str, &[u8])],
+    ) -> Result<Output, OracleError> {
         let dir = unique_temp_dir()?;
-        let result = self.run_in(&dir, source, cpu, format);
+        let result = write_files(&dir, files).and_then(|()| self.run_in(&dir, source, cpu, format));
         // Best effort: a leftover temp dir must not fail the test.
         let _ = fs::remove_dir_all(&dir);
         result
@@ -115,6 +127,17 @@ impl Vasm {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+}
+
+fn write_files(dir: &Path, files: &[(&str, &[u8])]) -> Result<(), OracleError> {
+    for (path, contents) in files {
+        let full = dir.join(path);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(full, contents)?;
+    }
+    Ok(())
 }
 
 fn unique_temp_dir() -> Result<PathBuf, std::io::Error> {

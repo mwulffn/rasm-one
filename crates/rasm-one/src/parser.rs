@@ -3,14 +3,16 @@
 use std::collections::HashMap;
 
 use crate::atom::{Atom, AtomKind, DataItem};
+use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, BinaryOp, Expr, SymId, UnaryOp, Value};
 use crate::isa::encode::Instruction;
 use crate::isa::table::{rows_for, InsnRow};
 use crate::isa::{IndexReg, Mode, Operand};
 use crate::lexer::{LexError, Lexer, Punct, Tok};
-use crate::source::{FileId, Span};
+use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
+use crate::{Expansion, ExpansionKind};
 
 /// A symbol being collected.
 #[derive(Debug, Clone)]
@@ -38,6 +40,10 @@ pub(crate) struct Program {
     pub sections: Vec<SectionEntry>,
     /// All atoms, in source order.
     pub atoms: Vec<Atom>,
+    /// Names of the source files; a [`FileId`] indexes this list.
+    pub files: Vec<String>,
+    /// Includes and macro expansions.
+    pub expansions: Vec<Expansion>,
     pub symbols: Vec<SymbolEntry>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -97,6 +103,9 @@ fn is_directive(name: &str) -> bool {
             | "rsset"
             | "fail"
             | "end"
+            | "include"
+            | "incbin"
+            | "incdir"
     ) || section_shortcut(name).is_some()
 }
 
@@ -120,8 +129,16 @@ fn section_shortcut(name: &str) -> Option<(&'static str, SectionKind, MemKind)> 
 const RS_COUNTER: &str = "__RS";
 
 /// Parses whole files into a [`Program`].
-pub(crate) struct Parser {
+pub(crate) struct Parser<'f> {
     cpu: Cpu,
+    provider: &'f dyn FileProvider,
+    /// Directories to search for files, from options and `incdir`.
+    include_dirs: Vec<String>,
+    /// Files being parsed, outermost first, to catch include cycles.
+    file_stack: Vec<FileId>,
+    current_expansion: Option<u32>,
+    /// Diagnostics before this index have their expansion chains.
+    chained_diagnostics: usize,
     program: Program,
     symbol_ids: HashMap<String, SymId>,
     sections_by_key: HashMap<(String, SectionKind), usize>,
@@ -136,10 +153,15 @@ pub(crate) struct Parser {
     ended: bool,
 }
 
-impl Parser {
-    pub fn new(cpu: Cpu) -> Self {
+impl<'f> Parser<'f> {
+    pub fn new(cpu: Cpu, provider: &'f dyn FileProvider, include_dirs: &[String]) -> Self {
         Self {
             cpu,
+            provider,
+            include_dirs: include_dirs.to_vec(),
+            file_stack: Vec::new(),
+            current_expansion: None,
+            chained_diagnostics: 0,
             program: Program::default(),
             symbol_ids: HashMap::new(),
             sections_by_key: HashMap::new(),
@@ -155,7 +177,82 @@ impl Parser {
         self.program
     }
 
-    pub fn parse_file(&mut self, file: FileId, source: &[u8]) {
+    /// Parses the main source file.
+    pub fn parse_main(&mut self, path: &str) -> Result<(), FileError> {
+        let source = self.provider.read(path, None)?;
+        let file = self.file_id(path);
+        self.parse_file(file, &source);
+        Ok(())
+    }
+
+    fn file_id(&mut self, path: &str) -> FileId {
+        let files = &mut self.program.files;
+        match files.iter().position(|name| name == path) {
+            Some(index) => index as FileId,
+            None => {
+                files.push(path.to_string());
+                files.len() as FileId - 1
+            }
+        }
+    }
+
+    /// Reads the first of the places a file might be: as given, beside the
+    /// main source, then in each include directory. As in vasm, the directory
+    /// of an included file is not searched.
+    fn find_file(&self, path: &str, from: Option<&str>) -> Result<(String, Vec<u8>), FileError> {
+        let path = path.replace('\\', "/");
+        let mut candidates = vec![path.clone()];
+        let main = self.program.files.first();
+        if let Some((directory, _)) = main.and_then(|file| file.rsplit_once('/')) {
+            candidates.push(format!("{directory}/{path}"));
+        }
+        for directory in &self.include_dirs {
+            candidates.push(format!("{}/{path}", directory.trim_end_matches('/')));
+        }
+        for candidate in candidates {
+            let candidate = normalize_path(&candidate);
+            match self.provider.read(&candidate, from) {
+                Ok(contents) => return Ok((candidate, contents)),
+                Err(FileError::NotFound(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+        Err(FileError::NotFound(path))
+    }
+
+    /// The name of the file now being parsed.
+    fn current_file(&self) -> Option<&str> {
+        let file = *self.file_stack.last()?;
+        self.program.files.get(file as usize).map(String::as_str)
+    }
+
+    fn include(&mut self, path: &str, site: Span) -> Result<(), Diagnostic> {
+        let from = self.current_file().map(str::to_string);
+        let (resolved, source) = self
+            .find_file(path, from.as_deref())
+            .map_err(|error| Diagnostic::error("file-read", error.to_string(), site))?;
+        let file = self.file_id(&resolved);
+        if self.file_stack.contains(&file) {
+            return Err(Diagnostic::error(
+                "include-cycle",
+                format!("{resolved} includes itself"),
+                site,
+            ));
+        }
+        self.program.expansions.push(Expansion {
+            kind: ExpansionKind::Include,
+            site,
+            parent: self.current_expansion,
+        });
+        let outer = self.current_expansion;
+        self.current_expansion = Some(self.program.expansions.len() as u32 - 1);
+        self.parse_file(file, &source);
+        self.current_expansion = outer;
+        Ok(())
+    }
+
+    fn parse_file(&mut self, file: FileId, source: &[u8]) {
+        self.file_stack.push(file);
         for (index, raw) in source.split(|&b| b == b'\n').enumerate() {
             if self.ended {
                 break;
@@ -170,7 +267,15 @@ impl Parser {
             if let Err(diagnostic) = line.parse() {
                 self.program.diagnostics.push(diagnostic);
             }
+            // Lines of a nested file have already had their whole chain added.
+            add_expansion_chain(
+                &mut self.program.diagnostics[self.chained_diagnostics..],
+                self.current_expansion,
+                &self.program.expansions,
+            );
+            self.chained_diagnostics = self.program.diagnostics.len();
         }
+        self.file_stack.pop();
     }
 
     /// Looks up a register by name, including names defined by `equr`.
@@ -264,6 +369,7 @@ impl Parser {
             kind,
             span,
             section,
+            expansion: self.current_expansion,
         });
     }
 
@@ -289,14 +395,51 @@ impl Parser {
     }
 }
 
-struct LineParser<'p, 'a> {
-    parser: &'p mut Parser,
+/// Removes `.` and `dir/..` from a path, since providers that aren't
+/// filesystems can't be expected to understand them.
+fn normalize_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "." => {}
+            ".." if parts
+                .last()
+                .is_some_and(|last| !last.is_empty() && *last != "..") =>
+            {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    parts.join("/")
+}
+
+/// Adds where each diagnostic's code was included or expanded from.
+pub(crate) fn add_expansion_chain(
+    diagnostics: &mut [Diagnostic],
+    expansion: Option<u32>,
+    expansions: &[Expansion],
+) {
+    for diagnostic in diagnostics {
+        let mut current = expansion;
+        while let Some(entry) = current.and_then(|id| expansions.get(id as usize)) {
+            diagnostic.related.push(Related {
+                message: entry.kind.description().to_string(),
+                span: entry.site,
+            });
+            current = entry.parent;
+        }
+    }
+}
+
+struct LineParser<'p, 'a, 'f> {
+    parser: &'p mut Parser<'f>,
     lexer: Lexer<'a>,
     file: FileId,
     line: u32,
 }
 
-impl LineParser<'_, '_> {
+impl LineParser<'_, '_, '_> {
     fn span(&self, start: usize) -> Span {
         Span {
             file: self.file,
@@ -568,6 +711,61 @@ impl LineParser<'_, '_> {
         })
     }
 
+    /// Reads a file name, quoted or not.
+    fn parse_path(&mut self, span: Span) -> Result<String, Diagnostic> {
+        let bytes = match self.peek()? {
+            Tok::Str(bytes) => {
+                self.advance()?;
+                bytes
+            }
+            _ => self.lexer.word().to_vec(),
+        };
+        if bytes.is_empty() {
+            return Err(Diagnostic::error("syntax", "file name expected", span));
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// `incbin` inserts a file, optionally from an offset and for a length. A
+    /// length that is not positive means the rest of the file, and a longer
+    /// one stops at the end of the file.
+    fn parse_incbin(&mut self, span: Span) -> Result<(), Diagnostic> {
+        let path = self.parse_path(span)?;
+        let mut offset = 0;
+        let mut length = 0;
+        if self.eat(Punct::Comma)? {
+            offset = self.parse_constant()?;
+            if self.eat(Punct::Comma)? {
+                length = self.parse_constant()?;
+            }
+        }
+        self.expect_end()?;
+        let from = self.parser.current_file().map(str::to_string);
+        let (_, contents) = self
+            .parser
+            .find_file(&path, from.as_deref())
+            .map_err(|error| Diagnostic::error("file-read", error.to_string(), span))?;
+        let start = usize::try_from(offset)
+            .ok()
+            .filter(|&start| start <= contents.len())
+            .ok_or_else(|| Diagnostic::error("bad-offset", "incbin offset out of range", span))?;
+        let available = contents.len() - start;
+        let count = match usize::try_from(length) {
+            Ok(length) if length > 0 => length.min(available),
+            _ => available,
+        };
+        self.warn_if_bss(span);
+        let bytes = contents[start..start + count].to_vec();
+        self.parser.push_atom(
+            AtomKind::Data {
+                size: Size::Byte,
+                items: vec![DataItem::Bytes(bytes)],
+            },
+            span,
+        );
+        Ok(())
+    }
+
     /// `org` starts a new section at a fixed address.
     fn parse_org(&mut self, span: Span) -> Result<(), Diagnostic> {
         let address = self.parse_constant()?;
@@ -729,6 +927,26 @@ impl LineParser<'_, '_> {
             _ => {}
         }
         self.define_optional_label(label)?;
+        match lower.as_str() {
+            "include" => {
+                self.no_size(size, span)?;
+                let path = self.parse_path(span)?;
+                self.expect_end()?;
+                return self.parser.include(&path, span);
+            }
+            "incbin" => {
+                self.no_size(size, span)?;
+                return self.parse_incbin(span);
+            }
+            "incdir" => {
+                self.no_size(size, span)?;
+                let path = self.parse_path(span)?;
+                self.expect_end()?;
+                self.parser.include_dirs.push(path);
+                return Ok(());
+            }
+            _ => {}
+        }
         if lower == "rorg" {
             self.no_size(size, span)?;
             let expr = self.parse_expr()?;
@@ -1340,6 +1558,15 @@ mod tests {
         );
         assert_eq!(parse_section_type("foo"), None);
         assert_eq!(parse_section_type("code_x"), None);
+    }
+
+    #[test]
+    fn test_normalize_path_resolves_dots() {
+        assert_eq!(normalize_path("sub/../d.bin"), "d.bin");
+        assert_eq!(normalize_path("./a/./b"), "a/b");
+        assert_eq!(normalize_path("../d.bin"), "../d.bin");
+        assert_eq!(normalize_path("../../d.bin"), "../../d.bin");
+        assert_eq!(normalize_path("/abs/../d.bin"), "/d.bin");
     }
 
     #[test]
