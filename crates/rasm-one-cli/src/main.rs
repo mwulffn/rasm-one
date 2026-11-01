@@ -3,9 +3,13 @@
 use std::fs;
 
 use anyhow::{bail, Context, Result};
-use rasm_one::{assemble, write_bin, write_hunk_exe, FileError, FileProvider, Options, Severity};
+use rasm_one::{
+    assemble, write_bin, write_hunk_exe, write_hunk_object, FileError, FileProvider, Options,
+    Severity,
+};
 
-const USAGE: &str = "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fbin] [-I<dir>]...";
+const USAGE: &str =
+    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-I<dir>]...";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -22,6 +26,7 @@ impl FileProvider for NativeProvider {
 #[derive(Debug, PartialEq, Eq)]
 enum Format {
     HunkExe,
+    HunkObject,
     Bin,
 }
 
@@ -42,6 +47,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             output = Some(args.next().context("-o needs a file name")?);
         } else if arg == "-Fhunkexe" {
             format = Format::HunkExe;
+        } else if arg == "-Fhunk" {
+            format = Format::HunkObject;
         } else if arg == "-Fbin" {
             format = Format::Bin;
         } else if let Some(directory) = arg.strip_prefix("-I") {
@@ -81,6 +88,7 @@ fn main() -> Result<()> {
     }
     let bytes = match args.format {
         Format::HunkExe => write_hunk_exe(&assembly)?,
+        Format::HunkObject => write_hunk_object(&assembly)?,
         Format::Bin => write_bin(&assembly)?,
     };
     fs::write(&args.output, bytes).with_context(|| format!("writing {}", args.output))?;

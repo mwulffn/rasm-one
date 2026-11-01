@@ -4,7 +4,7 @@ use std::cell::Cell;
 
 use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::Diagnostic;
-use crate::expr::{eval, Value};
+use crate::expr::{eval, Base, Value};
 use crate::isa::encode::{encode, EmitContext};
 use crate::parser::{add_expansion_chain, Program, SectionEntry};
 use crate::types::{SectionKind, Size};
@@ -35,7 +35,26 @@ pub(crate) struct Built {
 /// Lays out a parsed program and generates its bytes.
 pub(crate) fn build(program: Program) -> Built {
     let mut diagnostics = program.diagnostics;
-    let values: SymbolValues = vec![Cell::new(None); program.symbols.len()];
+    for entry in &program.symbols {
+        if let (Some(span), None) = (entry.exported_at, entry.defined_at) {
+            diagnostics.push(Diagnostic::error(
+                "undefined-export",
+                format!("xdef of {}, which is never defined", entry.name),
+                span,
+            ));
+        }
+    }
+    let values: SymbolValues = program
+        .symbols
+        .iter()
+        .enumerate()
+        .map(|(id, entry)| {
+            Cell::new(entry.external.then_some(Value {
+                base: Base::External(id as u32),
+                offset: 0,
+            }))
+        })
+        .collect();
     let mut settled = false;
     for _ in 0..MAX_PASSES {
         let before = values.clone();
@@ -119,10 +138,14 @@ pub(crate) fn build(program: Program) -> Built {
             let value = value.get()?;
             Some(Symbol {
                 name: entry.name.clone(),
-                section: value.section,
+                section: match value.base {
+                    Base::Section(section) => Some(section),
+                    _ => None,
+                },
                 value: value.offset,
                 span: entry.defined_at?,
                 local: entry.name.starts_with('.') || entry.name.ends_with('$'),
+                exported: entry.exported_at.is_some(),
             })
         })
         .collect();
@@ -143,7 +166,7 @@ fn address(section: usize, entry: &SectionEntry, offset: i64) -> Value {
     match entry.origin {
         Some(origin) => Value::abs(origin + offset),
         None => Value {
-            section: Some(section),
+            base: Base::Section(section),
             offset,
         },
     }
@@ -192,7 +215,7 @@ fn atom_len(
             .sum(),
         AtomKind::Space { size, count, .. } => match eval(count, here, &lookup) {
             Ok(Value {
-                section: None,
+                base: Base::Absolute,
                 offset: n,
             }) if (0..=MAX_SPACE).contains(&n) => {
                 n.saturating_mul(i64::from(size.bytes())).min(MAX_SPACE)
@@ -339,7 +362,8 @@ fn emit_space(
         return;
     };
     let total = value.offset.saturating_mul(i64::from(size.bytes()));
-    if value.section.is_some() || !(0..=MAX_SPACE).contains(&value.offset) || total > MAX_SPACE {
+    if value.base != Base::Absolute || !(0..=MAX_SPACE).contains(&value.offset) || total > MAX_SPACE
+    {
         ctx.diagnostics.push(Diagnostic::error(
             "bad-count",
             "count must be a non-negative constant of reasonable size",
@@ -349,7 +373,7 @@ fn emit_space(
     }
     let fill_value = match fill {
         Some(expr) => match ctx.evaluate(expr, pc, atom.span) {
-            Some(value) if value.section.is_none() => value.offset,
+            Some(value) if value.base == Base::Absolute => value.offset,
             Some(_) => {
                 ctx.diagnostics.push(Diagnostic::error(
                     "not-absolute",
