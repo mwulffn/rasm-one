@@ -300,6 +300,20 @@ fn merge_lines(
     linked
         .line_table
         .sort_by_key(|entry| (entry.section, entry.offset));
+    for (index, input) in inputs.iter().enumerate() {
+        for entry in &input.debug_lines {
+            let Some(place) = placements[index].get(entry.section).copied().flatten() else {
+                continue;
+            };
+            let mut entry = *entry;
+            entry.section = place.section;
+            entry.offset += place.offset;
+            entry.span = moved(entry.span, file_bases[index]);
+            entry.expansion = entry.expansion.map(|e| e + expansion_bases[index]);
+            linked.debug_lines.push(entry);
+        }
+        linked.hunk_settings.line_debug |= input.hunk_settings.line_debug;
+    }
 }
 
 fn apply_relocs(

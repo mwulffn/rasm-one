@@ -9,7 +9,7 @@ issues for progress.
 Build with `cargo build --release`, which produces the `rasm-one` command:
 
 ```
-rasm-one <source>... -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...
+rasm-one <source>... -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-linedebug [-noabspath]] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...
 ```
 
 | Option | Output |
@@ -37,6 +37,11 @@ the source: 1 to 5, 7 to 12, `g` and `f`. vasm's optional rules, which are off b
 here yet. Output is compared byte for byte with vasm in both modes, apart from rare layouts in
 [#56](https://github.com/mwulffn/rasm-one/issues/56). Where vasm has a bug, rasm-one does the
 correct thing instead; see `docs/vasm-bugs.md`.
+
+## Debugging
+
+`-linedebug`, or `Options::line_debug`, adds line information to hunk files in SAS/C's `LINE`
+format, as vasm does. File names become absolute on the command line unless `-noabspath` is given.
 
 ## Linking
 

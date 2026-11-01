@@ -34,6 +34,7 @@ pub(crate) struct Built {
     pub sections: Vec<Section>,
     pub symbols: Vec<Symbol>,
     pub line_table: Vec<LineEntry>,
+    pub debug_lines: Vec<LineEntry>,
     pub diagnostics: Vec<Diagnostic>,
     pub files: Vec<String>,
     pub sources: Vec<Vec<u8>>,
@@ -141,6 +142,7 @@ pub(crate) fn build(program: Program) -> Built {
     let lookup = |id: u32| values[id as usize].get();
     let name_of = |id: u32| program.symbols[id as usize].name.clone();
     let mut line_table = Vec::new();
+    let mut debug_lines = Vec::new();
     let mut datas: Vec<Vec<u8>> = vec![Vec::new(); program.sections.len()];
     let mut relocs: Vec<Vec<Reloc>> = vec![Vec::new(); program.sections.len()];
     let emitted: &[Atom] = if too_large { &[] } else { &program.atoms };
@@ -170,6 +172,21 @@ pub(crate) fn build(program: Program) -> Built {
             &program.expansions,
         );
         let len = datas[index].len() as u32 - start;
+        let makes_output = !matches!(
+            atom.kind,
+            AtomKind::Label(_) | AtomKind::Equate(..) | AtomKind::AlignInstruction
+        );
+        if makes_output && !entry.dummy {
+            // Line debugging gives padding the address after it.
+            let padding = matches!(atom.kind, AtomKind::Align { .. });
+            debug_lines.push(LineEntry {
+                section: index,
+                offset: if padding { start + len } else { start },
+                len,
+                span: atom.span,
+                expansion: atom.expansion,
+            });
+        }
         if len > 0 && !entry.dummy {
             line_table.push(LineEntry {
                 section: index,
@@ -224,6 +241,7 @@ pub(crate) fn build(program: Program) -> Built {
         sections,
         symbols,
         line_table,
+        debug_lines,
         diagnostics,
         files: program.files,
         sources: program.sources,

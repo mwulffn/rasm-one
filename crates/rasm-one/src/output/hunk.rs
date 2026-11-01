@@ -2,7 +2,7 @@
 
 use crate::error::OutputError;
 use crate::types::{MemKind, SectionKind};
-use crate::{Assembly, Reloc, RelocKind, RelocTarget, Section, Symbol, Target};
+use crate::{Assembly, LineEntry, Reloc, RelocKind, RelocTarget, Section, Symbol, Target};
 
 const HUNK_UNIT: u32 = 0x3E7;
 const HUNK_NAME: u32 = 0x3E8;
@@ -14,6 +14,7 @@ const HUNK_RELOC16: u32 = 0x3ED;
 const HUNK_RELOC8: u32 = 0x3EE;
 const HUNK_EXT: u32 = 0x3EF;
 const HUNK_SYMBOL: u32 = 0x3F0;
+const HUNK_DEBUG: u32 = 0x3F1;
 const HUNK_END: u32 = 0x3F2;
 const HUNK_HEADER: u32 = 0x3F3;
 const HUNK_RELOC32SHORT: u32 = 0x3F7;
@@ -130,6 +131,7 @@ fn executable_bytes(assembly: &Assembly, options: HunkExeOptions) -> Result<Vec<
             write_exe_relocs(section, &hunks.numbers, options, &mut out)?;
         }
         write_symbols(assembly, index, &mut out);
+        write_line_debug(assembly, index, &mut out);
         out.long(HUNK_END);
     }
     Ok(out.bytes)
@@ -184,6 +186,7 @@ fn object_bytes(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
         write_object_relocs(section, relocs, &hunks.numbers, &mut out)?;
         write_external_info(assembly, Some(index), position == 0, relocs, &mut out);
         write_symbols(assembly, index, &mut out);
+        write_line_debug(assembly, index, &mut out);
         out.long(HUNK_END);
     }
     Ok(out.bytes)
@@ -464,6 +467,44 @@ fn write_external_info(
         out.long(symbol.value as u32);
     }
     out.long(0);
+}
+
+/// Writes `HUNK_DEBUG` for a section, one for each run of lines from the same file, as
+/// `LINE` tables of line numbers and offsets from the start of the run.
+fn write_line_debug(assembly: &Assembly, section: usize, out: &mut Writer) {
+    let settings = assembly.hunk_settings;
+    if !settings.line_debug || settings.no_symbols {
+        return;
+    }
+    let mut lines: Vec<&LineEntry> = Vec::new();
+    for entry in assembly.debug_lines.iter().filter(|e| e.section == section) {
+        // A line that repeats straight after itself isn't listed again.
+        let repeat = lines.last().is_some_and(|last| {
+            last.span.file == entry.span.file && last.span.line == entry.span.line
+        });
+        if !repeat {
+            lines.push(entry);
+        }
+    }
+    for run in lines.chunk_by(|a, b| a.span.file == b.span.file) {
+        let name = assembly
+            .files
+            .get(run[0].span.file as usize)
+            .map_or("", String::as_str);
+        let name_longs = name.len().div_ceil(4);
+        let base = run[0].offset;
+        out.long(HUNK_DEBUG);
+        out.long(3 + name_longs as u32 + 2 * run.len() as u32);
+        out.long(base);
+        out.bytes.extend_from_slice(b"LINE");
+        out.long(name_longs as u32);
+        out.bytes.extend_from_slice(name.as_bytes());
+        out.zeros(name_longs * 4 - name.len());
+        for entry in run {
+            out.long(entry.span.line);
+            out.long(entry.offset - base);
+        }
+    }
 }
 
 fn write_symbols(assembly: &Assembly, section: usize, out: &mut Writer) {

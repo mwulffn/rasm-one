@@ -187,6 +187,9 @@ pub struct Options {
     /// The most statements that may be generated, which macros and `rept` could
     /// otherwise multiply without bound. More is an error.
     pub max_atoms: usize,
+    /// Write line information for debuggers in hunk files, in SAS/C's `LINE` format, like
+    /// vasm's `-linedebug`. It names files as in [`Assembly::files`], which a caller can change.
+    pub line_debug: bool,
     /// What to optimise. Everything by default, as in vasm.
     pub optimisations: Optimisations,
 }
@@ -360,6 +363,7 @@ impl Options {
             target: Target::Relocatable,
             max_output_bytes: 256 * 1024 * 1024,
             max_atoms: 4_000_000,
+            line_debug: false,
             optimisations: Optimisations::all(),
         }
     }
@@ -512,6 +516,8 @@ pub struct HunkSettings {
     pub exported_symbols_only: bool,
     /// `l+` or `l-`: write an object or an executable, whichever was asked for.
     pub linkable: Option<bool>,
+    /// From [`Options::line_debug`]: write `HUNK_DEBUG` line information.
+    pub line_debug: bool,
 }
 
 /// Result of an assembly. Holds whatever could be produced even after errors.
@@ -535,6 +541,8 @@ pub struct Assembly {
     pub expansions: Vec<Expansion>,
     /// Errors and warnings.
     pub diagnostics: Vec<Diagnostic>,
+    /// What line debugging lists: every statement that makes output, in source order.
+    pub(crate) debug_lines: Vec<LineEntry>,
     /// The limit from [`Options::max_output_bytes`], which also applies to a raw
     /// binary's gaps.
     pub(crate) max_output_bytes: i64,
@@ -612,11 +620,15 @@ pub fn assemble(options: &Options, provider: &dyn FileProvider) -> Assembly {
         sources: built.sources,
         target: options.target,
         unit_name: built.unit_name,
-        hunk_settings: built.hunk_settings,
+        hunk_settings: HunkSettings {
+            line_debug: options.line_debug,
+            ..built.hunk_settings
+        },
         max_output_bytes: built.max_output_bytes,
         sections: built.sections,
         symbols: built.symbols,
         line_table: built.line_table,
+        debug_lines: built.debug_lines,
         expansions: built.expansions,
         diagnostics: built.diagnostics,
     }

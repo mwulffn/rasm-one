@@ -29,6 +29,7 @@ pub struct Project {
     has_coprocessor: bool,
     has_68851: bool,
     unoptimised: bool,
+    line_debug: bool,
 }
 
 #[wasm_bindgen]
@@ -80,6 +81,7 @@ impl Project {
             options.cpu = cpu;
         }
         options.mmu_68851 = self.has_68851;
+        options.line_debug = self.line_debug;
         if self.has_coprocessor {
             options.fpu = FpuChoice::Coprocessor;
         }
@@ -107,6 +109,11 @@ impl Project {
         let assembly = link(&inputs);
         let output = write_hunk_exe(&assembly).map_err(|error| error.to_string());
         Self::result(assembly, output)
+    }
+
+    /// Whether hunk files should hold line information for debuggers.
+    pub fn set_line_debug(&mut self, on: bool) {
+        self.line_debug = on;
     }
 
     /// Whether to optimise as vasm does by default, which is on unless this says otherwise.

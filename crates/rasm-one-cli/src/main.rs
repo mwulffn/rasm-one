@@ -10,7 +10,7 @@ use rasm_one::{
 };
 
 const USAGE: &str =
-    "usage: rasm-one <source>... -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...";
+    "usage: rasm-one <source>... -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-linedebug [-noabspath]] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -38,6 +38,8 @@ struct Args {
     include_dirs: Vec<String>,
     listing: Option<String>,
     kickstart1: bool,
+    line_debug: bool,
+    relative_paths: bool,
     cpu: Cpu,
     fpu: FpuChoice,
     mmu_68851: bool,
@@ -77,6 +79,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut include_dirs = Vec::new();
     let mut listing = None;
     let mut kickstart1 = false;
+    let mut line_debug = false;
+    let mut relative_paths = false;
     let mut cpu = Cpu::default();
     let mut fpu = FpuChoice::default();
     let mut mmu_68851 = false;
@@ -90,6 +94,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             output = Some(args.next().context("-o needs a file name")?);
         } else if arg == "-L" {
             listing = Some(args.next().context("-L needs a file name")?);
+        } else if arg == "-linedebug" {
+            line_debug = true;
+        } else if arg == "-noabspath" {
+            relative_paths = true;
         } else if arg == "-kick1hunks" {
             kickstart1 = true;
         } else if arg == "-Fhunkexe" {
@@ -134,6 +142,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
                 include_dirs,
                 listing,
                 kickstart1,
+                line_debug,
+                relative_paths,
                 cpu,
                 fpu,
                 mmu_68851,
@@ -156,6 +166,7 @@ fn main() -> Result<()> {
     options.fpu = args.fpu;
     options.mmu_68851 = args.mmu_68851;
     options.optimisations = args.optimisations;
+    options.line_debug = args.line_debug;
     options.target = if args.format == Format::Bin {
         Target::RawBinary
     } else {
@@ -170,7 +181,7 @@ fn main() -> Result<()> {
             assemble(&options, &NativeProvider)
         })
         .collect();
-    let assembly = match assemblies.len() {
+    let mut assembly = match assemblies.len() {
         1 => assemblies.remove(0),
         _ => link(&assemblies),
     };
@@ -188,6 +199,13 @@ fn main() -> Result<()> {
         .count();
     if errors > 0 {
         bail!("{errors} error(s)");
+    }
+    if args.line_debug && !args.relative_paths {
+        // As in vasm, so that a debugger can find them.
+        let directory = std::env::current_dir().context("finding the current directory")?;
+        for file in &mut assembly.files {
+            *file = directory.join(&*file).display().to_string();
+        }
     }
     let bytes = match args.format {
         Format::HunkExe => write_hunk_exe_with(

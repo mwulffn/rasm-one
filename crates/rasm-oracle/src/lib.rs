@@ -150,6 +150,24 @@ impl Vasm {
         result
     }
 
+    /// Like [`Vasm::assemble_with_files`], with extra command-line arguments as in
+    /// [`Vasm::assemble_with_args`].
+    pub fn assemble_with_files_and_args(
+        &self,
+        source: &str,
+        cpu: &str,
+        format: Format,
+        files: &[(&str, &[u8])],
+        args: &[&str],
+    ) -> Result<Output, OracleError> {
+        let dir = unique_temp_dir()?;
+        let result =
+            write_files(&dir, files).and_then(|()| self.run_in(&dir, source, cpu, format, args));
+        // Best effort: a leftover temp dir must not fail the test.
+        let _ = fs::remove_dir_all(&dir);
+        result
+    }
+
     fn run_in(
         &self,
         dir: &Path,
