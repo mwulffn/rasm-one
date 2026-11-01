@@ -170,7 +170,7 @@ pub struct Options {
 /// Which optimisations apply, numbered like vasm's `-opt-oN` and `opt oN`.
 ///
 /// Only some of vasm's rules exist yet, so this is not yet what vasm does by default.
-/// Those implemented: 1, branches.
+/// Those implemented: 1, branches; 2, displacements of zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Optimisations {
@@ -180,7 +180,7 @@ pub struct Optimisations {
 }
 
 impl Optimisations {
-    const IMPLEMENTED: u32 = 1 << RULE_BRANCHES;
+    const IMPLEMENTED: u32 = 1 << RULE_BRANCHES | 1 << RULE_DISPLACEMENTS;
 
     /// Every rule that exists, which can be changed with `opt`.
     pub fn all() -> Self {
@@ -225,6 +225,8 @@ impl Optimisations {
 
 /// Rule 1: unsized branches take the smallest form that reaches.
 pub(crate) const RULE_BRANCHES: u32 = 1;
+/// Rule 2: `0(An)` becomes `(An)`.
+pub(crate) const RULE_DISPLACEMENTS: u32 = 2;
 
 impl Options {
     /// Options for assembling `main` for a 68000.

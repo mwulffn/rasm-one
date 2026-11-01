@@ -95,6 +95,10 @@ fn compare(
 }
 
 fn compare_all(sources: &[String], coprocessors: bool) -> Result<(), Box<dyn Error>> {
+    compare_rule(sources, &BRANCHES, coprocessors)
+}
+
+fn compare_rule(sources: &[String], rule: &Rule, coprocessors: bool) -> Result<(), Box<dyn Error>> {
     let Some(vasm) = Vasm::from_env()? else {
         return Ok(());
     };
@@ -104,7 +108,7 @@ fn compare_all(sources: &[String], coprocessors: bool) -> Result<(), Box<dyn Err
     for source in sources {
         for cpu in cpus {
             for format in FORMATS {
-                let found = compare(&vasm, source, cpu, *format, &BRANCHES, coprocessors)?;
+                let found = compare(&vasm, source, cpu, *format, rule, coprocessors)?;
                 failures.extend(found);
             }
         }
@@ -261,6 +265,102 @@ fn test_assemble_coprocessor_branches_match_vasm_o1() -> Result<(), Box<dyn Erro
     .map(|s| s.to_string())
     .collect();
     compare_all(&sources, true)
+}
+
+const DISPLACEMENTS: Rule = Rule {
+    number: 2,
+    flag: "-opt-o2+",
+};
+
+const DISPLACEMENT_CASES: &[&str] = &[
+    " move.w 0(a0),d0",
+    " move.w (0,a0),d0",
+    " move.w 0(a0),0(a1)",
+    " move.w 2(a0),0(a1)",
+    " move.w 0(a0),2(a1)",
+    " move.l #1,0(a0)",
+    " move.w z(a0),d0\nz equ 0",
+    " move.w z(a0),d0\n nop\nz equ 0",
+    "z equ 0\n move.w z(a0),d0",
+    "a: nop\nb: move.w b-a-2(a0),d0",
+    "a: move.w b-c(a0),d0\nc: nop\nb:",
+    " xref x\n move.w x(a0),d0",
+    " jmp 0(a0)",
+    " jsr 0(a0)",
+    " lea 0(a0),a1",
+    " pea 0(a0)",
+    " movem.l d0/d1,0(a0)",
+    " movem.l 0(a0),d0/d1",
+    " clr.w 0(a0)",
+    " tst.l 0(a7)",
+    " btst #1,0(a0)",
+    " bset d1,0(a0)",
+    " addq.w #1,0(a0)",
+    " asl.w 0(a0)",
+    " movep.w 0(a0),d0",
+    " movep.l d0,0(a0)",
+    " move.w (0.w,a0),d0",
+    " move.w 0(a0,d1.w),d0",
+    " move.w 0(pc),d0",
+    " lea (100000,a0),a1",
+    " opt o2-\n move.w 0(a0),d0",
+    " opt o2+\n move.w 0(a0),d0",
+    " opt o2-\n move.w 0(a0),d0\n opt o2+\n move.w 0(a0),d0",
+    " bfextu 0(a0){1:2},d0",
+    " bftst 0(a0){1:2}",
+    " bfins d0,0(a0){1:2}",
+    " mulu.l 0(a0),d0",
+    " cas.w d0,d1,0(a0)",
+    " chk2.w 0(a0),d0",
+    " moves.w 0(a0),d0",
+    " moves.w d0,0(a0)",
+];
+
+#[test]
+fn test_assemble_displacements_match_vasm_o2() -> Result<(), Box<dyn Error>> {
+    let sources: Vec<String> = DISPLACEMENT_CASES.iter().map(|s| s.to_string()).collect();
+    compare_rule(&sources, &DISPLACEMENTS, false)
+}
+
+/// In a raw binary a label at address 0 is a displacement of 0. In a hunk file it's a
+/// word relocation, which is #51.
+#[test]
+fn test_assemble_label_displacements_match_vasm_o2_in_binary() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    for source in [
+        "a: nop\n move.w a(a0),d0",
+        "a: move.w a(a0),d0",
+        "b: nop\na: move.w a(a0),d0",
+    ] {
+        for cpu in CPUS {
+            let found = compare(&vasm, source, cpu, Format::Bin, &DISPLACEMENTS, false)?;
+            assert_eq!(found, None);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_assemble_coprocessor_displacements_match_vasm_o2() -> Result<(), Box<dyn Error>> {
+    let sources: Vec<String> = [
+        " fmove.s 0(a0),fp0",
+        " fmove.s fp0,0(a0)",
+        " fmove.p fp0,0(a0){#1}",
+        " fmovem.x fp0,0(a0)",
+        " fmove.l 0(a0),fpcr",
+        " fsave 0(a0)",
+        " frestore 0(a0)",
+        " pmove tc,0(a0)",
+        " pflush #1,#1,0(a0)",
+        " ptestr #1,0(a0),#1",
+        " pload #1,#1,0(a0)",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    compare_rule(&sources, &DISPLACEMENTS, true)
 }
 
 /// A small generator, so that runs are the same everywhere.
