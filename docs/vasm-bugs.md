@@ -188,3 +188,12 @@ into a double infinity and `1e-400` into `0`, both of which an extended holds as
 
 **rasm-one:** narrows only if the value is exact.
 `test_assemble_extended_float_stays_extended_when_it_would_lose_bits`.
+
+## 17. Optimised `asl Dn` changes `d0`
+
+**Source:** `asl d1`, or `asl.l d3`, with `-opt-og+` on a CPU other than the 68060.
+
+**Bug:** vasm writes `add.w d1,d0` (`d041`). It should be `add.w d1,d1`, so this changes `d0`
+and leaves `d1` alone. `asl #1,d1` and `asl d0` are correct.
+
+**rasm-one:** writes `add.w d1,d1` (`d241`). `test_assemble_one_operand_asl_keeps_its_register`.

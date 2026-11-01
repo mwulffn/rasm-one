@@ -2757,9 +2757,10 @@ impl LineParser<'_, '_, '_> {
         };
         // What can't be a word, such as a branch target, isn't shortable after all.
         let mut operands = operands;
+        let first_mode = operands.first().map(|operand| operand.mode.clone());
         let operand_count = operands.len();
-        // Like vasm, `btst` and `cmpi` keep an absolute label, though they could take these.
-        let bit_instruction = matches!(mnemonic, "btst" | "cmpi");
+        // Like vasm, `btst` and an immediate keep an absolute label, though they could take these.
+        let keeps_absolute = mnemonic == "btst" || matches!(first_mode, Some(Mode::Immediate(_)));
         // A sized row for memory can have a sibling for PC-relative modes on this CPU.
         let any_row_allows_pc = |position: usize| {
             rows.iter().any(|row| {
@@ -2783,7 +2784,7 @@ impl LineParser<'_, '_, '_> {
             if let Mode::AbsShortable(expr) = &operand.mode {
                 if !allowed.intersects(EaSet::ABS_W) {
                     operand.mode = Mode::AbsLong(expr.clone());
-                } else if pc_relative && !bit_instruction && any_row_allows_pc(position) {
+                } else if pc_relative && !keeps_absolute && any_row_allows_pc(position) {
                     operand.mode = Mode::AbsOrPc(expr.clone());
                 }
             }
@@ -2845,8 +2846,8 @@ impl LineParser<'_, '_, '_> {
         else {
             return (row, size, operands);
         };
-        // Like vasm, `ftst` keeps what it was given.
-        if mnemonic == "ftst" {
+        // Like vasm, `ftst` and `fsincos` keep what they were given.
+        if mnemonic == "ftst" || row.encoding == Encoding::FpSinCosEa {
             return (row, size, operands);
         }
         let multiplication = match mnemonic {

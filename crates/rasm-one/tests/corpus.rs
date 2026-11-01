@@ -106,6 +106,12 @@ fn test_corpus_matches_vasm_with_rules() -> Result<(), Box<dyn Error>> {
     corpus_matches(RULE_FLAGS, optimisations)
 }
 
+/// All rules, which is what vasm does by default and what the command line does.
+#[test]
+fn test_corpus_matches_vasm_with_all_rules() -> Result<(), Box<dyn Error>> {
+    corpus_matches(&["-opt-o+"], Optimisations::all())
+}
+
 fn corpus_matches(flags: &[&str], optimisations: Optimisations) -> Result<(), Box<dyn Error>> {
     let Some(vasm) = Vasm::from_env()? else {
         return Ok(());
@@ -141,7 +147,7 @@ fn corpus_matches(flags: &[&str], optimisations: Optimisations) -> Result<(), Bo
         let include = format!("-I{}", include_dir.display());
         // -x makes undefined symbols errors, as they are here.
         // `opt o+` asks vasm for rules that rasm-one doesn't have yet.
-        if !flags.is_empty() && asks_for_all_rules(path) {
+        if flags.first() == Some(&"-opt-o-") && asks_for_all_rules(path) {
             continue;
         }
         let mut args = vec!["-x", include.as_str()];

@@ -520,11 +520,14 @@ impl Instruction {
         let DispKind::Number(number) = plain_disp_kind(value, self.fixed_addresses) else {
             return None;
         };
-        Some(if fits_word(number) {
-            BranchForm::JumpWord
+        if fits_word(number) {
+            Some(BranchForm::JumpWord)
+        } else if value.base == Base::Absolute {
+            Some(BranchForm::Jump)
         } else {
-            BranchForm::Jump
-        })
+            // A label in a raw binary that's too far for a word can still be near.
+            None
+        }
     }
 
     /// The distance from the PC of this branch to its target, if already known.

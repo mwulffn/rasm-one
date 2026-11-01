@@ -902,6 +902,7 @@ fn generic_cases() -> Vec<String> {
         " link.l a6,#-32769",
         " link.l a6,#z",
         " asl.w d0",
+        " asl d0",
         " asl.w (a0)",
         " opt og-\n clr.l d0",
         " opt og+\n clr.l d0",
@@ -1118,6 +1119,9 @@ fn test_assemble_float_constants_match_vasm_of() -> Result<(), Box<dyn Error>> {
         }
     }
     sources.push(" fmove #1.0,fp0".to_string());
+    sources.push(" fsincos #2,fp2:fp3".to_string());
+    sources.push(" fsincos.d #2.0,fp2:fp3".to_string());
+    sources.push(" fsincos.x #1.5,fp2:fp3".to_string());
     sources.push(" fmove.s #1.1,fp0".to_string());
     sources.push(" fmove.d #1.1,fp0".to_string());
     sources.push(" fmove.d #0.1,fp0".to_string());
@@ -1144,6 +1148,13 @@ fn test_assemble_float_constants_match_vasm_of() -> Result<(), Box<dyn Error>> {
 fn test_assemble_extended_float_stays_extended_when_it_would_lose_bits() {
     let bytes = ours(" fmove.x #1.1,fp0", "68040", Format::Bin, &FLOAT, false);
     assert_eq!(bytes.ok().map(|bytes| bytes.len()), Some(16));
+}
+
+/// vasm gets this wrong. See vasm-bugs.md.
+#[test]
+fn test_assemble_one_operand_asl_keeps_its_register() {
+    let bytes = ours(" asl d1", "68000", Format::Bin, &GENERIC, false);
+    assert_eq!(bytes.ok(), Some(vec![0xD2, 0x41]));
 }
 
 /// A small generator, so that runs are the same everywhere.

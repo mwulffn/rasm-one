@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::error::Error;
 
-use rasm_one::{assemble, Assembly, Cpu, FpuChoice, MemoryProvider, Options};
+use rasm_one::{assemble, Assembly, Cpu, FpuChoice, MemoryProvider, Optimisations, Options};
 use rasm_oracle::{Format, Vasm};
 
 /// A machine to sweep: its name for vasm, and whether it has a coprocessor FPU.
@@ -346,6 +346,29 @@ fn lines_for(mnemonic: &str) -> Vec<String> {
     lines
 }
 
+/// What to give vasm for a machine, with or without optimising.
+fn vasm_args(machine: &Machine, optimised: bool) -> Vec<&'static str> {
+    let mut args = machine.vasm_args.to_vec();
+    if optimised {
+        args.push("-opt-o+");
+    }
+    args
+}
+
+/// Lines that are wrong in vasm with its optimiser on: see `docs/vasm-bugs.md`.
+fn wrong_in_vasm_when_optimised(line: &str) -> bool {
+    // A register list given as an address, which only means something to the sweep.
+    if line.contains("movem") && line.contains("*+8") {
+        return true;
+    }
+    // `asl d1` becomes `add.w d1,d0`.
+    let one_register = line
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|operand| operand.len() == 2 && operand.starts_with('d') && operand != "d0");
+    line.trim_start().starts_with("asl") && one_register && !line.contains(',')
+}
+
 /// What vasm said about a batch of lines, by line index.
 #[derive(Default)]
 struct VasmVerdict {
@@ -372,7 +395,13 @@ fn message_line(message: &str) -> Option<usize> {
 /// Asks vasm which lines it rejects. It stops at a fatal error, and only reports
 /// some errors, such as values out of range, if there were no earlier ones. So
 /// it is run on what remains until it has nothing more to say.
-fn vasm_verdict(vasm: &Vasm, lines: &[String], machine: &Machine) -> Result<VasmVerdict, String> {
+fn vasm_verdict(
+    vasm: &Vasm,
+    lines: &[String],
+    machine: &Machine,
+    optimised: bool,
+) -> Result<VasmVerdict, String> {
+    let args = vasm_args(machine, optimised);
     let cpu = machine.name;
     let mut verdict = VasmVerdict::default();
     loop {
@@ -385,7 +414,7 @@ fn vasm_verdict(vasm: &Vasm, lines: &[String], machine: &Machine) -> Result<Vasm
             .collect::<Vec<_>>()
             .concat();
         let out = vasm
-            .assemble_with_args(&source, cpu, Format::Bin, machine.vasm_args)
+            .assemble_with_args(&source, cpu, Format::Bin, &args)
             .map_err(|error| error.to_string())?;
         let mut found_errors = false;
         for message in out.stderr.lines() {
@@ -412,7 +441,7 @@ fn vasm_verdict(vasm: &Vasm, lines: &[String], machine: &Machine) -> Result<Vasm
                                     &format!("{}\n", lines[index]),
                                     cpu,
                                     Format::Bin,
-                                    machine.vasm_args,
+                                    &args,
                                 )
                                 .map_err(|error| error.to_string())?;
                             if !alone.success {
@@ -437,7 +466,7 @@ fn undefined_symbol(message: &str) -> Option<&str> {
     rest.split('>').next()
 }
 
-fn assemble_source(source: &str, machine: &Machine) -> Assembly {
+fn assemble_source(source: &str, machine: &Machine, optimised: bool) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
     let mut options = Options::new("t.s");
@@ -445,6 +474,9 @@ fn assemble_source(source: &str, machine: &Machine) -> Assembly {
     options.fpu = machine.fpu;
     options.mmu_68851 = machine.mmu_68851;
     options.fixed_addresses = true;
+    if optimised {
+        options.optimisations = Optimisations::all();
+    }
     assemble(&options, &files)
 }
 
@@ -482,8 +514,8 @@ fn summarise(lines: &[String]) -> String {
 }
 
 /// What one CPU's sweep found, as text; empty if it matched.
-fn sweep_machine(vasm: &Vasm, machine: &Machine) -> Result<String, String> {
-    let name = format!("{} {:?}", machine.name, machine.vasm_args);
+fn sweep_machine(vasm: &Vasm, machine: &Machine, optimised: bool) -> Result<String, String> {
+    let name = format!("{} {:?}", machine.name, vasm_args(machine, optimised));
     let mut wrongly_accepted = Vec::new();
     let mut wrongly_rejected = Vec::new();
     let mut accepted = Vec::new();
@@ -491,9 +523,9 @@ fn sweep_machine(vasm: &Vasm, machine: &Machine) -> Result<String, String> {
     for mnemonic in MNEMONICS.iter().chain(FPU_MNEMONICS).chain(MMU_MNEMONICS) {
         let lines = lines_for(mnemonic);
         total += lines.len();
-        let verdict = vasm_verdict(vasm, &lines, machine)?;
+        let verdict = vasm_verdict(vasm, &lines, machine, optimised)?;
         for (index, line) in lines.into_iter().enumerate() {
-            let we_accept = !assemble_source(&format!("{line}\n"), machine).has_errors();
+            let we_accept = !assemble_source(&format!("{line}\n"), machine, optimised).has_errors();
             match (we_accept, verdict.rejected.contains(&index)) {
                 (true, true) if vasm_wrongly_rejects(&line) => {}
                 (true, true) => wrongly_accepted.push(line),
@@ -522,13 +554,19 @@ fn sweep_machine(vasm: &Vasm, machine: &Machine) -> Result<String, String> {
     // to name the first difference.
     let source = accepted
         .iter()
+        .filter(|line| !(optimised && wrong_in_vasm_when_optimised(line)))
         .map(|line| format!("{line}\n"))
         .collect::<Vec<_>>()
         .concat();
     let theirs = vasm
-        .assemble_with_args(&source, machine.name, Format::Bin, machine.vasm_args)
+        .assemble_with_args(
+            &source,
+            machine.name,
+            Format::Bin,
+            &vasm_args(machine, optimised),
+        )
         .map_err(|error| error.to_string())?;
-    let assembly = assemble_source(&source, machine);
+    let assembly = assemble_source(&source, machine, optimised);
     let empty = Vec::new();
     let bytes = assembly.sections.first().map_or(&empty, |s| &s.data);
     if let Some(offset) = first_difference(bytes, &theirs.bytes) {
@@ -544,8 +582,7 @@ fn sweep_machine(vasm: &Vasm, machine: &Machine) -> Result<String, String> {
     Ok(report)
 }
 
-#[test]
-fn test_assemble_sweep_matches_vasm_on_every_cpu() -> Result<(), Box<dyn Error>> {
+fn sweep_every_machine(optimised: bool) -> Result<(), Box<dyn Error>> {
     let Some(vasm) = Vasm::from_env()? else {
         return Ok(());
     };
@@ -554,7 +591,7 @@ fn test_assemble_sweep_matches_vasm_on_every_cpu() -> Result<(), Box<dyn Error>>
             .iter()
             .map(|machine| {
                 let vasm = &vasm;
-                scope.spawn(move || sweep_machine(vasm, machine))
+                scope.spawn(move || sweep_machine(vasm, machine, optimised))
             })
             .collect();
         handles
@@ -572,4 +609,14 @@ fn test_assemble_sweep_matches_vasm_on_every_cpu() -> Result<(), Box<dyn Error>>
     }
     assert!(failures.is_empty(), "{failures}");
     Ok(())
+}
+
+#[test]
+fn test_assemble_sweep_matches_vasm_on_every_cpu() -> Result<(), Box<dyn Error>> {
+    sweep_every_machine(false)
+}
+
+#[test]
+fn test_assemble_sweep_matches_optimising_vasm_on_every_cpu() -> Result<(), Box<dyn Error>> {
+    sweep_every_machine(true)
 }

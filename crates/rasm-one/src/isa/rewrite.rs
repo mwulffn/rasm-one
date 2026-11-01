@@ -178,7 +178,7 @@ impl Instruction {
     ) -> Option<Rewritten> {
         let mask = |operand: &Operand| match &operand.mode {
             Mode::RegList(mask) => Some(i64::from(*mask)),
-            Mode::Immediate(expr) => match self.known(expr, sizer) {
+            Mode::Immediate(expr) | Mode::AbsLong(expr) => match self.known(expr, sizer) {
                 Some(Known::Number(number)) => Some(number),
                 _ => None,
             },
