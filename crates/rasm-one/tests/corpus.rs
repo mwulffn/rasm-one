@@ -73,6 +73,12 @@ fn asks_for_all_rules(path: &Path) -> bool {
     })
 }
 
+/// Rules that exist, which the corpus runs with.
+const RULES: &[u32] = &[1, 2, 3, 4, 5, 7];
+const RULE_FLAGS: &[&str] = &[
+    "-opt-o-", "-opt-o1+", "-opt-o2+", "-opt-o3+", "-opt-o4+", "-opt-o5+", "-opt-o7+",
+];
+
 #[test]
 fn test_corpus_matches_vasm() -> Result<(), Box<dyn Error>> {
     corpus_matches(&[], Optimisations::default())
@@ -81,15 +87,10 @@ fn test_corpus_matches_vasm() -> Result<(), Box<dyn Error>> {
 #[test]
 fn test_corpus_matches_vasm_with_rules() -> Result<(), Box<dyn Error>> {
     let mut optimisations = Optimisations::none();
-    for rule in 1..=5 {
+    for &rule in RULES {
         optimisations.set_rule(rule, true);
     }
-    corpus_matches(
-        &[
-            "-opt-o-", "-opt-o1+", "-opt-o2+", "-opt-o3+", "-opt-o4+", "-opt-o5+",
-        ],
-        optimisations,
-    )
+    corpus_matches(RULE_FLAGS, optimisations)
 }
 
 fn corpus_matches(flags: &[&str], optimisations: Optimisations) -> Result<(), Box<dyn Error>> {
