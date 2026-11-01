@@ -54,9 +54,6 @@ fn apply_optimisation_flag(
         (_, Some(rule)) => (rule, false),
         _ => bail!("unknown option {arg}\n{USAGE}"),
     };
-    if !optimisations.enabled {
-        *optimisations = Optimisations::all();
-    }
     if rule.is_empty() {
         optimisations.set_all_rules(on);
     } else {
@@ -78,7 +75,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut cpu = Cpu::default();
     let mut fpu = FpuChoice::default();
     let mut mmu_68851 = false;
-    let mut optimisations = Optimisations::default();
+    // As in vasm, everything is on unless the command line says otherwise.
+    let mut optimisations = Optimisations::all();
     // As in vasm, this wins over any -opt- flag, wherever it is.
     let mut no_opt = false;
     let mut args = args;
@@ -203,6 +201,10 @@ mod tests {
         assert_eq!(parse(&["a.s", "-o", "x", "-Fbin"])?.format, Format::Bin);
         let on = parse(&["a.s", "-o", "x", "-opt-o-", "-opt-o1+"])?.optimisations;
         assert!(on.enabled);
+        assert_eq!(
+            parse(&["a.s", "-o", "x"])?.optimisations,
+            Optimisations::all()
+        );
         let off = parse(&["-opt-o1+", "a.s", "-o", "x", "-no-opt"])?.optimisations;
         assert!(!off.enabled);
         assert!(parse(&["a.s", "-o", "x", "-opt-ox+"]).is_err());

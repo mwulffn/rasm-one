@@ -169,7 +169,7 @@ pub struct Options {
 
 /// Which optimisations apply, numbered like vasm's `-opt-oN` and `opt oN`.
 ///
-/// Only some of vasm's rules exist yet, so this is not yet what vasm does by default.
+/// [`Optimisations::all`] is what vasm does by default. Its optional rules aren't here yet.
 /// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`; 5, `addq` and `subq`; 7, short branches to what follows; 8, base displacements of zero; 9, outer displacements of zero; 10, `lea` for address arithmetic; 11, small `lea`; 12, word immediates to address registers; 16, generic replacements, which is `og`; 18, float constants, which is `of`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]

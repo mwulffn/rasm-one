@@ -9,7 +9,7 @@ issues for progress.
 Build with `cargo build --release`, which produces the `rasm-one` command:
 
 ```
-rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>]
+rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...
 ```
 
 | Option | Output |
@@ -31,12 +31,13 @@ For the library API, including diagnostics, symbols and the line table, run
 ## Status
 
 Integer instructions for the 68000 to 68060, the FPU and the MMU are complete and
-compared with vasm. Output is compared byte for byte against `vasm -no-opt`, which is also
-the default. Optimisation rules are being added one at a time: `-opt-o1+` or `opt o1+` makes
-unsized branches as short as they can be, `-opt-o2+` drops `0(An)`'s displacement, `-opt-o3+` writes addresses that fit in a word as
-one, `-opt-o4+` shortens `move.l #x,Dn`, `-opt-o5+` uses `addq` and `subq`, `-opt-o7+` turns a short branch to what follows into a no-op, `-opt-o8+` and `-opt-o9+` leave out base and outer displacements of zero, `-opt-o10+` uses `lea` for address arithmetic, `-opt-o11+` uses `addq` and `subq` for a small `lea`, `-opt-o12+` makes long immediates to address registers words, XX, `-opt-og+` makes other safe replacements, `-opt-of+` narrows float constants, and
-`-opt-o-` turns all rules off for `opt` to
-choose. Where vasm has a bug, rasm-one does the correct thing instead; see `docs/vasm-bugs.md`.
+compared with vasm. The command line optimises the way vasm does by default, and
+`-no-opt` turns that off. `Options::new` in the library starts with it off, and
+`Optimisations::all()` turns it on. Rules can be chosen with `-opt-o-` and `-opt-oN+`, or `opt` in
+the source: 1 to 5, 7 to 12, `g` and `f`. vasm's optional rules, which are off by default, aren't
+here yet. Output is compared byte for byte with vasm in both modes, apart from rare layouts in
+[#56](https://github.com/mwulffn/rasm-one/issues/56). Where vasm has a bug, rasm-one does the
+correct thing instead; see `docs/vasm-bugs.md`.
 
 ## Testing
 
