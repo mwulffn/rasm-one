@@ -20,7 +20,9 @@ use crate::isa::{
 use crate::lexer::{LexError, Lexer, Punct, Tok};
 use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
-use crate::{Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_BRANCHES};
+use crate::{
+    Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_BRANCHES, RULE_DISPLACEMENTS,
+};
 
 /// A symbol being collected.
 #[derive(Debug, Clone)]
@@ -2723,6 +2725,7 @@ impl LineParser<'_, '_, '_> {
             resizable_branch: size.is_none()
                 && matches!(row.encoding, Encoding::Branch | Encoding::FpBranch)
                 && self.parser.optimisations.rule(RULE_BRANCHES),
+            drops_zero_displacement: self.parser.optimisations.rule(RULE_DISPLACEMENTS),
             branch_form: Cell::new(BranchForm::Word),
             size: size.or(row.default_size),
             operands,

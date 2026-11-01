@@ -32,6 +32,8 @@ pub(crate) struct Instruction {
     pub mmu_68851: bool,
     /// True if this is a branch without a size that optimisation may resize.
     pub resizable_branch: bool,
+    /// True if a displacement of zero from an address register can be left out.
+    pub drops_zero_displacement: bool,
     /// The form of a resizable branch, which layout chooses.
     pub branch_form: Cell<BranchForm>,
 }
@@ -155,6 +157,8 @@ impl FullPlan {
 /// How one operand's extension words will be written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExtensionPlan {
+    /// `0(An)` written as `(An)`.
+    NoDisplacement,
     /// The brief forms and everything else of a fixed size.
     Fixed(i64),
     Full(FullPlan),
@@ -163,6 +167,7 @@ enum ExtensionPlan {
 impl ExtensionPlan {
     fn bytes(self) -> i64 {
         match self {
+            ExtensionPlan::NoDisplacement => 0,
             ExtensionPlan::Fixed(bytes) => bytes,
             ExtensionPlan::Full(plan) => plan.bytes(),
         }
@@ -228,6 +233,14 @@ fn plan_extension(
 ) -> ExtensionPlan {
     let fixed = insn.fixed_addresses;
     match mode {
+        // Unlike below, what isn't known yet doesn't count as zero here.
+        Mode::Disp(expr, _)
+            if insn.drops_zero_displacement
+                && eval(expr, sizer.address_of(sizer.start), sizer.lookup)
+                    .is_ok_and(|value| plain_disp_kind(value, fixed) == DispKind::Number(0)) =>
+        {
+            ExtensionPlan::NoDisplacement
+        }
         Mode::Disp(expr, _) if insn.wide => match plain_disp_kind(sizer.value(expr), fixed) {
             DispKind::Number(number) if !fits_word(number) => grown_plan(Width::Long),
             DispKind::Relocated => grown_plan(Width::Long),
@@ -1436,9 +1449,28 @@ fn grown_mode(expr: &Expr, base: FullBase, index: Option<IndexReg>, width: Optio
 /// Replaces a mode that has grown with its full-format equivalent, so its mode
 /// bits and extension words agree.
 fn resolve_growth(mode: &Mode, plan: ExtensionPlan) -> Option<Mode> {
-    let ExtensionPlan::Full(plan) = plan else {
-        return None;
+    let full_plan = match plan {
+        ExtensionPlan::Full(full_plan) => Some(full_plan),
+        _ => None,
     };
+    match (mode, plan) {
+        (Mode::Disp(_, r), ExtensionPlan::NoDisplacement) => return Some(Mode::Indirect(*r)),
+        (Mode::PackedStore { ea, factor }, ExtensionPlan::NoDisplacement) => {
+            return resolve_growth(ea, plan).map(|ea| Mode::PackedStore {
+                ea: Box::new(ea),
+                factor: factor.clone(),
+            });
+        }
+        (Mode::BitField { ea, offset, width }, ExtensionPlan::NoDisplacement) => {
+            return resolve_growth(ea, plan).map(|ea| Mode::BitField {
+                ea: Box::new(ea),
+                offset: offset.clone(),
+                width: width.clone(),
+            });
+        }
+        _ => {}
+    }
+    let plan = full_plan?;
     match mode {
         Mode::Disp(expr, r) => Some(grown_mode(expr, FullBase::Addr(*r), None, plan.base)),
         Mode::Index(expr, r, index) => Some(grown_mode(
@@ -1468,7 +1500,7 @@ fn resolve_growth(mode: &Mode, plan: ExtensionPlan) -> Option<Mode> {
 
 /// A copy of the instruction with any grown modes resolved, if there are any.
 fn with_growth_resolved(insn: &Instruction, sizer: &Sizer) -> Option<Instruction> {
-    if !insn.wide {
+    if !insn.wide && !insn.drops_zero_displacement {
         return None;
     }
     let size = insn.size.unwrap_or(Size::Word);
