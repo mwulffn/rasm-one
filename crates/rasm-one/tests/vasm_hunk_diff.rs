@@ -1,0 +1,131 @@
+//! Compares hunk executables with vasm -no-opt byte for byte.
+
+use std::error::Error;
+
+use rasm_one::{assemble, write_hunk_exe, MemoryProvider, Options, OutputError};
+use rasm_oracle::{Format, Vasm};
+
+fn ours(source: &str) -> Result<Vec<u8>, OutputError> {
+    let mut files = MemoryProvider::new();
+    files.insert("t.s", source);
+    write_hunk_exe(&assemble(&Options::new("t.s"), &files))
+}
+
+const ACCEPTED: &[&str] = &[
+    // Padding.
+    "",
+    " nop",
+    " dc.b 1",
+    " dc.b 1,2",
+    " dc.b 1,2,3",
+    " dc.b 1,2,3,4,5,6",
+    " dc.b 1,2,3,4,5,6,7",
+    " section d,data\n dc.b 1,2",
+    // Symbols.
+    "a: nop\nb: rts",
+    "abcd: nop",
+    "abcde: nop",
+    "abcdefgh: nop",
+    "start: lea data(pc),a0\n bsr sub\n rts\nsub: rts\ndata: dc.w 1",
+    "l: dc.b 1\n dc.b 2\nm: dc.w m-l\n dc.l m+1,l",
+    // Section kinds and memory flags.
+    " section c,code\ns: dc.l s\n dc.b 1",
+    " section d,data\ns: dc.b 1",
+    " section b,bss\ns: ds.b 5",
+    " section c,code_c\n nop\n section d,data_f\n dc.w 1\n section b,bss_c\n ds.l 1",
+    " section c,code,chip\n nop\n section d,data,fast\n dc.w 1",
+    " section a\n nop",
+    " section a",
+    // Which sections become hunks.
+    " section e1,code\n section e2,data\n dc.w 1",
+    " section a,code\nl:\n section b,data\n dc.l l",
+    " section e,bss\nl:",
+    " section e,code\nl:\n section f,code\n nop",
+    " section a,code\n section e,data\n section b,bss\n dc.l 0\n section c,code\nx: dc.l x",
+    // Section identity.
+    " nop\n section a,code\n rts",
+    " nop\n section CODE,code\n rts",
+    " nop\n section code,code\n rts",
+    " section c,code\ns: nop\n section c,data\n dc.w 1",
+    " section c,code\n nop\n section c,code_c\n rts",
+    " section c,code\n nop\n section d,data\n dc.w 1\n section c,code\n rts",
+    // Initialised data in BSS is dropped.
+    " section b,bss\ns: dc.l s",
+    " section b,bss\n ds.b 3\n dc.b 1",
+    // Relocations.
+    " dc.b 1\n dc.l s\ns:",
+    " section c,code\ns: dc.l s,t,s,t+2\n section d,data\nt: dc.l s,t,u\n section b,bss\nu: ds.w 1",
+    " dc.l s\n ds.b 65534\ns: dc.l s",
+    " ds.b 65532\ns: dc.l s\n dc.l s",
+    " dc.l s\n ds.b 65532\n dc.l s\ns:\n section d,data\n dc.l s",
+    " move.l #s,d0\n lea s,a0\n jmp_here: bra jmp_here\ns: dc.l s",
+];
+
+const REJECTED: &[&str] = &[
+    " move.w f.w,d0\nf:",
+    " move.w f(a0),d0\nf:",
+    " move.w f(a0,d0.w),d0\nf:",
+    " move.b #f,d0\nf:",
+    " move.w #f,d0\nf:",
+    " dc.w f\nf:",
+    " dc.b f\nf:",
+    " section c,code\n lea t(pc),a0\n section d,data\nt: dc.w 1",
+    " section c,code\n bsr t\n section e,code\nt: rts",
+    " dc.l 5-s\ns:",
+    " dc.l -s\ns:",
+];
+
+#[test]
+fn test_write_hunk_exe_accepted_sources_match_vasm_bytes() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for source in ACCEPTED {
+        let source = format!("{source}\n");
+        let theirs = vasm.assemble(&source, "68000", Format::HunkExe)?;
+        assert!(
+            theirs.success,
+            "vasm rejected {source:?}: {}",
+            theirs.stderr
+        );
+        match ours(&source) {
+            Ok(bytes) if bytes == theirs.bytes => {}
+            Ok(bytes) => failures.push(format!(
+                "{source:?}\n  ours  {bytes:02x?}\n  vasm  {:02x?}",
+                theirs.bytes
+            )),
+            Err(error) => failures.push(format!("{source:?}: {error}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+#[test]
+fn test_write_hunk_exe_rejected_sources_match_vasm_rejection() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for source in REJECTED {
+        let source = format!("{source}\n");
+        let theirs = vasm.assemble(&source, "68000", Format::HunkExe)?;
+        assert!(!theirs.success, "vasm accepted {source:?}");
+        if ours(&source).is_ok() {
+            failures.push(source);
+        }
+    }
+    assert!(failures.is_empty(), "we accepted {failures:?}");
+    Ok(())
+}
+
+#[test]
+fn test_write_hunk_exe_narrow_reloc_error_has_source_line() {
+    match ours(" nop\n move.w f.w,d0\nf:\n") {
+        Err(OutputError::UnsupportedReloc { size, span, .. }) => {
+            assert_eq!((size, span.line), (2, 2));
+        }
+        other => panic!("expected an unsupported relocation, got {other:?}"),
+    }
+}

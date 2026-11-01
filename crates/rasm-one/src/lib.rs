@@ -25,6 +25,7 @@ mod types;
 
 pub use error::{Diagnostic, FileError, OutputError, Related, Severity};
 pub use output::bin::write_bin;
+pub use output::hunk::write_hunk_exe;
 pub use source::{FileId, FileProvider, MemoryProvider, Span};
 pub use types::{Cpu, CpuSet, MemKind, SectionKind, Size};
 
@@ -65,6 +66,8 @@ pub struct Reloc {
     pub target: usize,
     /// Kind of relocation.
     pub kind: RelocKind,
+    /// Source of the field.
+    pub span: Span,
 }
 
 /// An assembled section.

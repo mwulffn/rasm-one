@@ -38,7 +38,7 @@ pub(crate) struct Program {
 }
 
 /// Name of the section used before any `section` directive.
-const DEFAULT_SECTION: &str = "default";
+const DEFAULT_SECTION: &str = "CODE";
 
 /// A register operand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +72,7 @@ pub(crate) struct Parser {
     cpu: Cpu,
     program: Program,
     symbol_ids: HashMap<String, SymId>,
-    sections_by_name: HashMap<String, usize>,
+    sections_by_key: HashMap<(String, SectionKind), usize>,
     current: Option<usize>,
 }
 
@@ -82,7 +82,7 @@ impl Parser {
             cpu,
             program: Program::default(),
             symbol_ids: HashMap::new(),
-            sections_by_name: HashMap::new(),
+            sections_by_key: HashMap::new(),
             current: None,
         }
     }
@@ -131,8 +131,15 @@ impl Parser {
         }
     }
 
+    /// Finds or creates a section. Name and kind identify it, so one name can
+    /// be used for both code and data. A later memory requirement replaces an
+    /// earlier one.
     fn open_section(&mut self, name: &str, kind: SectionKind, mem: MemKind) -> usize {
-        if let Some(&section) = self.sections_by_name.get(name) {
+        let key = (name.to_string(), kind);
+        if let Some(&section) = self.sections_by_key.get(&key) {
+            if mem != MemKind::Any {
+                self.program.sections[section].mem = mem;
+            }
             return section;
         }
         let section = self.program.sections.len();
@@ -142,7 +149,7 @@ impl Parser {
             mem,
             atoms: Vec::new(),
         });
-        self.sections_by_name.insert(name.to_string(), section);
+        self.sections_by_key.insert(key, section);
         section
     }
 
@@ -321,6 +328,11 @@ impl LineParser<'_, '_> {
     /// on an instruction's line takes the instruction's aligned address,
     /// whereas a label on any other line keeps the address it finds.
     fn parse_statement(&mut self, label: Option<(String, Span)>) -> Result<(), Diagnostic> {
+        // Symbols are listed in order of first mention, and a line's label
+        // comes before anything its operands refer to.
+        if let Some((name, _)) = &label {
+            self.parser.symbol(name);
+        }
         self.lexer.skip_blanks();
         let start = self.lexer.pos();
         let Some(name) = self.eat_ident()? else {

@@ -81,7 +81,7 @@ impl CpuSet {
 }
 
 /// Kind of a section.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SectionKind {
     /// Code.
     Code,

@@ -24,6 +24,18 @@ pub enum OutputError {
     /// Two sections would occupy the same addresses in a raw binary.
     #[error("sections {0} and {1} overlap")]
     Overlap(String, String),
+    /// The format cannot represent this relocation.
+    #[error("{size}-byte relocation at {section}+{offset:#x} is not supported by this format")]
+    UnsupportedReloc {
+        /// Name of the section containing the field.
+        section: String,
+        /// Offset of the field in that section.
+        offset: u32,
+        /// Width of the field in bytes.
+        size: u8,
+        /// Source of the field.
+        span: Span,
+    },
 }
 
 /// Severity of a [`Diagnostic`].
