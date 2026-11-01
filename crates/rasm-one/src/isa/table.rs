@@ -345,6 +345,12 @@ impl InsnRow {
         self
     }
 
+    /// This row, which traps to software on the 68060.
+    pub const fn trap060(mut self) -> InsnRow {
+        self.trap_060 = true;
+        self
+    }
+
     /// This row, needing a floating-point unit.
     pub const fn fpu(mut self) -> InsnRow {
         self.coprocessor = Coprocessor::Fpu;
@@ -601,10 +607,10 @@ pub const TABLE: &[InsnRow] = &[
     row("move", L, LONG, &[USP, AN], 0x4E68, Encoding::Reg1),
     row("movea", WL, WORD, &[ALL, AN], 0, Encoding::Move),
     row("moveq", L, LONG, &[IMM, DN], 0x7000, Encoding::Moveq),
-    row("movep", W, WORD, &[DISP, DN], 0x0108, Encoding::MovepLoad),
-    row("movep", L, WORD, &[DISP, DN], 0x0148, Encoding::MovepLoad),
-    row("movep", W, WORD, &[DN, DISP], 0x0188, Encoding::MovepStore),
-    row("movep", L, WORD, &[DN, DISP], 0x01C8, Encoding::MovepStore),
+    row("movep", W, WORD, &[DISP, DN], 0x0108, Encoding::MovepLoad).trap060(),
+    row("movep", L, WORD, &[DISP, DN], 0x0148, Encoding::MovepLoad).trap060(),
+    row("movep", W, WORD, &[DN, DISP], 0x0188, Encoding::MovepStore).trap060(),
+    row("movep", L, WORD, &[DN, DISP], 0x01C8, Encoding::MovepStore).trap060(),
     row(
         "movem",
         W,
@@ -780,6 +786,7 @@ pub const TABLE: &[InsnRow] = &[
     word_to_reg("divu", 0x80C0),
     row("divu", L, WORD, &[DATA, DN], 0x4C40, Encoding::MulDivLong).on(UP020),
     row("divu", L, LONG, &[DATA, PAIR], 0x4C40, Encoding::MulDivLong)
+        .trap060()
         .on(UP020)
         .ext(0x0400),
     word_to_reg("divs", 0x81C0),
@@ -787,6 +794,7 @@ pub const TABLE: &[InsnRow] = &[
         .on(UP020)
         .ext(0x0800),
     row("divs", L, LONG, &[DATA, PAIR], 0x4C40, Encoding::MulDivLong)
+        .trap060()
         .on(UP020)
         .ext(0x0C00),
     row(
@@ -811,6 +819,7 @@ pub const TABLE: &[InsnRow] = &[
     word_to_reg("mulu", 0xC0C0),
     row("mulu", L, WORD, &[DATA, DN], 0x4C00, Encoding::MulDivLong).on(UP020),
     row("mulu", L, LONG, &[DATA, PAIR], 0x4C00, Encoding::MulDivLong)
+        .trap060()
         .on(UP020)
         .ext(0x0400),
     word_to_reg("muls", 0xC1C0),
@@ -818,13 +827,17 @@ pub const TABLE: &[InsnRow] = &[
         .on(UP020)
         .ext(0x0800),
     row("muls", L, LONG, &[DATA, PAIR], 0x4C00, Encoding::MulDivLong)
+        .trap060()
         .on(UP020)
         .ext(0x0C00),
     row("extb", L, LONG, &[DN], 0x49C0, Encoding::Reg0).on(UP020),
     row("chk2", BWL, WORD, &[CTRL, RN], 0x00C0, Encoding::Chk2)
+        .trap060()
         .on(UP020)
         .ext(0x0800),
-    row("cmp2", BWL, WORD, &[CTRL, RN], 0x00C0, Encoding::Chk2).on(UP020),
+    row("cmp2", BWL, WORD, &[CTRL, RN], 0x00C0, Encoding::Chk2)
+        .trap060()
+        .on(UP020),
     row("cas", BWL, WORD, &[DN, DN, MEM], 0x08C0, Encoding::Cas).on(UP020),
     row(
         "cas2",
@@ -834,6 +847,7 @@ pub const TABLE: &[InsnRow] = &[
         0x08FC,
         Encoding::Cas2,
     )
+    .trap060()
     .on(UP020),
     row(
         "pack",
@@ -1194,6 +1208,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x02),
@@ -1205,10 +1220,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x02),
     row("fsinh", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x02),
@@ -1220,6 +1237,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x02),
@@ -1312,6 +1330,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x06),
@@ -1323,6 +1342,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x06),
@@ -1334,6 +1354,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x06),
@@ -1345,6 +1366,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x06),
@@ -1356,6 +1378,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x08),
@@ -1367,6 +1390,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x08),
@@ -1378,6 +1402,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x08),
@@ -1389,6 +1414,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x08),
@@ -1400,6 +1426,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x09),
@@ -1411,10 +1438,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x09),
     row("ftanh", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x09),
@@ -1426,6 +1455,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x09),
@@ -1437,6 +1467,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0A),
@@ -1448,10 +1479,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0A),
     row("fatan", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0A),
@@ -1463,6 +1496,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0A),
@@ -1474,6 +1508,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0C),
@@ -1485,10 +1520,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0C),
     row("fasin", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0C),
@@ -1500,6 +1537,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0C),
@@ -1511,6 +1549,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0D),
@@ -1522,6 +1561,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0D),
@@ -1533,6 +1573,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0D),
@@ -1544,6 +1585,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0D),
@@ -1555,6 +1597,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0E),
@@ -1566,10 +1609,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0E),
     row("fsin", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0E),
@@ -1581,6 +1626,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0E),
@@ -1592,6 +1638,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0F),
@@ -1603,10 +1650,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0F),
     row("ftan", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0F),
@@ -1618,6 +1667,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0F),
@@ -1629,6 +1679,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x10),
@@ -1640,10 +1691,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x10),
     row("fetox", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x10),
@@ -1655,6 +1708,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x10),
@@ -1666,6 +1720,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x11),
@@ -1677,6 +1732,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x11),
@@ -1688,6 +1744,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x11),
@@ -1699,6 +1756,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x11),
@@ -1710,6 +1768,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x12),
@@ -1721,6 +1780,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x12),
@@ -1732,6 +1792,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x12),
@@ -1743,6 +1804,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x12),
@@ -1754,6 +1816,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x14),
@@ -1765,10 +1828,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x14),
     row("flogn", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x14),
@@ -1780,6 +1845,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x14),
@@ -1791,6 +1857,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x15),
@@ -1802,6 +1869,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x15),
@@ -1813,6 +1881,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x15),
@@ -1824,6 +1893,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x15),
@@ -1835,6 +1905,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x16),
@@ -1846,10 +1917,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x16),
     row("flog2", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x16),
@@ -1861,6 +1934,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x16),
@@ -1909,6 +1983,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x19),
@@ -1920,10 +1995,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x19),
     row("fcosh", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x19),
@@ -1935,6 +2012,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x19),
@@ -1983,6 +2061,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1C),
@@ -1994,10 +2073,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1C),
     row("facos", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1C),
@@ -2009,6 +2090,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1C),
@@ -2020,6 +2102,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1D),
@@ -2031,10 +2114,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1D),
     row("fcos", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1D),
@@ -2046,6 +2131,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1D),
@@ -2057,6 +2143,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1E),
@@ -2068,6 +2155,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1E),
@@ -2079,6 +2167,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1E),
@@ -2090,6 +2179,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1E),
@@ -2101,6 +2191,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1F),
@@ -2112,6 +2203,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSingleRegister,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1F),
@@ -2123,6 +2215,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1F),
@@ -2134,6 +2227,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1F),
@@ -2171,10 +2265,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x21),
     row("fmod", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x21),
@@ -2186,6 +2282,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x21),
@@ -2282,10 +2379,12 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x25),
     row("frem", FP_INT, WORD, &[DN, FP], 0xF200, Encoding::FpFromEa)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x25),
@@ -2297,6 +2396,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x25),
@@ -2308,6 +2408,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x26),
@@ -2319,6 +2420,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x26),
@@ -2330,6 +2432,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpFromEa,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x26),
@@ -3101,7 +3204,7 @@ pub const TABLE: &[InsnRow] = &[
         "fmovem",
         L,
         LONG,
-        &[EaSet(FP_CONTROL_MEM.0 & !IMM.0), EaSet::FP_CONTROL_LIST],
+        &[FP_CONTROL_MEM, EaSet::FP_CONTROL_LIST],
         0xF200,
         Encoding::FpControlLoad,
     )
@@ -3115,6 +3218,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::Fmovecr,
     )
+    .trap060()
     .on(UP020)
     .fpu(),
     row(
@@ -3125,6 +3229,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSinCosRegisters,
     )
+    .trap060()
     .on(UP020)
     .fpu(),
     row(
@@ -3135,6 +3240,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSinCosEa,
     )
+    .trap060()
     .on(UP020)
     .fpu(),
     row(
@@ -3145,6 +3251,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF200,
         Encoding::FpSinCosEa,
     )
+    .trap060()
     .on(UP020)
     .fpu(),
     row("ftst", X, EXTENDED, &[FP], 0xF200, Encoding::FpTestRegister)
@@ -3203,22 +3310,27 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x00),
     row("fsf", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x00),
     row("ftrapf", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x00),
     row("ftrapf", W, WORD, &[IMM], 0xF27A, Encoding::FpTrapImmediate)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x00),
     row("ftrapf", L, WORD, &[IMM], 0xF27B, Encoding::FpTrapImmediate)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x00),
@@ -3243,14 +3355,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x01),
     row("fseq", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x01),
     row("ftrapeq", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x01),
@@ -3262,6 +3377,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x01),
@@ -3273,6 +3389,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x01),
@@ -3304,14 +3421,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x02),
     row("fsogt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x02),
     row("ftrapogt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x02),
@@ -3323,6 +3443,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x02),
@@ -3334,6 +3455,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x02),
@@ -3365,14 +3487,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x03),
     row("fsoge", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x03),
     row("ftrapoge", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x03),
@@ -3384,6 +3509,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x03),
@@ -3395,6 +3521,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x03),
@@ -3426,14 +3553,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x04),
     row("fsolt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x04),
     row("ftrapolt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x04),
@@ -3445,6 +3575,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x04),
@@ -3456,6 +3587,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x04),
@@ -3487,14 +3619,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x05),
     row("fsole", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x05),
     row("ftrapole", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x05),
@@ -3506,6 +3641,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x05),
@@ -3517,6 +3653,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x05),
@@ -3548,14 +3685,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x06),
     row("fsogl", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x06),
     row("ftrapogl", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x06),
@@ -3567,6 +3707,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x06),
@@ -3578,6 +3719,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x06),
@@ -3602,14 +3744,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x07),
     row("fsor", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x07),
     row("ftrapor", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x07),
@@ -3621,6 +3766,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x07),
@@ -3632,6 +3778,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x07),
@@ -3656,14 +3803,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x08),
     row("fsun", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x08),
     row("ftrapun", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x08),
@@ -3675,6 +3825,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x08),
@@ -3686,6 +3837,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x08),
@@ -3717,14 +3869,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x09),
     row("fsueq", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x09),
     row("ftrapueq", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x09),
@@ -3736,6 +3891,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x09),
@@ -3747,6 +3903,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x09),
@@ -3778,14 +3935,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0A),
     row("fsugt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0A),
     row("ftrapugt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0A),
@@ -3797,6 +3957,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0A),
@@ -3808,6 +3969,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0A),
@@ -3839,14 +4001,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0B),
     row("fsuge", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0B),
     row("ftrapuge", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0B),
@@ -3858,6 +4023,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0B),
@@ -3869,6 +4035,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0B),
@@ -3900,14 +4067,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0C),
     row("fsult", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0C),
     row("ftrapult", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0C),
@@ -3919,6 +4089,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0C),
@@ -3930,6 +4101,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0C),
@@ -3961,14 +4133,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0D),
     row("fsule", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0D),
     row("ftrapule", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0D),
@@ -3980,6 +4155,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0D),
@@ -3991,6 +4167,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0D),
@@ -4015,14 +4192,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0E),
     row("fsne", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0E),
     row("ftrapne", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0E),
@@ -4034,6 +4214,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0E),
@@ -4045,6 +4226,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0E),
@@ -4069,22 +4251,27 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x0F),
     row("fst", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0F),
     row("ftrapt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0F),
     row("ftrapt", W, WORD, &[IMM], 0xF27A, Encoding::FpTrapImmediate)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0F),
     row("ftrapt", L, WORD, &[IMM], 0xF27B, Encoding::FpTrapImmediate)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x0F),
@@ -4109,14 +4296,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x10),
     row("fssf", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x10),
     row("ftrapsf", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x10),
@@ -4128,6 +4318,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x10),
@@ -4139,6 +4330,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x10),
@@ -4170,14 +4362,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x11),
     row("fsseq", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x11),
     row("ftrapseq", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x11),
@@ -4189,6 +4384,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x11),
@@ -4200,6 +4396,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x11),
@@ -4224,14 +4421,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x12),
     row("fsgt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x12),
     row("ftrapgt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x12),
@@ -4243,6 +4443,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x12),
@@ -4254,6 +4455,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x12),
@@ -4278,14 +4480,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x13),
     row("fsge", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x13),
     row("ftrapge", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x13),
@@ -4297,6 +4502,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x13),
@@ -4308,6 +4514,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x13),
@@ -4332,14 +4539,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x14),
     row("fslt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x14),
     row("ftraplt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x14),
@@ -4351,6 +4561,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x14),
@@ -4362,6 +4573,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x14),
@@ -4386,14 +4598,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x15),
     row("fsle", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x15),
     row("ftraple", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x15),
@@ -4405,6 +4620,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x15),
@@ -4416,6 +4632,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x15),
@@ -4440,14 +4657,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x16),
     row("fsgl", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x16),
     row("ftrapgl", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x16),
@@ -4459,6 +4679,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x16),
@@ -4470,6 +4691,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x16),
@@ -4501,14 +4723,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x17),
     row("fsgle", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x17),
     row("ftrapgle", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x17),
@@ -4520,6 +4745,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x17),
@@ -4531,6 +4757,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x17),
@@ -4562,14 +4789,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x18),
     row("fsngle", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x18),
     row("ftrapngle", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x18),
@@ -4581,6 +4811,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x18),
@@ -4592,6 +4823,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x18),
@@ -4623,14 +4855,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x19),
     row("fsngl", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x19),
     row("ftrapngl", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x19),
@@ -4642,6 +4877,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x19),
@@ -4653,6 +4889,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x19),
@@ -4684,14 +4921,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1A),
     row("fsnle", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1A),
     row("ftrapnle", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1A),
@@ -4703,6 +4943,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1A),
@@ -4714,6 +4955,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1A),
@@ -4745,14 +4987,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1B),
     row("fsnlt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1B),
     row("ftrapnlt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1B),
@@ -4764,6 +5009,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1B),
@@ -4775,6 +5021,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1B),
@@ -4806,14 +5053,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1C),
     row("fsnge", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1C),
     row("ftrapnge", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1C),
@@ -4825,6 +5075,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1C),
@@ -4836,6 +5087,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1C),
@@ -4867,14 +5119,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1D),
     row("fsngt", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1D),
     row("ftrapngt", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1D),
@@ -4886,6 +5141,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1D),
@@ -4897,6 +5153,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1D),
@@ -4928,14 +5185,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1E),
     row("fssne", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1E),
     row("ftrapsne", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1E),
@@ -4947,6 +5207,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1E),
@@ -4958,6 +5219,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1E),
@@ -4982,14 +5244,17 @@ pub const TABLE: &[InsnRow] = &[
         0xF248,
         Encoding::FpDecrementBranch,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1F),
     row("fsst", B, BYTE, &[DALT], 0xF240, Encoding::FpSet)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1F),
     row("ftrapst", &[], None, &[], 0xF27C, Encoding::FpTrap)
+        .trap060()
         .on(UP020)
         .fpu()
         .ext(0x1F),
@@ -5001,6 +5266,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27A,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1F),
@@ -5012,6 +5278,7 @@ pub const TABLE: &[InsnRow] = &[
         0xF27B,
         Encoding::FpTrapImmediate,
     )
+    .trap060()
     .on(UP020)
     .fpu()
     .ext(0x1F),

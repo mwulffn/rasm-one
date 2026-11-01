@@ -62,6 +62,9 @@ const ON_68040: &[&str] = &[
     " fmovem.l (a0),fpcr/fpsr/fpiar",
     " fmovem.l #1,fpcr",
     " fmovem fpcr,d0",
+    " fmovem.l #2,fpcr/fpsr",
+    " fmovem.l #2,fpsr/fpiar",
+    " fmovem.l #$12345678,fpcr/fpsr/fpiar",
     // fmovem.
     " fmovem.x fp0-fp3,-(a0)",
     " fmovem.x (a0)+,fp0/fp2",
@@ -168,7 +171,6 @@ const WRONG_IN_VASM: &[&str] = &[
     " dcb.s 1,1.5",
     " blk.s 1,1.5",
     " dc.q f\nf:",
-    " fmovem.l #2,fpcr/fpsr",
 ];
 
 #[test]

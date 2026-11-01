@@ -301,15 +301,11 @@ fn stricter_than_vasm(line: &str) -> bool {
             mnemonic,
             "pflush" | "ploadr" | "ploadw" | "ptestr" | "ptestw"
         );
-    // The PRM allows an immediate for only one control register.
-    let immediate_to_list =
-        head.starts_with("fmovem") && operands.starts_with('#') && operands.contains("/fps");
     movea_to_non_address
         || quad_on_unsized_mmu
         || address_as_mask
         || trapcc_with_junk
         || float_as_long
-        || immediate_to_list
 }
 
 fn lines_for(mnemonic: &str) -> Vec<String> {

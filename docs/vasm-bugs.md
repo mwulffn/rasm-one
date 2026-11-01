@@ -108,17 +108,7 @@ exactly therefore differ between hosts.
 **rasm-one:** converts exactly on every host, so its comparison tests only use values that a
 double can represent. `test_float_bytes_extended_needs_full_precision`.
 
-## 9. Immediate loaded into several FP control registers
-
-**Source:** `fmovem.l #2,fpcr/fpsr`.
-
-**Bug:** the PRM allows an immediate source for `fmovem` "only if a single floating-point control
-register is selected". vasm accepts a list and writes the value with zero padding,
-`f23c 9800 0000 0000 0000 0002`.
-
-**rasm-one:** reports an error. `tests/vasm_fpu.rs`.
-
-## 10. `pload` with SFC or DFC rejected on the 68030
+## 9. `pload` with SFC or DFC rejected on the 68030
 
 **Source:** `ploadr sfc,(a0)` or `ploadw dfc,(a0)` with `-m68030`.
 

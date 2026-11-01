@@ -349,6 +349,39 @@ fn needs_020(mode: &Mode) -> bool {
     }
 }
 
+/// True if the 68060 emulates this instruction: from its table row, or for FPU
+/// forms that only trap with certain operands. A misaligned `cas` also traps, but
+/// that depends on the address at run time.
+fn traps_on_68060(instruction: &Instruction) -> bool {
+    if instruction.row.trap_060 {
+        return true;
+    }
+    if instruction.row.coprocessor != Coprocessor::Fpu {
+        return false;
+    }
+    let immediate = |mode: &Mode| matches!(mode, Mode::Immediate(_) | Mode::Float(_));
+    let wide_immediate = matches!(instruction.size, Some(Size::Extended | Size::Packed))
+        && instruction
+            .operands
+            .first()
+            .is_some_and(|op| immediate(&op.mode));
+    let dynamic_list = instruction.row.mnemonic == "fmovem"
+        && instruction
+            .operands
+            .iter()
+            .any(|op| matches!(op.mode, Mode::DataReg(_)))
+        && instruction.size == Some(Size::Extended);
+    let immediate_to_list = instruction
+        .operands
+        .first()
+        .is_some_and(|op| immediate(&op.mode))
+        && instruction
+            .operands
+            .iter()
+            .any(|op| matches!(op.mode, Mode::FpControlList(_)));
+    wide_immediate || dynamic_list || immediate_to_list
+}
+
 /// The size of an MMU register, from its command word bits.
 fn mmu_register_size(bits: u16) -> Size {
     // BADn and BACn are not in the table, and are words.
@@ -2280,7 +2313,9 @@ impl LineParser<'_, '_, '_> {
             }
             self.special = special_words(mnemonic);
             let operands = self.parse_operands()?;
-            return self.select_row(mnemonic, rows, None, operands, span);
+            let instruction = self.select_row(mnemonic, rows, None, operands, span)?;
+            self.warn_if_trapped(mnemonic, &instruction, span);
+            return Ok(instruction);
         }
         if let Some(size) = size {
             if !rows.iter().any(|r| r.sizes.contains(&size)) {
@@ -2293,7 +2328,20 @@ impl LineParser<'_, '_, '_> {
         }
         self.special = special_words(mnemonic);
         let operands = self.parse_operands()?;
-        self.select_row(mnemonic, rows, size, operands, span)
+        let instruction = self.select_row(mnemonic, rows, size, operands, span)?;
+        self.warn_if_trapped(mnemonic, &instruction, span);
+        Ok(instruction)
+    }
+
+    /// Warns about an instruction the 68060 emulates through an exception.
+    fn warn_if_trapped(&mut self, mnemonic: &str, instruction: &Instruction, span: Span) {
+        if self.parser.cpu == Cpu::M68060 && traps_on_68060(instruction) {
+            self.parser.program.diagnostics.push(Diagnostic::warning(
+                "trapped-on-68060",
+                format!("{mnemonic} in this form traps to software on the 68060"),
+                span,
+            ));
+        }
     }
 
     fn parse_operands(&mut self) -> Result<Vec<Operand>, Diagnostic> {
