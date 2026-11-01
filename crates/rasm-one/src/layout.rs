@@ -30,6 +30,7 @@ pub(crate) struct Built {
     pub diagnostics: Vec<Diagnostic>,
     pub files: Vec<String>,
     pub expansions: Vec<Expansion>,
+    pub unit_name: Option<String>,
 }
 
 /// Lays out a parsed program and generates its bytes.
@@ -103,7 +104,7 @@ pub(crate) fn build(program: Program) -> Built {
             &program.expansions,
         );
         let len = datas[index].len() as u32 - start;
-        if len > 0 {
+        if len > 0 && !entry.dummy {
             line_table.push(LineEntry {
                 section: index,
                 offset: start,
@@ -125,8 +126,9 @@ pub(crate) fn build(program: Program) -> Built {
             kind: entry.kind,
             mem: entry.mem,
             origin: entry.origin.map(|origin| origin as u32),
-            data,
-            relocs,
+            dummy: entry.dummy,
+            data: if entry.dummy { Vec::new() } else { data },
+            relocs: if entry.dummy { Vec::new() } else { relocs },
         })
         .collect();
 
@@ -159,6 +161,7 @@ pub(crate) fn build(program: Program) -> Built {
         diagnostics,
         files: program.files,
         expansions: program.expansions,
+        unit_name: program.unit_name,
     }
 }
 

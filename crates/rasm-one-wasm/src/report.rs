@@ -49,6 +49,7 @@ fn diagnostic(diagnostic: &Diagnostic) -> String {
     let severity = match diagnostic.severity {
         Severity::Error => "error",
         Severity::Warning => "warning",
+        Severity::Info => "info",
     };
     let related = array(&diagnostic.related, |related| {
         format!(

@@ -37,6 +37,8 @@ pub(crate) struct SectionEntry {
     pub mem: MemKind,
     /// Fixed address given by `org`.
     pub origin: Option<i64>,
+    /// True for an `offset` block, whose bytes are dropped.
+    pub dummy: bool,
 }
 
 /// Output of parsing.
@@ -49,6 +51,8 @@ pub(crate) struct Program {
     pub files: Vec<String>,
     /// Includes and macro expansions.
     pub expansions: Vec<Expansion>,
+    /// Name given by `idnt`.
+    pub unit_name: Option<String>,
     pub symbols: Vec<SymbolEntry>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -106,6 +110,18 @@ fn is_directive(name: &str) -> bool {
             | "rs"
             | "rsreset"
             | "rsset"
+            | "so"
+            | "clrso"
+            | "setso"
+            | "fo"
+            | "clrfo"
+            | "setfo"
+            | "offset"
+            | "idnt"
+            | "opt"
+            | "printt"
+            | "printv"
+            | "echo"
             | "fail"
             | "end"
             | "include"
@@ -140,6 +156,8 @@ fn section_shortcut(name: &str) -> Option<(&'static str, SectionKind, MemKind)> 
         "bss" => ("BSS", SectionKind::Bss, MemKind::Any),
         "bss_c" => ("BSS_C", SectionKind::Bss, MemKind::Chip),
         "bss_f" => ("BSS_F", SectionKind::Bss, MemKind::Fast),
+        "text" | "cseg" => ("CODE", SectionKind::Code, MemKind::Any),
+        "dseg" => ("DATA", SectionKind::Data, MemKind::Any),
         _ => return None,
     })
 }
@@ -378,6 +396,8 @@ pub(crate) struct Parser<'f> {
     /// operand has to be constant at that point.
     constants: HashMap<SymId, i64>,
     rs_counter: i64,
+    so_counter: i64,
+    fo_counter: i64,
     /// Set by `end`.
     ended: bool,
     /// Set by `mexit` until the macro has been left.
@@ -412,6 +432,8 @@ impl<'f> Parser<'f> {
             register_aliases: HashMap::new(),
             constants: HashMap::new(),
             rs_counter: 0,
+            so_counter: 0,
+            fo_counter: 0,
             ended: false,
             macro_exit: false,
             macros: HashMap::new(),
@@ -909,6 +931,7 @@ impl<'f> Parser<'f> {
             kind,
             mem,
             origin,
+            dummy: false,
         });
         self.program.sections.len() - 1
     }
@@ -1636,6 +1659,50 @@ impl LineParser<'_, '_, '_> {
         )
     }
 
+    /// `so` is like `rs`, with a counter of its own.
+    fn parse_so(
+        &mut self,
+        label: Option<(String, Span)>,
+        size: Option<Size>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let size = self.data_size(size, span)?;
+        let count = self.parse_constant()?;
+        self.expect_end()?;
+        let value = self.parser.so_counter;
+        self.parser.so_counter = value.wrapping_add(count.wrapping_mul(i64::from(size.bytes())));
+        match label {
+            Some((name, label_span)) => {
+                self.define_equate(&name, Expr::Num(value), false, label_span)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// `fo` counts down, for stack frames: the label gets the value after
+    /// moving the counter.
+    fn parse_fo(
+        &mut self,
+        label: Option<(String, Span)>,
+        size: Option<Size>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let size = self.data_size(size, span)?;
+        let count = self.parse_constant()?;
+        self.expect_end()?;
+        let value = self
+            .parser
+            .fo_counter
+            .wrapping_sub(count.wrapping_mul(i64::from(size.bytes())));
+        self.parser.fo_counter = value;
+        match label {
+            Some((name, label_span)) => {
+                self.define_equate(&name, Expr::Num(value), false, label_span)
+            }
+            None => Ok(()),
+        }
+    }
+
     fn set_rs_counter(&mut self, value: i64, span: Span) -> Result<(), Diagnostic> {
         self.parser.rs_counter = value;
         self.define_equate(RS_COUNTER, Expr::Num(value), true, span)
@@ -1704,6 +1771,8 @@ impl LineParser<'_, '_, '_> {
                 return self.parse_equr(label, span);
             }
             "rs" => return self.parse_rs(label, size, span),
+            "so" => return self.parse_so(label, size, span),
+            "fo" => return self.parse_fo(label, size, span),
             "macro" => {
                 self.no_size(size, span)?;
                 return self.parse_macro_definition(label, span);
@@ -1808,6 +1877,78 @@ impl LineParser<'_, '_, '_> {
             "dc" => self.parse_dc(size, span),
             "ds" | "blk" | "dcb" => self.parse_space(&lower, size, span),
             "section" => self.parse_section(size, span),
+            "clrso" | "clrfo" => {
+                self.no_size(size, span)?;
+                if lower == "clrso" {
+                    self.parser.so_counter = 0;
+                } else {
+                    self.parser.fo_counter = 0;
+                }
+                Ok(())
+            }
+            "setso" | "setfo" => {
+                self.no_size(size, span)?;
+                let value = self.parse_constant()?;
+                self.expect_end()?;
+                if lower == "setso" {
+                    self.parser.so_counter = value;
+                } else {
+                    self.parser.fo_counter = value;
+                }
+                Ok(())
+            }
+            "offset" => {
+                self.no_size(size, span)?;
+                let base = if self.peek()? == Tok::End {
+                    0
+                } else {
+                    self.parse_constant()?
+                };
+                self.expect_end()?;
+                let section =
+                    self.parser
+                        .add_section("offset", SectionKind::Bss, MemKind::Any, Some(base));
+                self.parser.program.sections[section].dummy = true;
+                self.parser.current = Some(section);
+                Ok(())
+            }
+            "idnt" => {
+                self.no_size(size, span)?;
+                let name = self.parse_path(span)?;
+                self.expect_end()?;
+                self.parser.program.unit_name = Some(name);
+                Ok(())
+            }
+            "opt" => Err(Diagnostic::error(
+                "unsupported-opt",
+                "opt is not supported, because ignoring it could change what the source means",
+                span,
+            )),
+            "printt" | "echo" => {
+                self.no_size(size, span)?;
+                let Tok::Str(text) = self.peek()? else {
+                    return Err(Diagnostic::error("syntax", "string expected", span));
+                };
+                self.advance()?;
+                self.expect_end()?;
+                self.parser.program.diagnostics.push(Diagnostic::info(
+                    "print",
+                    String::from_utf8_lossy(&text),
+                    span,
+                ));
+                Ok(())
+            }
+            "printv" => {
+                self.no_size(size, span)?;
+                let value = self.parse_constant()?;
+                self.expect_end()?;
+                self.parser.program.diagnostics.push(Diagnostic::info(
+                    "print",
+                    format!("{value} (${value:X})"),
+                    span,
+                ));
+                Ok(())
+            }
             "rsreset" => {
                 self.no_size(size, span)?;
                 self.set_rs_counter(0, span)

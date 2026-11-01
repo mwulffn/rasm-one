@@ -30,7 +30,7 @@ pub fn write_bin(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     let mut pieces: Vec<_> = assembly
         .sections
         .iter()
-        .filter(|s| s.origin.is_some() || !s.data.is_empty())
+        .filter(|s| !s.dummy && (s.origin.is_some() || !s.data.is_empty()))
         .map(|s| (u64::from(s.origin.unwrap_or(0)), s))
         .collect();
     pieces.sort_by_key(|(start, _)| *start);
