@@ -90,6 +90,11 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Everything left on the line.
+    pub fn rest(&self) -> &'a [u8] {
+        self.src.get(self.pos..).unwrap_or(&[])
+    }
+
     pub fn peek(&self) -> Result<Tok<'a>, LexError> {
         self.clone().next_tok()
     }

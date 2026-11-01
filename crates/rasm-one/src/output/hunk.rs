@@ -25,6 +25,9 @@ pub fn write_hunk_exe(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     if assembly.has_errors() {
         return Err(OutputError::HasErrors);
     }
+    if assembly.sections.iter().any(|s| s.origin.is_some()) {
+        return Err(OutputError::FixedAddress);
+    }
     let has_symbol = |index: usize| assembly.symbols.iter().any(|s| s.section == Some(index));
     // Maps a section index to its hunk number.
     let mut hunk_numbers = vec![None; assembly.sections.len()];
