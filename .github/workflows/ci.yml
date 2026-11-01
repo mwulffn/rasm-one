@@ -14,5 +14,6 @@ jobs:
       - run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: echo "RASM_VASM=$(scripts/fetch-vasm.sh)" >> "$GITHUB_ENV"
       - run: cargo test --workspace
       - run: cargo build -p rasm-one --target wasm32-unknown-unknown
