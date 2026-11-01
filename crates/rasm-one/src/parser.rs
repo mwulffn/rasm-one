@@ -9,7 +9,7 @@ use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
 use crate::float::FloatLiteral;
-use crate::isa::encode::{BranchForm, Instruction};
+use crate::isa::encode::{BranchForm, Instruction, QuickMoves};
 use crate::isa::table::{
     rows_for, Coprocessor, EaSet, Encoding, InsnRow, MmuRegisterHome, CONTROL_REGISTERS,
     CPU_020_UP, MMU_REGISTERS,
@@ -22,7 +22,7 @@ use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
 use crate::{
     Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_BRANCHES,
-    RULE_DISPLACEMENTS,
+    RULE_DISPLACEMENTS, RULE_QUICK_MOVES,
 };
 
 /// A symbol being collected.
@@ -2729,6 +2729,17 @@ impl LineParser<'_, '_, '_> {
                 span,
             ));
         }
+        let quick_move = (self.parser.optimisations.rule(RULE_QUICK_MOVES)
+            && row.encoding == Encoding::Move
+            && size == Some(Size::Long)
+            && matches!(operands.as_slice(), [first, second]
+                if matches!(first.mode, Mode::Immediate(_))
+                    && matches!(second.mode, Mode::DataReg(_))))
+        .then_some(if self.parser.cpu == Cpu::M68040 {
+            QuickMoves::MoveqOnly
+        } else {
+            QuickMoves::WithSecondInstruction
+        });
         // What can't be a word, such as a branch target, isn't shortable after all.
         let mut operands = operands;
         for (operand, allowed) in operands.iter_mut().zip(row.operands) {
@@ -2745,6 +2756,7 @@ impl LineParser<'_, '_, '_> {
                 && self.parser.optimisations.rule(RULE_BRANCHES),
             drops_zero_displacement: self.parser.optimisations.rule(RULE_DISPLACEMENTS),
             shortens_absolutes: self.parser.optimisations.rule(RULE_ABSOLUTES),
+            quick_move,
             branch_form: Cell::new(BranchForm::Word),
             size: size.or(row.default_size),
             operands,

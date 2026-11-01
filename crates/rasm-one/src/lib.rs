@@ -170,7 +170,7 @@ pub struct Options {
 /// Which optimisations apply, numbered like vasm's `-opt-oN` and `opt oN`.
 ///
 /// Only some of vasm's rules exist yet, so this is not yet what vasm does by default.
-/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses.
+/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Optimisations {
@@ -180,7 +180,8 @@ pub struct Optimisations {
 }
 
 impl Optimisations {
-    const IMPLEMENTED: u32 = 1 << RULE_BRANCHES | 1 << RULE_DISPLACEMENTS | 1 << RULE_ABSOLUTES;
+    const IMPLEMENTED: u32 =
+        1 << RULE_BRANCHES | 1 << RULE_DISPLACEMENTS | 1 << RULE_ABSOLUTES | 1 << RULE_QUICK_MOVES;
 
     /// Every rule that exists, which can be changed with `opt`.
     pub fn all() -> Self {
@@ -229,6 +230,8 @@ pub(crate) const RULE_BRANCHES: u32 = 1;
 pub(crate) const RULE_DISPLACEMENTS: u32 = 2;
 /// Rule 3: an address without a size that fits a word is written as one.
 pub(crate) const RULE_ABSOLUTES: u32 = 3;
+/// Rule 4: `move.l #x,Dn` becomes `moveq`, with `add.w` or `swap` if that helps.
+pub(crate) const RULE_QUICK_MOVES: u32 = 4;
 
 impl Options {
     /// Options for assembling `main` for a 68000.

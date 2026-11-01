@@ -81,11 +81,11 @@ fn test_corpus_matches_vasm() -> Result<(), Box<dyn Error>> {
 #[test]
 fn test_corpus_matches_vasm_with_rules() -> Result<(), Box<dyn Error>> {
     let mut optimisations = Optimisations::none();
-    optimisations.set_rule(1, true);
-    optimisations.set_rule(2, true);
-    optimisations.set_rule(3, true);
+    for rule in 1..=4 {
+        optimisations.set_rule(rule, true);
+    }
     corpus_matches(
-        &["-opt-o-", "-opt-o1+", "-opt-o2+", "-opt-o3+"],
+        &["-opt-o-", "-opt-o1+", "-opt-o2+", "-opt-o3+", "-opt-o4+"],
         optimisations,
     )
 }

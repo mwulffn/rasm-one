@@ -36,8 +36,29 @@ pub(crate) struct Instruction {
     pub drops_zero_displacement: bool,
     /// True if any operand may be [`Mode::AbsShortable`].
     pub shortens_absolutes: bool,
+    /// What `move.l #x,Dn` can become, if this is one and optimisation applies.
+    pub quick_move: Option<QuickMoves>,
     /// The form of a resizable branch, which layout chooses.
     pub branch_form: Cell<BranchForm>,
+}
+
+/// Which replacements for `move.l #x,Dn` a CPU gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuickMoves {
+    /// Only `moveq`.
+    MoveqOnly,
+    /// Also `moveq` followed by `add.w` or `swap`.
+    WithSecondInstruction,
+}
+
+/// What `move.l #x,Dn` is written as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickMoveForm {
+    Moveq(i64),
+    /// `moveq` of half the value, then `add.w Dn,Dn`.
+    MoveqAdd(i64),
+    /// `moveq` of the value with its halves swapped, then `swap Dn`.
+    MoveqSwap(i64),
 }
 
 /// How a branch without a size is written.
@@ -481,8 +502,39 @@ impl Instruction {
         !matches!(self.row.opcode, BRA_OPCODE | BSR_OPCODE)
     }
 
+    /// The replacement for this `move.l #x,Dn`, if there is one for its value now.
+    fn quick_move_form(&self, sizer: &Sizer) -> Option<QuickMoveForm> {
+        let moves = self.quick_move?;
+        let Mode::Immediate(expr) = &self.operands.first()?.mode else {
+            return None;
+        };
+        let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup).ok()?;
+        let DispKind::Number(number) = plain_disp_kind(value, self.fixed_addresses) else {
+            return None;
+        };
+        if fits_byte(number) {
+            return Some(QuickMoveForm::Moveq(number));
+        }
+        if moves == QuickMoves::MoveqOnly {
+            return None;
+        }
+        let swapped = sign_extend_32(((number & 0xFFFF) << 16) | ((number >> 16) & 0xFFFF));
+        if number % 2 == 0 && fits_byte(number / 2) {
+            Some(QuickMoveForm::MoveqAdd(number / 2))
+        } else if fits_byte(swapped) {
+            Some(QuickMoveForm::MoveqSwap(swapped))
+        } else {
+            None
+        }
+    }
+
     /// Length in bytes, with symbols as they are known now.
     pub fn len(&self, sizer: &Sizer) -> i64 {
+        match self.quick_move_form(sizer) {
+            Some(QuickMoveForm::Moveq(_)) => return 2,
+            Some(_) => return 4,
+            None => {}
+        }
         if self.resizable_branch {
             return self.form_bytes(self.branch_form.get());
         }
@@ -781,6 +833,22 @@ fn encode_fields(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     match insn.row.encoding {
         Encoding::Fixed => ctx.put_word(base),
         Encoding::Branch => encode_branch(insn, span, ctx),
+        Encoding::Move if insn.quick_move_form(&sizer_for(ctx)).is_some() => {
+            let register = reg(1);
+            let moveq = |data: i64| 0x7000 | register << 9 | (data & 0xFF) as u16;
+            match insn.quick_move_form(&sizer_for(ctx)) {
+                Some(QuickMoveForm::Moveq(data)) => ctx.put_word(moveq(data)),
+                Some(QuickMoveForm::MoveqAdd(data)) => {
+                    ctx.put_word(moveq(data));
+                    ctx.put_word(0xD040 | register << 9 | register);
+                }
+                Some(QuickMoveForm::MoveqSwap(data)) => {
+                    ctx.put_word(moveq(data));
+                    ctx.put_word(0x4840 | register);
+                }
+                None => {}
+            }
+        }
         Encoding::Move => {
             let size_code: u16 = match size {
                 Size::Byte | Size::Short => 1,
