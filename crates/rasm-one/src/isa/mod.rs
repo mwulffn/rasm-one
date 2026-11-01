@@ -12,6 +12,65 @@ pub(crate) struct IndexReg {
     /// 0-7 for D0-D7, 8-15 for A0-A7.
     pub reg: u8,
     pub long: bool,
+    /// Scale as a power of two: 0 for `*1` up to 3 for `*8`.
+    pub scale: u8,
+    /// True if written with a `z` prefix, so it adds nothing.
+    pub suppressed: bool,
+}
+
+/// The size written on a displacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Width {
+    Word,
+    Long,
+}
+
+/// A displacement in a full-format extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FullDisp {
+    pub expr: Expr,
+    pub width: Option<Width>,
+}
+
+/// The base of a full-format mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FullBase {
+    Addr(u8),
+    Pc,
+    /// `zaN`: the register is named but adds nothing.
+    SuppressedAddr(u8),
+    /// `zpc`
+    SuppressedPc,
+    /// No base written at all.
+    None,
+}
+
+/// Memory indirection in a full-format mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Indirection {
+    #[default]
+    None,
+    /// The index is applied before the memory read.
+    PreIndexed,
+    /// The index, if any, is applied after the memory read.
+    PostIndexed,
+}
+
+/// A 68020 full-format addressing mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FullMode {
+    pub base: FullBase,
+    pub index: Option<IndexReg>,
+    pub indirection: Indirection,
+    pub base_disp: Option<FullDisp>,
+    pub outer_disp: Option<FullDisp>,
+}
+
+/// An offset or width in a bit field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BitFieldArg {
+    Reg(u8),
+    Value(Expr),
 }
 
 /// An addressing mode as parsed.
@@ -22,18 +81,35 @@ pub(crate) enum Mode {
     Indirect(u8),
     PostInc(u8),
     PreDec(u8),
+    /// A displacement that may grow to a full-format one on 68020 and later.
     Disp(Expr, u8),
+    /// A displacement written with `.w`, which always stays 16 bits.
+    DispWord(Expr, u8),
+    /// An index that may grow to a full-format one on 68020 and later.
     Index(Expr, u8, IndexReg),
     AbsWord(Expr),
     AbsLong(Expr),
     PcDisp(Expr),
+    PcDispWord(Expr),
     PcIndex(Expr, IndexReg),
+    Full(Box<FullMode>),
     Immediate(Expr),
     Sr,
     Ccr,
     Usp,
     /// Bit 0 is D0 and bit 15 is A7.
     RegList(u16),
+    /// `d0:d1`
+    RegPair(u8, u8),
+    /// `(a0):(d1)`, with each register numbered 0-15.
+    IndirectPair(u8, u8),
+    ControlReg(u16),
+    Cache(u8),
+    BitField {
+        ea: Box<Mode>,
+        offset: BitFieldArg,
+        width: BitFieldArg,
+    },
 }
 
 impl Mode {
@@ -46,17 +122,26 @@ impl Mode {
             Mode::Indirect(_) => EaSet::IND,
             Mode::PostInc(_) => EaSet::POST,
             Mode::PreDec(_) => EaSet::PRE,
-            Mode::Disp(..) => EaSet::DISP,
+            Mode::Disp(..) | Mode::DispWord(..) => EaSet::DISP,
             Mode::Index(..) => EaSet::INDEX,
             Mode::AbsWord(_) => EaSet::ABS_W,
             Mode::AbsLong(_) => EaSet::ABS_L,
-            Mode::PcDisp(_) => EaSet::PC_DISP,
+            Mode::PcDisp(_) | Mode::PcDispWord(_) => EaSet::PC_DISP,
             Mode::PcIndex(..) => EaSet::PC_INDEX,
+            Mode::Full(full) => match full.base {
+                FullBase::Pc | FullBase::SuppressedPc => EaSet::PC_INDEX,
+                _ => EaSet::INDEX,
+            },
             Mode::Immediate(_) => EaSet::IMM,
             Mode::Sr => EaSet::SR,
             Mode::Ccr => EaSet::CCR,
             Mode::Usp => EaSet::USP,
             Mode::RegList(_) => EaSet::LIST,
+            Mode::RegPair(..) => EaSet::PAIR,
+            Mode::IndirectPair(..) => EaSet::INDIRECT_PAIR,
+            Mode::ControlReg(_) => EaSet::CONTROL_REG,
+            Mode::Cache(_) => EaSet::CACHE,
+            Mode::BitField { ea, .. } => ea.class().bitfield(),
         }
     }
 }

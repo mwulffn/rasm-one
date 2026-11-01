@@ -6,7 +6,7 @@ use crate::types::{CpuSet, Size};
 
 /// A set of effective address classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EaSet(pub u16);
+pub struct EaSet(pub u32);
 
 impl EaSet {
     /// `Dn`
@@ -41,6 +41,14 @@ impl EaSet {
     pub const USP: EaSet = EaSet(1 << 14);
     /// A register list of more than one register, such as `d0-d3/a0`.
     pub const LIST: EaSet = EaSet(1 << 15);
+    /// A pair of data registers, such as `d0:d1`.
+    pub const PAIR: EaSet = EaSet(1 << 16);
+    /// A pair of register-indirect operands, such as `(a0):(d1)`.
+    pub const INDIRECT_PAIR: EaSet = EaSet(1 << 17);
+    /// A control register, for `movec`.
+    pub const CONTROL_REG: EaSet = EaSet(1 << 18);
+    /// A cache name, for `cinv` and `cpush`.
+    pub const CACHE: EaSet = EaSet(1 << 19);
     /// A branch target: an address expression written without a mode.
     pub const LABEL: EaSet = EaSet::ABS_L;
 
@@ -80,6 +88,11 @@ impl EaSet {
     /// mask, which is the form symbolic register lists will need.
     pub const REG_MASK: EaSet =
         EaSet(EaSet::LIST.0 | EaSet::DN.0 | EaSet::AN.0 | EaSet::IMM.0 | EaSet::ABS_L.0);
+
+    /// The bit-field form of these classes, such as `(a0){1:2}`.
+    pub const fn bitfield(self) -> EaSet {
+        EaSet(self.0 << 20)
+    }
 
     /// True if the classes overlap.
     pub const fn intersects(self, other: EaSet) -> bool {
@@ -165,6 +178,46 @@ pub enum Encoding {
     MovemStore,
     /// Register mask, then `ea0`
     MovemLoad,
+    /// Opcode, then a 32-bit displacement
+    BranchLong,
+    /// `ea0`, then an extension word with the registers of operand 1
+    MulDivLong,
+    /// Size in bits 9-10, `ea0`, then an extension word with `reg1`
+    Chk2,
+    /// Size in bits 9-10, `ea2`, then an extension word with `reg0` and `reg1`
+    Cas,
+    /// Two extension words from the register pairs
+    Cas2,
+    /// `reg1 << 9`, register-or-predecrement flag, `reg0`, then a 16-bit value
+    PackUnpack,
+    /// `ea0`, with an extension word for its bit field
+    BitField,
+    /// `ea0`, with an extension word for its bit field and `reg1`
+    BitFieldToReg,
+    /// `ea1`, with an extension word for its bit field and `reg0`
+    BitFieldFromReg,
+    /// An extension word with `reg1` and the control register of operand 0
+    MovecFrom,
+    /// An extension word with `reg0` and the control register of operand 1
+    MovecTo,
+    /// Size, `ea0`, then an extension word with `reg1`
+    MovesLoad,
+    /// Size, `ea1`, then an extension word with `reg0`
+    MovesStore,
+    /// Immediate 0-7
+    Bkpt,
+    /// `ea1`, preceded by an 8-bit immediate in a word
+    Callm,
+    /// `reg0`, then an extension word with `reg1`
+    Move16Registers,
+    /// `reg0`, then the absolute address from operand 1
+    Move16To,
+    /// `reg1`, then the absolute address from operand 0
+    Move16From,
+    /// Cache in bits 6-7, and `reg1` if there is a second operand
+    CacheOp,
+    /// Opcode, extension word, then an unsigned 16-bit immediate
+    Lpstop,
 }
 
 /// One form of an instruction.
@@ -188,8 +241,24 @@ pub struct InsnRow {
     pub opcode: u16,
     /// Encoding.
     pub encoding: Encoding,
+    /// Fixed bits of an extension word, for encodings that have one.
+    pub extension: u16,
     /// Execution cycles. Reserved; not filled in yet.
     pub cycles: Option<u16>,
+}
+
+impl InsnRow {
+    /// This row, available only on `cpus`.
+    pub const fn on(mut self, cpus: CpuSet) -> InsnRow {
+        self.cpus = cpus;
+        self
+    }
+
+    /// This row, with fixed extension word bits.
+    pub const fn ext(mut self, extension: u16) -> InsnRow {
+        self.extension = extension;
+        self
+    }
 }
 
 const BWL: &[Size] = &[Size::Byte, Size::Word, Size::Long];
@@ -198,6 +267,12 @@ const L: &[Size] = &[Size::Long];
 const W: &[Size] = &[Size::Word];
 const B: &[Size] = &[Size::Byte];
 const BRANCH: &[Size] = &[Size::Short, Size::Byte, Size::Word];
+
+const UP010: CpuSet = CpuSet(0x3E);
+const UP020: CpuSet = CpuSet(0x3C);
+const ONLY020: CpuSet = CpuSet(0x04);
+const UP040: CpuSet = CpuSet(0x30);
+const ONLY060: CpuSet = CpuSet(0x20);
 
 const fn row(
     mnemonic: &'static str,
@@ -217,6 +292,7 @@ const fn row(
         trap_060: false,
         opcode,
         encoding,
+        extension: 0,
         cycles: None,
     }
 }
@@ -239,6 +315,29 @@ const SR: EaSet = EaSet::SR;
 const CCR: EaSet = EaSet::CCR;
 const USP: EaSet = EaSet::USP;
 const DISP: EaSet = EaSet(EaSet::DISP.0 | EaSet::IND.0);
+const RN: EaSet = EaSet(DN.0 | AN.0);
+const PC_MODES: EaSet = EaSet(EaSet::PC_DISP.0 | EaSet::PC_INDEX.0);
+const PAIR: EaSet = EaSet::PAIR;
+const CREG: EaSet = EaSet::CONTROL_REG;
+const CACHE: EaSet = EaSet::CACHE;
+const IND: EaSet = EaSet::IND;
+const ABSL: EaSet = EaSet::ABS_L;
+/// Bit fields that are only read.
+const BF_READ: EaSet = EaSet(DN.0 | CTRL.0).bitfield();
+/// Bit fields that are written.
+const BF_WRITE: EaSet = EaSet(DN.0 | EaSet::CONTROL_ALTERABLE.0).bitfield();
+
+const fn long_branch(mnemonic: &'static str, opcode: u16) -> InsnRow {
+    row(
+        mnemonic,
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        opcode | 0xFF,
+        Encoding::BranchLong,
+    )
+    .on(UP020)
+}
 
 const fn branch(mnemonic: &'static str, opcode: u16) -> InsnRow {
     row(
@@ -280,6 +379,8 @@ const fn sized(mnemonic: &'static str, opcode: u16) -> InsnRow {
 const fn word_to_reg(mnemonic: &'static str, opcode: u16) -> InsnRow {
     row(mnemonic, W, WORD, &[DATA, DN], opcode, Encoding::RegEa)
 }
+
+pub(crate) const CPU_020_UP: CpuSet = UP020;
 
 const fn fixed(mnemonic: &'static str, opcode: u16) -> InsnRow {
     row(mnemonic, &[], None, &[], opcode, Encoding::Fixed)
@@ -345,6 +446,7 @@ pub const TABLE: &[InsnRow] = &[
         0,
         Encoding::Move,
     ),
+    row("move", W, WORD, &[CCR, DALT], 0x42C0, Encoding::Ea1).on(UP010),
     row("move", W, WORD, &[SR, DALT], 0x40C0, Encoding::Ea1),
     row("move", W, WORD, &[DATA, CCR], 0x44C0, Encoding::Ea0),
     row("move", W, WORD, &[DATA, SR], 0x46C0, Encoding::Ea0),
@@ -446,9 +548,27 @@ pub const TABLE: &[InsnRow] = &[
     row("cmp", WL, WORD, &[ALL, DN], 0xB000, Encoding::ToReg),
     row("cmp", WL, WORD, &[ALL, AN], 0xB000, Encoding::Address),
     row("cmp", BWL, WORD, &[IMM, MEM], 0x0C00, Encoding::Immediate),
+    row(
+        "cmp",
+        BWL,
+        WORD,
+        &[IMM, PC_MODES],
+        0x0C00,
+        Encoding::Immediate,
+    )
+    .on(UP020),
     row("cmp", BWL, WORD, &[POST, POST], 0xB108, Encoding::Cmpm),
     row("cmpa", WL, WORD, &[ALL, AN], 0xB000, Encoding::Address),
     row("cmpi", BWL, WORD, &[IMM, DALT], 0x0C00, Encoding::Immediate),
+    row(
+        "cmpi",
+        BWL,
+        WORD,
+        &[IMM, PC_MODES],
+        0x0C00,
+        Encoding::Immediate,
+    )
+    .on(UP020),
     row("cmpm", BWL, WORD, &[POST, POST], 0xB108, Encoding::Cmpm),
     row("and", BWL, WORD, &[DATA, DN], 0xC000, Encoding::ToReg),
     row("and", BWL, WORD, &[DN, MEM], 0xC100, Encoding::FromReg),
@@ -498,16 +618,239 @@ pub const TABLE: &[InsnRow] = &[
     sized("negx", 0x4000),
     sized("not", 0x4600),
     sized("tst", 0x4A00),
+    row("tst", WL, WORD, &[AN], 0x4A00, Encoding::SizeEa0).on(UP020),
+    row(
+        "tst",
+        BWL,
+        WORD,
+        &[EaSet(PC_MODES.0 | IMM.0)],
+        0x4A00,
+        Encoding::SizeEa0,
+    )
+    .on(UP020),
     word_to_reg("chk", 0x4180),
+    row("chk", L, WORD, &[DATA, DN], 0x4100, Encoding::RegEa).on(UP020),
     word_to_reg("divu", 0x80C0),
+    row("divu", L, WORD, &[DATA, DN], 0x4C40, Encoding::MulDivLong).on(UP020),
+    row("divu", L, LONG, &[DATA, PAIR], 0x4C40, Encoding::MulDivLong)
+        .on(UP020)
+        .ext(0x0400),
     word_to_reg("divs", 0x81C0),
+    row("divs", L, WORD, &[DATA, DN], 0x4C40, Encoding::MulDivLong)
+        .on(UP020)
+        .ext(0x0800),
+    row("divs", L, LONG, &[DATA, PAIR], 0x4C40, Encoding::MulDivLong)
+        .on(UP020)
+        .ext(0x0C00),
+    row(
+        "divul",
+        L,
+        LONG,
+        &[DATA, PAIR],
+        0x4C40,
+        Encoding::MulDivLong,
+    )
+    .on(UP020),
+    row(
+        "divsl",
+        L,
+        LONG,
+        &[DATA, PAIR],
+        0x4C40,
+        Encoding::MulDivLong,
+    )
+    .on(UP020)
+    .ext(0x0800),
     word_to_reg("mulu", 0xC0C0),
+    row("mulu", L, WORD, &[DATA, DN], 0x4C00, Encoding::MulDivLong).on(UP020),
+    row("mulu", L, LONG, &[DATA, PAIR], 0x4C00, Encoding::MulDivLong)
+        .on(UP020)
+        .ext(0x0400),
     word_to_reg("muls", 0xC1C0),
+    row("muls", L, WORD, &[DATA, DN], 0x4C00, Encoding::MulDivLong)
+        .on(UP020)
+        .ext(0x0800),
+    row("muls", L, LONG, &[DATA, PAIR], 0x4C00, Encoding::MulDivLong)
+        .on(UP020)
+        .ext(0x0C00),
+    row("extb", L, LONG, &[DN], 0x49C0, Encoding::Reg0).on(UP020),
+    row("chk2", BWL, WORD, &[CTRL, RN], 0x00C0, Encoding::Chk2)
+        .on(UP020)
+        .ext(0x0800),
+    row("cmp2", BWL, WORD, &[CTRL, RN], 0x00C0, Encoding::Chk2).on(UP020),
+    row("cas", BWL, WORD, &[DN, DN, MEM], 0x08C0, Encoding::Cas).on(UP020),
+    row(
+        "cas2",
+        WL,
+        WORD,
+        &[PAIR, PAIR, EaSet::INDIRECT_PAIR],
+        0x08FC,
+        Encoding::Cas2,
+    )
+    .on(UP020),
+    row(
+        "pack",
+        &[],
+        None,
+        &[DN, DN, IMM],
+        0x8140,
+        Encoding::PackUnpack,
+    )
+    .on(UP020),
+    row(
+        "pack",
+        &[],
+        None,
+        &[PRE, PRE, IMM],
+        0x8140,
+        Encoding::PackUnpack,
+    )
+    .on(UP020),
+    row(
+        "unpk",
+        &[],
+        None,
+        &[DN, DN, IMM],
+        0x8180,
+        Encoding::PackUnpack,
+    )
+    .on(UP020),
+    row(
+        "unpk",
+        &[],
+        None,
+        &[PRE, PRE, IMM],
+        0x8180,
+        Encoding::PackUnpack,
+    )
+    .on(UP020),
+    row("bftst", &[], None, &[BF_READ], 0xE8C0, Encoding::BitField).on(UP020),
+    row(
+        "bfextu",
+        &[],
+        None,
+        &[BF_READ, DN],
+        0xE9C0,
+        Encoding::BitFieldToReg,
+    )
+    .on(UP020),
+    row("bfchg", &[], None, &[BF_WRITE], 0xEAC0, Encoding::BitField).on(UP020),
+    row(
+        "bfexts",
+        &[],
+        None,
+        &[BF_READ, DN],
+        0xEBC0,
+        Encoding::BitFieldToReg,
+    )
+    .on(UP020),
+    row("bfclr", &[], None, &[BF_WRITE], 0xECC0, Encoding::BitField).on(UP020),
+    row(
+        "bfffo",
+        &[],
+        None,
+        &[BF_READ, DN],
+        0xEDC0,
+        Encoding::BitFieldToReg,
+    )
+    .on(UP020),
+    row("bfset", &[], None, &[BF_WRITE], 0xEEC0, Encoding::BitField).on(UP020),
+    row(
+        "bfins",
+        &[],
+        None,
+        &[DN, BF_WRITE],
+        0xEFC0,
+        Encoding::BitFieldFromReg,
+    )
+    .on(UP020),
+    row("callm", &[], None, &[IMM, CTRL], 0x06C0, Encoding::Callm).on(ONLY020),
+    row("rtm", &[], None, &[RN], 0x06C0, Encoding::Ea0).on(ONLY020),
+    row("rtd", &[], None, &[IMM], 0x4E74, Encoding::Stop).on(UP010),
+    row("movec", L, LONG, &[CREG, RN], 0x4E7A, Encoding::MovecFrom).on(UP010),
+    row("movec", L, LONG, &[RN, CREG], 0x4E7B, Encoding::MovecTo).on(UP010),
+    row("moves", BWL, WORD, &[RN, MEM], 0x0E00, Encoding::MovesStore)
+        .on(UP010)
+        .ext(0x0800),
+    row("moves", BWL, WORD, &[MEM, RN], 0x0E00, Encoding::MovesLoad).on(UP010),
+    row("bkpt", &[], None, &[IMM], 0x4848, Encoding::Bkpt).on(UP010),
+    row(
+        "move16",
+        &[],
+        None,
+        &[POST, POST],
+        0xF620,
+        Encoding::Move16Registers,
+    )
+    .on(UP040)
+    .ext(0x8000),
+    row(
+        "move16",
+        &[],
+        None,
+        &[POST, ABSL],
+        0xF600,
+        Encoding::Move16To,
+    )
+    .on(UP040),
+    row(
+        "move16",
+        &[],
+        None,
+        &[ABSL, POST],
+        0xF608,
+        Encoding::Move16From,
+    )
+    .on(UP040),
+    row(
+        "move16",
+        &[],
+        None,
+        &[IND, ABSL],
+        0xF610,
+        Encoding::Move16To,
+    )
+    .on(UP040),
+    row(
+        "move16",
+        &[],
+        None,
+        &[ABSL, IND],
+        0xF618,
+        Encoding::Move16From,
+    )
+    .on(UP040),
+    row("cinvl", &[], None, &[CACHE, IND], 0xF408, Encoding::CacheOp).on(UP040),
+    row("cinvp", &[], None, &[CACHE, IND], 0xF410, Encoding::CacheOp).on(UP040),
+    row("cinva", &[], None, &[CACHE], 0xF418, Encoding::CacheOp).on(UP040),
+    row(
+        "cpushl",
+        &[],
+        None,
+        &[CACHE, IND],
+        0xF428,
+        Encoding::CacheOp,
+    )
+    .on(UP040),
+    row(
+        "cpushp",
+        &[],
+        None,
+        &[CACHE, IND],
+        0xF430,
+        Encoding::CacheOp,
+    )
+    .on(UP040),
+    row("cpusha", &[], None, &[CACHE], 0xF438, Encoding::CacheOp).on(UP040),
+    row("lpstop", W, WORD, &[IMM], 0xF800, Encoding::Lpstop)
+        .on(ONLY060)
+        .ext(0x01C0),
     row("ext", W, WORD, &[DN], 0x4880, Encoding::Reg0),
     row("ext", L, WORD, &[DN], 0x48C0, Encoding::Reg0),
     row("swap", W, WORD, &[DN], 0x4840, Encoding::Reg0),
     row("unlk", &[], None, &[AN], 0x4E58, Encoding::Reg0),
     row("link", W, WORD, &[AN, IMM], 0x4E50, Encoding::Link),
+    row("link", L, WORD, &[AN, IMM], 0x4808, Encoding::Link).on(UP020),
     row("trap", &[], None, &[IMM], 0x4E40, Encoding::Trap),
     row("stop", &[], None, &[IMM], 0x4E72, Encoding::Stop),
     row("exg", L, LONG, &[DN, DN], 0xC140, Encoding::Exchange),
@@ -570,23 +913,95 @@ pub const TABLE: &[InsnRow] = &[
     ROR[1],
     ROR[2],
     branch("bra", 0x6000),
+    long_branch("bra", 0x6000),
     branch("bsr", 0x6100),
+    long_branch("bsr", 0x6100),
     branch("bhi", 0x6200),
+    long_branch("bhi", 0x6200),
     branch("bls", 0x6300),
+    long_branch("bls", 0x6300),
     branch("bcc", 0x6400),
+    long_branch("bcc", 0x6400),
     branch("bhs", 0x6400),
+    long_branch("bhs", 0x6400),
     branch("bcs", 0x6500),
+    long_branch("bcs", 0x6500),
     branch("blo", 0x6500),
+    long_branch("blo", 0x6500),
     branch("bne", 0x6600),
+    long_branch("bne", 0x6600),
     branch("beq", 0x6700),
+    long_branch("beq", 0x6700),
     branch("bvc", 0x6800),
+    long_branch("bvc", 0x6800),
     branch("bvs", 0x6900),
+    long_branch("bvs", 0x6900),
     branch("bpl", 0x6A00),
+    long_branch("bpl", 0x6A00),
     branch("bmi", 0x6B00),
+    long_branch("bmi", 0x6B00),
     branch("bge", 0x6C00),
+    long_branch("bge", 0x6C00),
     branch("blt", 0x6D00),
+    long_branch("blt", 0x6D00),
     branch("bgt", 0x6E00),
+    long_branch("bgt", 0x6E00),
     branch("ble", 0x6F00),
+    long_branch("ble", 0x6F00),
+    row("trapt", &[], None, &[], 0x50FC, Encoding::Fixed).on(UP020),
+    row("trapt", W, WORD, &[IMM], 0x50FA, Encoding::ImmediateOnly).on(UP020),
+    row("trapt", L, WORD, &[IMM], 0x50FB, Encoding::ImmediateOnly).on(UP020),
+    row("trapf", &[], None, &[], 0x51FC, Encoding::Fixed).on(UP020),
+    row("trapf", W, WORD, &[IMM], 0x51FA, Encoding::ImmediateOnly).on(UP020),
+    row("trapf", L, WORD, &[IMM], 0x51FB, Encoding::ImmediateOnly).on(UP020),
+    row("traphi", &[], None, &[], 0x52FC, Encoding::Fixed).on(UP020),
+    row("traphi", W, WORD, &[IMM], 0x52FA, Encoding::ImmediateOnly).on(UP020),
+    row("traphi", L, WORD, &[IMM], 0x52FB, Encoding::ImmediateOnly).on(UP020),
+    row("trapls", &[], None, &[], 0x53FC, Encoding::Fixed).on(UP020),
+    row("trapls", W, WORD, &[IMM], 0x53FA, Encoding::ImmediateOnly).on(UP020),
+    row("trapls", L, WORD, &[IMM], 0x53FB, Encoding::ImmediateOnly).on(UP020),
+    row("trapcc", &[], None, &[], 0x54FC, Encoding::Fixed).on(UP020),
+    row("trapcc", W, WORD, &[IMM], 0x54FA, Encoding::ImmediateOnly).on(UP020),
+    row("trapcc", L, WORD, &[IMM], 0x54FB, Encoding::ImmediateOnly).on(UP020),
+    row("traphs", &[], None, &[], 0x54FC, Encoding::Fixed).on(UP020),
+    row("traphs", W, WORD, &[IMM], 0x54FA, Encoding::ImmediateOnly).on(UP020),
+    row("traphs", L, WORD, &[IMM], 0x54FB, Encoding::ImmediateOnly).on(UP020),
+    row("trapcs", &[], None, &[], 0x55FC, Encoding::Fixed).on(UP020),
+    row("trapcs", W, WORD, &[IMM], 0x55FA, Encoding::ImmediateOnly).on(UP020),
+    row("trapcs", L, WORD, &[IMM], 0x55FB, Encoding::ImmediateOnly).on(UP020),
+    row("traplo", &[], None, &[], 0x55FC, Encoding::Fixed).on(UP020),
+    row("traplo", W, WORD, &[IMM], 0x55FA, Encoding::ImmediateOnly).on(UP020),
+    row("traplo", L, WORD, &[IMM], 0x55FB, Encoding::ImmediateOnly).on(UP020),
+    row("trapne", &[], None, &[], 0x56FC, Encoding::Fixed).on(UP020),
+    row("trapne", W, WORD, &[IMM], 0x56FA, Encoding::ImmediateOnly).on(UP020),
+    row("trapne", L, WORD, &[IMM], 0x56FB, Encoding::ImmediateOnly).on(UP020),
+    row("trapeq", &[], None, &[], 0x57FC, Encoding::Fixed).on(UP020),
+    row("trapeq", W, WORD, &[IMM], 0x57FA, Encoding::ImmediateOnly).on(UP020),
+    row("trapeq", L, WORD, &[IMM], 0x57FB, Encoding::ImmediateOnly).on(UP020),
+    row("trapvc", &[], None, &[], 0x58FC, Encoding::Fixed).on(UP020),
+    row("trapvc", W, WORD, &[IMM], 0x58FA, Encoding::ImmediateOnly).on(UP020),
+    row("trapvc", L, WORD, &[IMM], 0x58FB, Encoding::ImmediateOnly).on(UP020),
+    row("trapvs", &[], None, &[], 0x59FC, Encoding::Fixed).on(UP020),
+    row("trapvs", W, WORD, &[IMM], 0x59FA, Encoding::ImmediateOnly).on(UP020),
+    row("trapvs", L, WORD, &[IMM], 0x59FB, Encoding::ImmediateOnly).on(UP020),
+    row("trappl", &[], None, &[], 0x5AFC, Encoding::Fixed).on(UP020),
+    row("trappl", W, WORD, &[IMM], 0x5AFA, Encoding::ImmediateOnly).on(UP020),
+    row("trappl", L, WORD, &[IMM], 0x5AFB, Encoding::ImmediateOnly).on(UP020),
+    row("trapmi", &[], None, &[], 0x5BFC, Encoding::Fixed).on(UP020),
+    row("trapmi", W, WORD, &[IMM], 0x5BFA, Encoding::ImmediateOnly).on(UP020),
+    row("trapmi", L, WORD, &[IMM], 0x5BFB, Encoding::ImmediateOnly).on(UP020),
+    row("trapge", &[], None, &[], 0x5CFC, Encoding::Fixed).on(UP020),
+    row("trapge", W, WORD, &[IMM], 0x5CFA, Encoding::ImmediateOnly).on(UP020),
+    row("trapge", L, WORD, &[IMM], 0x5CFB, Encoding::ImmediateOnly).on(UP020),
+    row("traplt", &[], None, &[], 0x5DFC, Encoding::Fixed).on(UP020),
+    row("traplt", W, WORD, &[IMM], 0x5DFA, Encoding::ImmediateOnly).on(UP020),
+    row("traplt", L, WORD, &[IMM], 0x5DFB, Encoding::ImmediateOnly).on(UP020),
+    row("trapgt", &[], None, &[], 0x5EFC, Encoding::Fixed).on(UP020),
+    row("trapgt", W, WORD, &[IMM], 0x5EFA, Encoding::ImmediateOnly).on(UP020),
+    row("trapgt", L, WORD, &[IMM], 0x5EFB, Encoding::ImmediateOnly).on(UP020),
+    row("traple", &[], None, &[], 0x5FFC, Encoding::Fixed).on(UP020),
+    row("traple", W, WORD, &[IMM], 0x5FFA, Encoding::ImmediateOnly).on(UP020),
+    row("traple", L, WORD, &[IMM], 0x5FFB, Encoding::ImmediateOnly).on(UP020),
     set("st", 0),
     set("sf", 1),
     set("shi", 2),
@@ -624,6 +1039,32 @@ pub const TABLE: &[InsnRow] = &[
     decrement("dblt", 13),
     decrement("dbgt", 14),
     decrement("dble", 15),
+];
+
+/// A control register for `movec`: name, code and the CPUs that have it.
+pub const CONTROL_REGISTERS: &[(&str, u16, CpuSet)] = &[
+    ("sfc", 0x000, UP010),
+    ("dfc", 0x001, UP010),
+    ("usp", 0x800, UP010),
+    ("vbr", 0x801, UP010),
+    ("cacr", 0x002, UP020),
+    ("caar", 0x802, CpuSet(0x0C)),
+    ("msp", 0x803, CpuSet(0x1C)),
+    ("isp", 0x804, CpuSet(0x1C)),
+    ("tc", 0x003, UP040),
+    ("itt0", 0x004, UP040),
+    ("itt1", 0x005, UP040),
+    ("dtt0", 0x006, UP040),
+    ("dtt1", 0x007, UP040),
+    ("iacr0", 0x004, UP040),
+    ("iacr1", 0x005, UP040),
+    ("dacr0", 0x006, UP040),
+    ("dacr1", 0x007, UP040),
+    ("mmusr", 0x805, CpuSet(0x10)),
+    ("urp", 0x806, UP040),
+    ("srp", 0x807, UP040),
+    ("buscr", 0x008, ONLY060),
+    ("pcr", 0x808, ONLY060),
 ];
 
 /// Returns the rows for a lower-case mnemonic, or `None` if it is unknown.

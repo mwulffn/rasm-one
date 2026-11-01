@@ -4,12 +4,12 @@ use std::fs;
 
 use anyhow::{bail, Context, Result};
 use rasm_one::{
-    assemble, write_bin, write_hunk_exe_with, write_hunk_object, write_listing, FileError,
+    assemble, write_bin, write_hunk_exe_with, write_hunk_object, write_listing, Cpu, FileError,
     FileProvider, HunkExeOptions, Options, Severity,
 };
 
 const USAGE: &str =
-    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-I<dir>]... [-L <listing>]";
+    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-I<dir>]... [-L <listing>]";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -37,6 +37,7 @@ struct Args {
     include_dirs: Vec<String>,
     listing: Option<String>,
     kickstart1: bool,
+    cpu: Cpu,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
@@ -45,6 +46,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut include_dirs = Vec::new();
     let mut listing = None;
     let mut kickstart1 = false;
+    let mut cpu = Cpu::default();
     let mut args = args;
     while let Some(arg) = args.next() {
         if arg == "-o" {
@@ -61,6 +63,12 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             format = Format::Bin;
         } else if let Some(directory) = arg.strip_prefix("-I") {
             include_dirs.push(directory.to_string());
+        } else if let Some(found) = arg
+            .strip_prefix("-m")
+            .and_then(|number| number.parse().ok())
+            .and_then(Cpu::from_number)
+        {
+            cpu = found;
         } else if arg.starts_with('-') {
             bail!("unknown option {arg}\n{USAGE}");
         } else if source.replace(arg).is_some() {
@@ -75,6 +83,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             include_dirs,
             listing,
             kickstart1,
+            cpu,
         }),
         _ => bail!("{USAGE}"),
     }
@@ -84,6 +93,8 @@ fn main() -> Result<()> {
     let args = parse_args(std::env::args().skip(1))?;
     let mut options = Options::new(args.source);
     options.include_dirs = args.include_dirs;
+    options.cpu = args.cpu;
+    options.fixed_addresses = args.format == Format::Bin;
     let assembly = assemble(&options, &NativeProvider);
     if let Some(path) = &args.listing {
         let text = write_listing(&assembly, &NativeProvider);
@@ -151,6 +162,13 @@ mod tests {
         let args = parse(&["a.s", "-o", "x", "-L", "a.lst"])?;
         assert_eq!(args.listing.as_deref(), Some("a.lst"));
         assert!(parse(&["a.s", "-o", "x", "-L"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_args_cpu() -> Result<()> {
+        assert_eq!(parse(&["a.s", "-o", "x", "-m68030"])?.cpu, Cpu::M68030);
+        assert!(parse(&["a.s", "-o", "x", "-m68050"]).is_err());
         Ok(())
     }
 

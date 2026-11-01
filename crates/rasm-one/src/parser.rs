@@ -8,8 +8,10 @@ use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
 use crate::isa::encode::Instruction;
-use crate::isa::table::{rows_for, InsnRow};
-use crate::isa::{IndexReg, Mode, Operand};
+use crate::isa::table::{rows_for, InsnRow, CONTROL_REGISTERS, CPU_020_UP};
+use crate::isa::{
+    BitFieldArg, FullBase, FullDisp, FullMode, IndexReg, Indirection, Mode, Operand, Width,
+};
 use crate::lexer::{LexError, Lexer, Punct, Tok};
 use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
@@ -140,7 +142,9 @@ fn is_directive(name: &str) -> bool {
             | "elseif"
             | "endc"
             | "endif"
-    ) || is_if(name)
+    ) || name == "machine"
+        || name.starts_with("mc680")
+        || is_if(name)
         || section_shortcut(name).is_some()
 }
 
@@ -250,6 +254,103 @@ enum PendingWork {
         path: String,
         span: Span,
     },
+}
+
+/// A word inside an addressing mode's parentheses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddressPart {
+    Data(u8),
+    Addr(u8),
+    Pc,
+    SuppressedData(u8),
+    SuppressedAddr(u8),
+    SuppressedPc,
+}
+
+/// The pieces of an addressing mode in parentheses.
+#[derive(Debug, Default)]
+struct ModeParts {
+    base: Option<FullBase>,
+    index: Option<IndexReg>,
+    base_disp: Option<(Expr, Option<Width>)>,
+    outer_disp: Option<FullDisp>,
+    indirection: Indirection,
+}
+
+impl ModeParts {
+    /// Chooses the simplest mode for the pieces.
+    fn into_mode(self) -> Result<Mode, &'static str> {
+        let ModeParts {
+            base,
+            index,
+            base_disp,
+            outer_disp,
+            indirection,
+        } = self;
+        let (disp, width) = match base_disp {
+            Some((expr, width)) => (Some(expr), width),
+            None => (None, None),
+        };
+        if indirection == Indirection::None {
+            let simple_index = index.filter(|index| !index.suppressed);
+            let unsuppressed = index.is_none() || simple_index.is_some();
+            match (base, width, unsuppressed) {
+                (Some(FullBase::Addr(n)), None, true) => {
+                    return Ok(match (disp, simple_index) {
+                        (None, None) => Mode::Indirect(n),
+                        (Some(expr), None) => Mode::Disp(expr, n),
+                        (expr, Some(index)) => Mode::Index(expr.unwrap_or(Expr::Num(0)), n, index),
+                    });
+                }
+                (Some(FullBase::Addr(n)), Some(Width::Word), true) if simple_index.is_none() => {
+                    if let Some(expr) = disp {
+                        return Ok(Mode::DispWord(expr, n));
+                    }
+                }
+                (Some(FullBase::Pc), None, true) => {
+                    let expr = disp.unwrap_or(Expr::Num(0));
+                    return Ok(match simple_index {
+                        None => Mode::PcDisp(expr),
+                        Some(index) => Mode::PcIndex(expr, index),
+                    });
+                }
+                (Some(FullBase::Pc), Some(Width::Word), true) if simple_index.is_none() => {
+                    if let Some(expr) = disp {
+                        return Ok(Mode::PcDispWord(expr));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if base.is_none() && index.is_none() && disp.is_none() && indirection == Indirection::None {
+            return Err("empty addressing mode");
+        }
+        Ok(Mode::Full(Box::new(FullMode {
+            base: base.unwrap_or(FullBase::None),
+            index,
+            indirection,
+            base_disp: disp.map(|expr| FullDisp { expr, width }),
+            outer_disp,
+        })))
+    }
+}
+
+/// True for modes that only exist on 68020 and later.
+fn needs_020(mode: &Mode) -> bool {
+    match mode {
+        Mode::Full(_) => true,
+        Mode::Index(_, _, index) | Mode::PcIndex(_, index) => index.scale != 0,
+        Mode::BitField { ea, .. } => needs_020(ea),
+        _ => false,
+    }
+}
+
+fn special_words(mnemonic: &str) -> SpecialWords {
+    match mnemonic {
+        "movec" => SpecialWords::ControlRegisters,
+        "cinvl" | "cinvp" | "cinva" | "cpushl" | "cpushp" | "cpusha" => SpecialWords::CacheNames,
+        _ => SpecialWords::None,
+    }
 }
 
 /// Finds the first word that could be a directive, skipping any label. Returns
@@ -378,6 +479,7 @@ const RS_COUNTER: &str = "__RS";
 /// Parses whole files into a [`Program`].
 pub(crate) struct Parser<'f> {
     cpu: Cpu,
+    fixed_addresses: bool,
     provider: &'f dyn FileProvider,
     /// Directories to search for files, from options and `incdir`.
     include_dirs: Vec<String>,
@@ -417,11 +519,12 @@ pub(crate) struct Parser<'f> {
 }
 
 impl<'f> Parser<'f> {
-    pub fn new(cpu: Cpu, provider: &'f dyn FileProvider, include_dirs: &[String]) -> Self {
+    pub fn new(options: &crate::Options, provider: &'f dyn FileProvider) -> Self {
         Self {
-            cpu,
+            cpu: options.cpu,
+            fixed_addresses: options.fixed_addresses,
             provider,
-            include_dirs: include_dirs.to_vec(),
+            include_dirs: options.include_dirs.clone(),
             file_stack: Vec::new(),
             current_expansion: None,
             chained_diagnostics: 0,
@@ -563,6 +666,7 @@ impl<'f> Parser<'f> {
                     lexer: Lexer::new(line.text),
                     file,
                     line: line.number,
+                    special: SpecialWords::None,
                 }
                 .parse()
             };
@@ -858,6 +962,7 @@ impl<'f> Parser<'f> {
                     lexer,
                     file,
                     line: line.number,
+                    special: SpecialWords::None,
                 };
                 let value = parser.parse_constant()?;
                 parser.expect_end()?;
@@ -1040,11 +1145,20 @@ pub(crate) fn add_expansion_chain(
     }
 }
 
+/// Words an instruction's operands can use besides the general modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecialWords {
+    None,
+    ControlRegisters,
+    CacheNames,
+}
+
 struct LineParser<'p, 'a, 'f> {
     parser: &'p mut Parser<'f>,
     lexer: Lexer<'a>,
     file: FileId,
     line: u32,
+    special: SpecialWords,
 }
 
 impl LineParser<'_, '_, '_> {
@@ -1659,6 +1773,15 @@ impl LineParser<'_, '_, '_> {
         )
     }
 
+    /// Changes the target CPU from here on.
+    fn set_cpu(&mut self, number: &str, span: Span) -> Result<(), Diagnostic> {
+        let cpu = number.parse().ok().and_then(Cpu::from_number);
+        self.parser.cpu = cpu.ok_or_else(|| {
+            Diagnostic::error("unknown-cpu", format!("unknown CPU {number}"), span)
+        })?;
+        Ok(())
+    }
+
     /// `so` is like `rs`, with a counter of its own.
     fn parse_so(
         &mut self,
@@ -1912,6 +2035,17 @@ impl LineParser<'_, '_, '_> {
                 self.parser.current = Some(section);
                 Ok(())
             }
+            "machine" => {
+                self.no_size(size, span)?;
+                let word = self.lexer.word().to_vec();
+                let text = String::from_utf8_lossy(&word).to_ascii_lowercase();
+                let number = text.strip_prefix("mc").unwrap_or(&text);
+                self.set_cpu(number, span)
+            }
+            directive if directive.starts_with("mc680") => {
+                self.no_size(size, span)?;
+                self.set_cpu(&directive[2..], span)
+            }
             "idnt" => {
                 self.no_size(size, span)?;
                 let name = self.parse_path(span)?;
@@ -2033,6 +2167,7 @@ impl LineParser<'_, '_, '_> {
             if rows.iter().all(|r| r.operands.is_empty()) {
                 return self.select_row(mnemonic, rows, None, Vec::new(), span);
             }
+            self.special = special_words(mnemonic);
             let operands = self.parse_operands()?;
             return self.select_row(mnemonic, rows, None, operands, span);
         }
@@ -2045,6 +2180,7 @@ impl LineParser<'_, '_, '_> {
                 ));
             }
         }
+        self.special = special_words(mnemonic);
         let operands = self.parse_operands()?;
         self.select_row(mnemonic, rows, size, operands, span)
     }
@@ -2081,9 +2217,9 @@ impl LineParser<'_, '_, '_> {
                     .iter()
                     .zip(&operands)
                     .all(|(set, op)| set.intersects(op.mode.class()))
-                && row
-                    .default_size
-                    .is_none_or(|default| row.sizes.contains(&size.unwrap_or(default)))
+                && row.default_size.map_or(size.is_none(), |default| {
+                    row.sizes.contains(&size.unwrap_or(default))
+                })
         };
         let mut matching = rows.iter().filter(|row| fits(row)).peekable();
         if matching.peek().is_none() {
@@ -2100,10 +2236,20 @@ impl LineParser<'_, '_, '_> {
                 span,
             ));
         };
+        let wide = CPU_020_UP.contains(self.parser.cpu);
+        if !wide && operands.iter().any(|operand| needs_020(&operand.mode)) {
+            return Err(Diagnostic::error(
+                "unsupported-cpu",
+                "this addressing mode needs a 68020 or later",
+                span,
+            ));
+        }
         Ok(Instruction {
             row,
             size: size.or(row.default_size),
             operands,
+            wide,
+            fixed_addresses: self.parser.fixed_addresses,
         })
     }
 
@@ -2117,8 +2263,19 @@ impl LineParser<'_, '_, '_> {
     }
 
     fn parse_mode(&mut self) -> Result<Mode, Diagnostic> {
+        let mode = self.parse_ea()?;
+        if self.peek_is(Punct::LBrace)? {
+            return self.parse_bit_field(mode);
+        }
+        Ok(mode)
+    }
+
+    fn parse_ea(&mut self) -> Result<Mode, Diagnostic> {
         if self.eat(Punct::Hash)? {
             return Ok(Mode::Immediate(self.parse_expr()?));
+        }
+        if let Some(mode) = self.try_special_word()? {
+            return Ok(mode);
         }
         if let Tok::Ident(name) = self.peek()? {
             match self.parser.reg(name) {
@@ -2142,12 +2299,15 @@ impl LineParser<'_, '_, '_> {
         if let Some(mode) = self.try_predecrement()? {
             return Ok(mode);
         }
+        if let Some(mode) = self.try_indirect_pair()? {
+            return Ok(mode);
+        }
         if let Some(mode) = self.try_parenthesised()? {
             return Ok(mode);
         }
         let expr = self.parse_expr()?;
         if self.eat(Punct::LParen)? {
-            return self.parse_base_and_index(expr);
+            return self.parse_address_parts(Some((expr, None)));
         }
         match self.parse_size_suffix()? {
             Some(Size::Word) => Ok(Mode::AbsWord(expr)),
@@ -2160,10 +2320,46 @@ impl LineParser<'_, '_, '_> {
         }
     }
 
+    /// Recognises a control register or cache name where the mnemonic takes one.
+    fn try_special_word(&mut self) -> Result<Option<Mode>, Diagnostic> {
+        if self.special == SpecialWords::None {
+            return Ok(None);
+        }
+        let Tok::Ident(name) = self.peek()? else {
+            return Ok(None);
+        };
+        let lower = name.to_ascii_lowercase();
+        let mode = match self.special {
+            SpecialWords::ControlRegisters => CONTROL_REGISTERS
+                .iter()
+                .find(|(register, _, cpus)| *register == lower && cpus.contains(self.parser.cpu))
+                .map(|(_, code, _)| Mode::ControlReg(*code)),
+            _ => match lower.as_str() {
+                "nc" => Some(Mode::Cache(0)),
+                "dc" => Some(Mode::Cache(1)),
+                "ic" => Some(Mode::Cache(2)),
+                "bc" => Some(Mode::Cache(3)),
+                _ => None,
+            },
+        };
+        if mode.is_some() {
+            self.advance()?;
+        }
+        Ok(mode)
+    }
+
     /// Having peeked a register numbered 0-15, returns `single` unless a
-    /// register list follows.
+    /// register list or pair follows.
     fn parse_after_register(&mut self, first: u8, single: Mode) -> Result<Mode, Diagnostic> {
         self.advance()?;
+        if first < 8 && self.peek_is(Punct::Colon)? {
+            self.advance()?;
+            let start = self.lexer.pos();
+            return match self.parse_list_register()? {
+                second if second < 8 => Ok(Mode::RegPair(first, second)),
+                _ => Err(self.error_at("syntax", "data register expected", start)),
+            };
+        }
         if !self.peek_is(Punct::Minus)? && !self.peek_is(Punct::Slash)? {
             return Ok(single);
         }
@@ -2215,86 +2411,287 @@ impl LineParser<'_, '_, '_> {
         Ok(None)
     }
 
-    /// Recognises `(An)`, `(An)+`, `(d,An)`, `(An,Xn)`, `(d,An,Xn)` and the
-    /// PC forms. Returns `None` for a parenthesised expression such as
-    /// `(4+2)*3(a0)`, leaving the position unchanged.
-    fn try_parenthesised(&mut self) -> Result<Option<Mode>, Diagnostic> {
-        let saved = self.lexer.pos();
+    /// Reads `(Rn)`, returning the register numbered 0-15.
+    fn try_parenthesised_register(&mut self) -> Result<Option<u8>, Diagnostic> {
         if !self.eat(Punct::LParen)? {
             return Ok(None);
         }
-        // A leading base register has no displacement, so `(An)` is plain
-        // indirect rather than the zero displacement this call reports.
-        if self.next_is_base_register()? {
-            let mode = self.parse_base_and_index(Expr::Num(0))?;
-            if let Mode::Disp(_, n) = &mode {
-                let n = *n;
-                if self.eat(Punct::Plus)? {
-                    return Ok(Some(Mode::PostInc(n)));
-                }
-                return Ok(Some(Mode::Indirect(n)));
-            }
-            return Ok(Some(mode));
+        let reg = self.eat_ident()?.and_then(|name| self.parser.reg(&name));
+        if !self.eat(Punct::RParen)? {
+            return Ok(None);
         }
-        let parsed = self.parse_expr();
-        if let Ok(expr) = parsed {
-            if self.eat(Punct::Comma)? {
-                return self.parse_base_and_index(expr).map(Some);
+        Ok(match reg {
+            Some(Reg::Data(n)) => Some(n),
+            Some(Reg::Addr(n)) => Some(n + 8),
+            _ => None,
+        })
+    }
+
+    /// Recognises `(Rn):(Rn)`, leaving anything else for the other parsers.
+    fn try_indirect_pair(&mut self) -> Result<Option<Mode>, Diagnostic> {
+        let saved = self.lexer.pos();
+        if let Some(first) = self.try_parenthesised_register().unwrap_or(None) {
+            if self.eat(Punct::Colon)? {
+                if let Some(second) = self.try_parenthesised_register()? {
+                    return Ok(Some(Mode::IndirectPair(first, second)));
+                }
             }
         }
         self.lexer.set_pos(saved);
         Ok(None)
     }
 
-    fn next_is_base_register(&self) -> Result<bool, Diagnostic> {
+    /// Parses `{offset:width}` after an operand.
+    fn parse_bit_field(&mut self, ea: Mode) -> Result<Mode, Diagnostic> {
+        self.expect(Punct::LBrace, "{")?;
+        let offset = self.parse_bit_field_arg()?;
+        self.expect(Punct::Colon, ":")?;
+        let width = self.parse_bit_field_arg()?;
+        self.expect(Punct::RBrace, "}")?;
+        Ok(Mode::BitField {
+            ea: Box::new(ea),
+            offset,
+            width,
+        })
+    }
+
+    fn parse_bit_field_arg(&mut self) -> Result<BitFieldArg, Diagnostic> {
+        if let Tok::Ident(name) = self.peek()? {
+            if let Some(Reg::Data(n)) = self.parser.reg(name) {
+                self.advance()?;
+                return Ok(BitFieldArg::Reg(n));
+            }
+        }
+        Ok(BitFieldArg::Value(self.parse_expr()?))
+    }
+
+    /// Recognises a mode in parentheses. Returns `None` for a parenthesised
+    /// expression such as `(4+2)*3(a0)`, leaving the position unchanged.
+    fn try_parenthesised(&mut self) -> Result<Option<Mode>, Diagnostic> {
+        let saved = self.lexer.pos();
+        if !self.eat(Punct::LParen)? {
+            return Ok(None);
+        }
+        if self.peek_is(Punct::LBracket)? || self.next_is_register_part()? {
+            return self.parse_address_parts(None).map(Some);
+        }
+        // An expression is a mode only if something follows it inside the
+        // parentheses; otherwise it is the start of a larger expression.
+        if let Ok(expr) = self.parse_expr() {
+            let width = self.parse_disp_width()?;
+            if self.eat(Punct::Comma)? {
+                return self.parse_address_parts(Some((expr, width))).map(Some);
+            }
+        }
+        self.lexer.set_pos(saved);
+        Ok(None)
+    }
+
+    fn next_is_register_part(&self) -> Result<bool, Diagnostic> {
         Ok(match self.peek()? {
-            Tok::Ident(name) => matches!(self.parser.reg(name), Some(Reg::Addr(_) | Reg::Pc)),
+            Tok::Ident(name) => self.address_part(name).is_some(),
             _ => false,
         })
     }
 
-    /// Parses `An)`, `An,Xn)`, `PC)` or `PC,Xn)` after the displacement.
-    fn parse_base_and_index(&mut self, disp: Expr) -> Result<Mode, Diagnostic> {
+    /// Reads an optional `.w` or `.l` after a displacement.
+    fn parse_disp_width(&mut self) -> Result<Option<Width>, Diagnostic> {
         let start = self.lexer.pos();
-        let base = self
-            .eat_ident()?
-            .as_deref()
-            .and_then(|word| self.parser.reg(word))
-            .filter(|reg| !matches!(reg, Reg::Data(_)));
-        let Some(base) = base else {
-            return Err(self.error_at("syntax", "address register or PC expected", start));
-        };
-        let index = if self.eat(Punct::Comma)? {
-            Some(self.parse_index()?)
-        } else {
-            None
-        };
-        self.expect(Punct::RParen, ")")?;
-        Ok(match (base, index) {
-            (Reg::Addr(n), None) => Mode::Disp(disp, n),
-            (Reg::Addr(n), Some(index)) => Mode::Index(disp, n, index),
-            (_, None) => Mode::PcDisp(disp),
-            (_, Some(index)) => Mode::PcIndex(disp, index),
-        })
+        match self.parse_size_suffix()? {
+            None => Ok(None),
+            Some(Size::Word) => Ok(Some(Width::Word)),
+            Some(Size::Long) => Ok(Some(Width::Long)),
+            Some(_) => Err(self.error_at("bad-size", "a displacement is .w or .l", start)),
+        }
     }
 
-    fn parse_index(&mut self) -> Result<IndexReg, Diagnostic> {
+    /// Interprets a word inside an addressing mode's parentheses.
+    fn address_part(&self, name: &str) -> Option<AddressPart> {
+        if let Some(reg) = self.parser.reg(name) {
+            return match reg {
+                Reg::Data(n) => Some(AddressPart::Data(n)),
+                Reg::Addr(n) => Some(AddressPart::Addr(n)),
+                Reg::Pc => Some(AddressPart::Pc),
+                _ => None,
+            };
+        }
+        match name.to_ascii_lowercase().as_bytes() {
+            [b'z', b'p', b'c'] => Some(AddressPart::SuppressedPc),
+            [b'z', b's', b'p'] => Some(AddressPart::SuppressedAddr(7)),
+            [b'z', b'a', n @ b'0'..=b'7'] => Some(AddressPart::SuppressedAddr(n - b'0')),
+            [b'z', b'd', n @ b'0'..=b'7'] => Some(AddressPart::SuppressedData(n - b'0')),
+            _ => None,
+        }
+    }
+
+    /// Parses what is inside an addressing mode's parentheses, up to and
+    /// including the closing one. `displacement` was read before the caller knew
+    /// this was a mode.
+    fn parse_address_parts(
+        &mut self,
+        displacement: Option<(Expr, Option<Width>)>,
+    ) -> Result<Mode, Diagnostic> {
         let start = self.lexer.pos();
-        let reg = match self
-            .eat_ident()?
-            .as_deref()
-            .and_then(|word| self.parser.reg(word))
-        {
-            Some(Reg::Data(n)) => n,
-            Some(Reg::Addr(n)) => n + 8,
-            _ => return Err(self.error_at("syntax", "index register expected", start)),
+        let mut parts = ModeParts {
+            base_disp: displacement,
+            ..ModeParts::default()
         };
+        if self.eat(Punct::LBracket)? {
+            self.parse_part_list(&mut parts)?;
+            self.expect(Punct::RBracket, "]")?;
+            parts.indirection = if parts.index.is_some() {
+                Indirection::PreIndexed
+            } else {
+                Indirection::PostIndexed
+            };
+            if self.eat(Punct::Comma)? {
+                self.parse_after_memory(&mut parts)?;
+            }
+        } else if !self.peek_is(Punct::RParen)? {
+            self.parse_part_list(&mut parts)?;
+        }
+        self.expect(Punct::RParen, ")")?;
+        let is_plain = parts.index.is_none() && parts.base_disp.is_none();
+        if is_plain && parts.indirection == Indirection::None {
+            if let Some(FullBase::Addr(n)) = parts.base {
+                if self.eat(Punct::Plus)? {
+                    return Ok(Mode::PostInc(n));
+                }
+            }
+        }
+        parts
+            .into_mode()
+            .map_err(|message| self.error_at("syntax", message, start))
+    }
+
+    /// Parses comma-separated base, index and displacement.
+    fn parse_part_list(&mut self, parts: &mut ModeParts) -> Result<(), Diagnostic> {
+        loop {
+            self.parse_part(parts)?;
+            if !self.eat(Punct::Comma)? {
+                return Ok(());
+            }
+        }
+    }
+
+    fn parse_part(&mut self, parts: &mut ModeParts) -> Result<(), Diagnostic> {
+        let start = self.lexer.pos();
+        let part = match self.peek()? {
+            Tok::Ident(name) => self.address_part(name),
+            _ => None,
+        };
+        let Some(part) = part else {
+            if parts.base.is_some() || parts.index.is_some() || parts.base_disp.is_some() {
+                return Err(self.error_at("syntax", "base or index register expected", start));
+            }
+            let expr = self.parse_expr()?;
+            let width = self.parse_disp_width()?;
+            parts.base_disp = Some((expr, width));
+            return Ok(());
+        };
+        self.advance()?;
+        // An address register is the base, unless there is one or it has a suffix.
+        // A base can't come after the index.
+        let has_suffix = self.peek_is(Punct::Dot)? || self.peek_is(Punct::Star)?;
+        if parts.index.is_some() && parts.base.is_none() && !has_suffix {
+            return Err(self.error_at("syntax", "the base comes before the index", start));
+        }
+        match part {
+            AddressPart::Addr(n) if parts.base.is_none() && !has_suffix => {
+                parts.base = Some(FullBase::Addr(n));
+            }
+            AddressPart::Pc if parts.base.is_none() => parts.base = Some(FullBase::Pc),
+            AddressPart::SuppressedPc if parts.base.is_none() => {
+                parts.base = Some(FullBase::SuppressedPc);
+            }
+            AddressPart::SuppressedAddr(n) if parts.base.is_none() && !has_suffix => {
+                parts.base = Some(FullBase::SuppressedAddr(n));
+            }
+            AddressPart::Data(n) => self.set_index(parts, n, false, start)?,
+            AddressPart::Addr(n) => self.set_index(parts, n + 8, false, start)?,
+            AddressPart::SuppressedData(n) => self.set_index(parts, n, true, start)?,
+            AddressPart::SuppressedAddr(n) => self.set_index(parts, n + 8, true, start)?,
+            AddressPart::Pc | AddressPart::SuppressedPc => {
+                return Err(self.error_at("syntax", "more than one base register", start));
+            }
+        }
+        Ok(())
+    }
+
+    fn set_index(
+        &mut self,
+        parts: &mut ModeParts,
+        reg: u8,
+        suppressed: bool,
+        start: usize,
+    ) -> Result<(), Diagnostic> {
+        if parts.index.is_some() {
+            return Err(self.error_at("syntax", "more than one index register", start));
+        }
+        parts.index = Some(self.parse_index_suffix(reg, suppressed, start)?);
+        Ok(())
+    }
+
+    /// Reads the optional size and scale of an index register.
+    fn parse_index_suffix(
+        &mut self,
+        reg: u8,
+        suppressed: bool,
+        start: usize,
+    ) -> Result<IndexReg, Diagnostic> {
         let long = match self.parse_size_suffix()? {
             None | Some(Size::Word) => false,
             Some(Size::Long) => true,
             Some(_) => return Err(self.error_at("bad-size", "an index is .w or .l", start)),
         };
-        Ok(IndexReg { reg, long })
+        let mut scale = 0;
+        if self.eat(Punct::Star)? {
+            let at = self.lexer.pos();
+            scale = match self.peek()? {
+                Tok::Num(1) => 0,
+                Tok::Num(2) => 1,
+                Tok::Num(4) => 2,
+                Tok::Num(8) => 3,
+                _ => return Err(self.error_at("syntax", "scale must be 1, 2, 4 or 8", at)),
+            };
+            self.advance()?;
+        }
+        Ok(IndexReg {
+            reg,
+            long,
+            scale,
+            suppressed,
+        })
+    }
+
+    /// Parses what can follow `[...]`: an index and an outer displacement.
+    fn parse_after_memory(&mut self, parts: &mut ModeParts) -> Result<(), Diagnostic> {
+        let start = self.lexer.pos();
+        let part = match self.peek()? {
+            Tok::Ident(name) => self.address_part(name),
+            _ => None,
+        };
+        if let Some(part) = part {
+            self.advance()?;
+            let (reg, suppressed) = match part {
+                AddressPart::Data(n) => (n, false),
+                AddressPart::Addr(n) => (n + 8, false),
+                AddressPart::SuppressedData(n) => (n, true),
+                AddressPart::SuppressedAddr(n) => (n + 8, true),
+                _ => return Err(self.error_at("syntax", "index register expected", start)),
+            };
+            if parts.index.is_some() {
+                return Err(self.error_at("syntax", "more than one index register", start));
+            }
+            parts.index = Some(self.parse_index_suffix(reg, suppressed, start)?);
+            if !self.eat(Punct::Comma)? {
+                return Ok(());
+            }
+        }
+        let expr = self.parse_expr()?;
+        let width = self.parse_disp_width()?;
+        parts.outer_disp = Some(FullDisp { expr, width });
+        Ok(())
     }
 
     fn parse_dc(&mut self, size: Option<Size>, span: Span) -> Result<(), Diagnostic> {
