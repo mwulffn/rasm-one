@@ -168,3 +168,12 @@ CPUs, and reports `branch destination out of range`. `bra.w *+1` assembles to `6
 
 **rasm-one:** leaves `sub.w` and the `-opt-o12+` case as written, and `sub.l #$8000,a0` still
 becomes a correct `lea`. `test_assemble_subtracting_8000_from_address_register_stays_correct`.
+
+## 15. `og` hides an out-of-range `eor.b`
+
+**Source:** `eor.b #$ffff,d0` with `-opt-og+`.
+
+**Bug:** the value doesn't fit a byte, and without the option this is an error. With it, vasm
+writes `not.b d0`, with no message.
+
+**rasm-one:** stays an error. `test_assemble_eor_byte_out_of_range_stays_an_error`.

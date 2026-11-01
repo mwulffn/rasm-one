@@ -9,7 +9,7 @@ use rasm_one::{
 };
 
 const USAGE: &str =
-    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<N>+ | -opt-o<N>-]...";
+    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -60,9 +60,8 @@ fn apply_optimisation_flag(
     if rule.is_empty() {
         optimisations.set_all_rules(on);
     } else {
-        let number = rule
-            .parse()
-            .map_err(|_| anyhow!("unknown option {arg}\n{USAGE}"))?;
+        let number = Optimisations::rule_named(rule)
+            .ok_or_else(|| anyhow!("unknown option {arg}\n{USAGE}"))?;
         if !optimisations.set_rule(number, on) {
             eprintln!("warning: optimisation rule {number} doesn't exist yet, so {arg} is ignored");
         }

@@ -170,7 +170,7 @@ pub struct Options {
 /// Which optimisations apply, numbered like vasm's `-opt-oN` and `opt oN`.
 ///
 /// Only some of vasm's rules exist yet, so this is not yet what vasm does by default.
-/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`; 5, `addq` and `subq`; 7, short branches to what follows; 8, base displacements of zero; 9, outer displacements of zero; 10, `lea` for address arithmetic; 11, small `lea`; 12, word immediates to address registers.
+/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`; 5, `addq` and `subq`; 7, short branches to what follows; 8, base displacements of zero; 9, outer displacements of zero; 10, `lea` for address arithmetic; 11, small `lea`; 12, word immediates to address registers; 16, generic replacements, which is `og`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Optimisations {
@@ -190,7 +190,8 @@ impl Optimisations {
         | 1 << RULE_NULL_OUTER
         | 1 << RULE_ADD_TO_LEA
         | 1 << RULE_LEA_TO_QUICK
-        | 1 << RULE_WORD_IMMEDIATE;
+        | 1 << RULE_WORD_IMMEDIATE
+        | 1 << RULE_GENERIC;
 
     /// Every rule that exists, which can be changed with `opt`.
     pub fn all() -> Self {
@@ -205,6 +206,14 @@ impl Optimisations {
         Self {
             enabled: true,
             rules: 0,
+        }
+    }
+
+    /// The number of a rule, from what follows `o` in `opt` or `-opt-o`, if it has one.
+    pub fn rule_named(name: &str) -> Option<u32> {
+        match name {
+            "g" => Some(RULE_GENERIC),
+            _ => name.parse().ok(),
         }
     }
 
@@ -261,6 +270,9 @@ pub(crate) const RULE_LEA_TO_QUICK: u32 = 11;
 
 /// Rule 12: `.l #x,An` becomes `.w` if the value fits.
 pub(crate) const RULE_WORD_IMMEDIATE: u32 = 12;
+
+/// Rule 16: vasm's `og`, safe replacements that no other rule covers.
+pub(crate) const RULE_GENERIC: u32 = 16;
 
 impl Options {
     /// Options for assembling `main` for a 68000.

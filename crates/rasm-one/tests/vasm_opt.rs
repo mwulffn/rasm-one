@@ -843,6 +843,149 @@ fn test_assemble_subtracting_8000_from_address_register_stays_correct() {
     }
 }
 
+const GENERIC: Rule = Rule {
+    number: 16,
+    flag: "-opt-og+",
+};
+
+fn generic_cases() -> Vec<String> {
+    let mut sources: Vec<String> = [
+        " lea 0,a0",
+        " lea 0.w,a0",
+        " lea 0.l,a0",
+        " lea 4,a0",
+        " lea 0(a0),a0",
+        " lea (0.w,a0),a0",
+        " lea (a0),a0",
+        " lea (a0),a1",
+        " lea 0(a0),a1",
+        " lea z(a0),a0",
+        " lea 100000(a0),a0",
+        " lea 100000(a0),a1",
+        " lea -100000(sp),sp",
+        " lea 32768(a0),a1",
+        " lea 32767(a0),a1",
+        " movem.l (a0),a1",
+        " movem.w (a0),a1",
+        " movem.l 4(a0),a1",
+        " movem.l (a0)+,a1",
+        " movem.l (a0),d1",
+        " movem.l d1,(a0)",
+        " movem.l a1,(a0)",
+        " movem.l (a0),d0/d1",
+        " movem.l (a0),a1/a2",
+        " movem.l #0,(a0)",
+        " movem.l (a0),#0",
+        " movem.l #0,-(a0)",
+        " movem.w #0,(a0)",
+        " movem.l (a0),#$200",
+        " move.l #f,a0\nf:",
+        " movea.l #f,a0\nf:",
+        " move.w #f,a0\nf:",
+        " xref x\n move.l #x,a0",
+        " clr.l d0",
+        " clr.l d7",
+        " clr.w d0",
+        " clr.b d0",
+        " clr.l (a0)",
+        " link a6,#0",
+        " link.w a6,#-4",
+        " link.l a6,#0",
+        " link.l a6,#-4",
+        " link.l a6,#-32769",
+        " link.l a6,#z",
+        " asl.w d0",
+        " asl.w (a0)",
+        " opt og-\n clr.l d0",
+        " opt og+\n clr.l d0",
+        " tst.l d0",
+        " movem.l (sp)+,a1/a2",
+        " movem.w (a0)+,a2/a1",
+        " movem.l (a0)+,a0/a1",
+        " movem.l (a1)+,a0/a1",
+        " movem.l (a1)+,a0/a7",
+        " movem.l (sp)+,a0/a7",
+        " movem.l (a0)+,d1/a1",
+        " movem.l (a0)+,d1/d2",
+        " movem.l (a0)+,a1/a2/a3",
+        " movem.l (a0)+,#$600",
+        " movem.l (a0),a1/a2",
+        " movem.l a1/a2,-(sp)",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    for mnemonic in [
+        "cmp", "cmpi", "cmpa", "move", "movea", "and", "andi", "or", "ori", "eor", "eori", "add",
+        "adda", "addi", "sub", "suba", "subi",
+    ] {
+        for size in [".b", ".w", ".l"] {
+            for value in ["0", "z", "-1", "1", "$ff", "$ffff", "$ffffffff", "$100"] {
+                for destination in ["d0", "(a0)", "4(a0)", "4", "a0", "sp"] {
+                    sources.push(format!(" {mnemonic}{size} #{value},{destination}"));
+                }
+            }
+        }
+    }
+    for mnemonic in ["asl", "asr", "lsl", "lsr", "rol"] {
+        for size in [".b", ".w", ".l"] {
+            for value in ["1", "2", "z"] {
+                sources.push(format!(" {mnemonic}{size} #{value},d3"));
+            }
+        }
+    }
+    sources
+        .into_iter()
+        .map(|source| format!("{source}\nz equ 0"))
+        .collect()
+}
+
+/// Whether rasm-one rejects this, where vasm accepts it as something else. Some of those
+/// are choices, and `eor.b #$ffff` is a vasm bug: see vasm-bugs.md.
+fn stricter(source: &str) -> bool {
+    if source.contains("eor") && source.contains(".b #$ffff,") {
+        return true;
+    }
+    source.contains("movea") && !source.contains(",a") && !source.contains(",sp")
+        || source.contains("cmpa") && !source.contains(",a") && !source.contains(",sp")
+        || source.contains("adda") && !source.contains(",a") && !source.contains(",sp")
+        || source.contains("suba") && !source.contains(",a") && !source.contains(",sp")
+}
+
+#[test]
+fn test_assemble_generic_rewrites_match_vasm_og() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for source in generic_cases().iter().filter(|source| !stricter(source)) {
+        for cpu in CPUS {
+            failures.extend(compare(
+                &vasm,
+                source,
+                cpu,
+                Format::HunkObject,
+                &GENERIC,
+                false,
+            )?);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} differences:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
+
+/// vasm accepts this with `og`, as if the value fitted. See vasm-bugs.md.
+#[test]
+fn test_assemble_eor_byte_out_of_range_stays_an_error() {
+    let bytes = ours(" eor.b #$ffff,d0", "68000", Format::Bin, &GENERIC, false);
+    assert!(bytes.is_err());
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 

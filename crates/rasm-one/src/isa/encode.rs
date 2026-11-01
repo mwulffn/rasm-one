@@ -10,12 +10,13 @@ use std::cell::Cell;
 use crate::error::Diagnostic;
 use crate::expr::{eval, Base, EvalError, Expr, SymId, Value};
 use crate::float::float_bytes;
+use crate::isa::rewrite::{Known, Rewritten};
 use crate::isa::table::{Encoding, InsnRow};
 use crate::isa::{
     BitFieldArg, FullBase, FullDisp, FullMode, IndexReg, Indirection, Mode, Operand, Width,
 };
 use crate::source::Span;
-use crate::types::{SectionKind, Size};
+use crate::types::{Cpu, SectionKind, Size};
 use crate::{Reloc, RelocKind, RelocTarget};
 
 /// An instruction matched to its table row.
@@ -38,6 +39,10 @@ pub(crate) struct Instruction {
     pub shortens_absolutes: bool,
     /// What `move.l #x,Dn` can become, if this is one and optimisation applies.
     pub quick_move: Option<QuickMoves>,
+    /// True if the generic optimisations in [`crate::isa::rewrite`] apply.
+    pub generic_rewrites: bool,
+    /// The target CPU.
+    pub cpu: Cpu,
     /// What this can become, depending on its values.
     pub rewrites: Option<Rewrites>,
     /// True if a short branch that would have a displacement of 0 can be a no-op.
@@ -109,6 +114,11 @@ pub(crate) struct Sizer<'a> {
 }
 
 impl Sizer<'_> {
+    /// The address of the instruction.
+    pub(crate) fn address_of_start(&self) -> Value {
+        self.address_of(self.start)
+    }
+
     fn address_of(&self, offset: i64) -> Value {
         match self.origin {
             Some(origin) => Value::abs(origin.saturating_add(offset)),
@@ -566,6 +576,14 @@ impl Instruction {
         }
     }
 
+    /// What a value means for rewriting.
+    pub(crate) fn classify(&self, value: Value) -> Known {
+        match plain_disp_kind(value, self.fixed_addresses) {
+            DispKind::Number(number) => Known::Number(number),
+            DispKind::Relocated | DispKind::Deferred => Known::Address,
+        }
+    }
+
     /// This as another instruction, if its values now allow one.
     fn rewritten(&self, sizer: &Sizer) -> Option<Instruction> {
         let rewrites = self.rewrites?;
@@ -635,6 +653,21 @@ impl Instruction {
     pub fn len(&self, sizer: &Sizer) -> i64 {
         if let Some(rewritten) = self.rewritten(sizer) {
             return rewritten.len(sizer);
+        }
+        match self.generic_rewrite(sizer) {
+            Some(Rewritten::Deleted) => return 0,
+            Some(Rewritten::One(rewritten)) => return rewritten.len(sizer),
+            Some(Rewritten::Two(first, second)) => {
+                let after = Sizer {
+                    section: sizer.section,
+                    origin: sizer.origin,
+                    start: sizer.start + first.len(sizer),
+                    fixed_addresses: sizer.fixed_addresses,
+                    lookup: sizer.lookup,
+                };
+                return first.len(sizer) + second.len(&after);
+            }
+            None => {}
         }
         match self.quick_move_form(sizer) {
             Some(QuickMoveForm::Moveq(_)) => return 2,
@@ -932,6 +965,22 @@ fn encode_fields(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     ctx.instruction_start = ctx.offset();
     if let Some(rewritten) = insn.rewritten(&sizer_for(ctx)) {
         return encode_fields(&rewritten, span, ctx);
+    }
+    match insn.generic_rewrite(&sizer_for(ctx)) {
+        Some(Rewritten::Deleted) => return,
+        Some(Rewritten::One(rewritten)) => return encode_fields(&rewritten, span, ctx),
+        Some(Rewritten::Two(first, second)) => {
+            if insn.row.mnemonic == "lea" {
+                ctx.diagnostics.push(Diagnostic::warning(
+                    "lea-expanded",
+                    "displacement out of range changed to two instructions",
+                    span,
+                ));
+            }
+            encode_fields(&first, span, ctx);
+            return encode_fields(&second, span, ctx);
+        }
+        None => {}
     }
     let resolved = with_growth_resolved(insn, &sizer_for(ctx));
     let insn = resolved.as_ref().unwrap_or(insn);

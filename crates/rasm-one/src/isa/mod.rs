@@ -1,6 +1,7 @@
 //! The instruction set: operands, the data-driven table and encoders.
 
 pub(crate) mod encode;
+pub(crate) mod rewrite;
 pub mod table;
 
 use crate::expr::Expr;

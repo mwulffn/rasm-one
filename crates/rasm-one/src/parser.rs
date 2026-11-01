@@ -22,8 +22,8 @@ use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
 use crate::{
     Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_ADD_TO_LEA,
-    RULE_BRANCHES, RULE_DISPLACEMENTS, RULE_LEA_TO_QUICK, RULE_NULL_BASE, RULE_NULL_OUTER,
-    RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES, RULE_SHORT_NEXT, RULE_WORD_IMMEDIATE,
+    RULE_BRANCHES, RULE_DISPLACEMENTS, RULE_GENERIC, RULE_LEA_TO_QUICK, RULE_NULL_BASE,
+    RULE_NULL_OUTER, RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES, RULE_SHORT_NEXT, RULE_WORD_IMMEDIATE,
 };
 
 /// A symbol being collected.
@@ -2133,9 +2133,9 @@ impl LineParser<'_, '_, '_> {
             optimisations.set_all_rules(on);
             return true;
         }
-        match name.strip_prefix('o').map(str::parse) {
-            Some(Ok(rule)) => optimisations.set_rule(rule, on),
-            _ => false,
+        match name.strip_prefix('o').and_then(Optimisations::rule_named) {
+            Some(rule) => optimisations.set_rule(rule, on),
+            None => false,
         }
     }
 
@@ -2759,6 +2759,8 @@ impl LineParser<'_, '_, '_> {
             drops_zero_displacement: self.parser.optimisations.rule(RULE_DISPLACEMENTS),
             shortens_absolutes: self.parser.optimisations.rule(RULE_ABSOLUTES),
             quick_move,
+            generic_rewrites: self.parser.optimisations.rule(RULE_GENERIC),
+            cpu: self.parser.cpu,
             drops_zero_base: self.parser.optimisations.rule(RULE_NULL_BASE),
             drops_zero_outer: self.parser.optimisations.rule(RULE_NULL_OUTER),
             short_next_is_no_op: self.parser.optimisations.rule(RULE_SHORT_NEXT),
