@@ -74,10 +74,20 @@ fn asks_for_all_rules(path: &Path) -> bool {
 }
 
 /// Rules that exist, which the corpus runs with.
-const RULES: &[u32] = &[1, 2, 3, 4, 5, 7, 8, 9];
+const RULES: &[u32] = &[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12];
 const RULE_FLAGS: &[&str] = &[
-    "-opt-o-", "-opt-o1+", "-opt-o2+", "-opt-o3+", "-opt-o4+", "-opt-o5+", "-opt-o7+", "-opt-o8+",
+    "-opt-o-",
+    "-opt-o1+",
+    "-opt-o2+",
+    "-opt-o3+",
+    "-opt-o4+",
+    "-opt-o5+",
+    "-opt-o7+",
+    "-opt-o8+",
     "-opt-o9+",
+    "-opt-o10+",
+    "-opt-o11+",
+    "-opt-o12+",
 ];
 
 #[test]
