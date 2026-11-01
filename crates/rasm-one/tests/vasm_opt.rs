@@ -23,6 +23,9 @@ const BRANCHES: Rule = Rule {
 };
 
 fn optimisations(rule: &Rule) -> Optimisations {
+    if rule.number == ALL.number {
+        return Optimisations::all();
+    }
     let mut optimisations = Optimisations::none();
     optimisations.set_rule(rule.number, true);
     optimisations
@@ -70,7 +73,11 @@ fn compare(
     rule: &Rule,
     coprocessors: bool,
 ) -> Result<Option<String>, Box<dyn Error>> {
-    let mut args = vec!["-opt-o-", rule.flag];
+    let mut args = if rule.number == ALL.number {
+        vec![rule.flag]
+    } else {
+        vec!["-opt-o-", rule.flag]
+    };
     if coprocessors {
         args.extend(["-m68881", "-m68851"]);
     }
@@ -984,6 +991,71 @@ fn test_assemble_generic_rewrites_match_vasm_og() -> Result<(), Box<dyn Error>> 
 fn test_assemble_eor_byte_out_of_range_stays_an_error() {
     let bytes = ours(" eor.b #$ffff,d0", "68000", Format::Bin, &GENERIC, false);
     assert!(bytes.is_err());
+}
+
+/// All rules together, which is `-opt-o+`, against vasm with the same.
+const ALL: Rule = Rule {
+    number: u32::MAX,
+    flag: "-opt-o+",
+};
+
+#[test]
+fn test_assemble_pc_relative_matches_vasm_all_rules() -> Result<(), Box<dyn Error>> {
+    let sources: Vec<String> = [
+        " lea f,a0\nf:",
+        " lea f,a0\n nop\nf: nop",
+        " lea f.l,a0\nf:",
+        " lea f.w,a0\nf:",
+        " lea 4,a0",
+        " move.l f,d0\nf:",
+        " move.l d0,f\nf:",
+        " move.l f,f\nf:",
+        " move.l f,d0\n ds.b 32760\nf:",
+        " move.l f,d0\n ds.b 32766\nf:",
+        " move.l f,d0\n ds.b 40000\nf:",
+        " tst.l f\nf:",
+        " cmp.l f,d0\nf:",
+        " add.l f,d0\nf:",
+        " add.l d0,f\nf:",
+        " clr.l f\nf:",
+        " pea f\nf:",
+        " jmp f\nf:",
+        " jmp f\n nop\nf:",
+        " jsr f\n nop\nf:",
+        " jsr f\nf:",
+        " jmp f\n ds.b 40000\nf:",
+        " jsr f\n ds.b 40000\nf:",
+        "f: ds.b 40000\n jmp f",
+        " jmp 4",
+        " jsr 4",
+        " jmp $10000",
+        " jmp f.l\nf:",
+        " jmp (a0)",
+        " jmp f(pc)\nf:",
+        " section a,code\n lea f,a0\n section b,code\nf: nop",
+        " section a,code\n jmp f\n section b,code\nf: nop",
+        " section a,code\n jsr f\n section b,code\nf: nop",
+        " xref x\n lea x,a0",
+        " xref x\n jmp x",
+        " xref x\n jsr x",
+        " bfextu f{1:2},d0\nf:",
+        " btst #1,f\nf:",
+        " btst d0,f\nf:",
+        " cmpi.l #1,f\nf:",
+        " cmp.w f,a0\nf:",
+        " chk.w f,d0\nf:",
+        " mulu f,d0\nf:",
+        " move.w f,ccr\nf:",
+        " movem.l f,d0/d1\nf:",
+        " move.l #f,a0\nf:",
+        " move.l #f,a0\n ds.b 40000\nf:",
+        " opt o-\n lea f,a0\nf:",
+        " opt o-\n jmp f\nf:",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    compare_rule(&sources, &ALL, false)
 }
 
 /// A small generator, so that runs are the same everywhere.

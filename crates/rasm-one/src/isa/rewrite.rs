@@ -53,6 +53,7 @@ impl Instruction {
             rewrites: None,
             generic_rewrites: false,
             quick_move: None,
+            shortens_absolutes: true,
             ..self.clone()
         })
     }
@@ -83,7 +84,12 @@ impl Instruction {
                 let Known::Number(number) = known else {
                     let long_move = matches!(mnemonic, "move" | "movea") && size == Size::Long;
                     if long_move && to_address {
-                        let label = operand(Mode::AbsLong(expr.clone()), source);
+                        let label = if self.pc_relative {
+                            Mode::AbsOrPc(expr.clone())
+                        } else {
+                            Mode::AbsLong(expr.clone())
+                        };
+                        let label = operand(label, source);
                         return one(self.as_other(
                             "lea",
                             Size::Long,

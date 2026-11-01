@@ -23,7 +23,8 @@ use crate::types::{Cpu, MemKind, SectionKind, Size};
 use crate::{
     Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_ADD_TO_LEA,
     RULE_BRANCHES, RULE_DISPLACEMENTS, RULE_GENERIC, RULE_LEA_TO_QUICK, RULE_NULL_BASE,
-    RULE_NULL_OUTER, RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES, RULE_SHORT_NEXT, RULE_WORD_IMMEDIATE,
+    RULE_NULL_OUTER, RULE_PC_RELATIVE, RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES, RULE_SHORT_NEXT,
+    RULE_WORD_IMMEDIATE,
 };
 
 /// A symbol being collected.
@@ -2742,20 +2743,59 @@ impl LineParser<'_, '_, '_> {
             QuickMoves::WithSecondInstruction
         });
         let rewrites = self.rewrites_for(mnemonic, size.or(row.default_size), &operands);
+        let pc_relative = self.parser.optimisations.rule(RULE_PC_RELATIVE);
+        // A `jmp` or `jsr` to a label without a size is a branch if it can be.
+        let jump_branch = match (mnemonic, operands.as_slice()) {
+            ("jmp", [target]) if matches!(target.mode, Mode::AbsShortable(_)) => "bra",
+            ("jsr", [target]) if matches!(target.mode, Mode::AbsShortable(_)) => "bsr",
+            _ => "",
+        };
+        let from_jump = pc_relative && !jump_branch.is_empty();
+        let row = match rows_for(jump_branch).and_then(<[InsnRow]>::first) {
+            Some(branch) if from_jump => branch,
+            _ => row,
+        };
         // What can't be a word, such as a branch target, isn't shortable after all.
         let mut operands = operands;
-        for (operand, allowed) in operands.iter_mut().zip(row.operands) {
+        let operand_count = operands.len();
+        // Like vasm, `btst` and `cmpi` keep an absolute label, though they could take these.
+        let bit_instruction = matches!(mnemonic, "btst" | "cmpi");
+        // A sized row for memory can have a sibling for PC-relative modes on this CPU.
+        let any_row_allows_pc = |position: usize| {
+            rows.iter().any(|row| {
+                row.cpus.contains(cpu)
+                    && row.operands.len() == operand_count
+                    && row
+                        .operands
+                        .get(position)
+                        .is_some_and(|set| set.intersects(EaSet::PC_DISP))
+            })
+        };
+        for (position, (operand, allowed)) in operands.iter_mut().zip(row.operands).enumerate() {
+            if let Mode::BitField { ea, .. } = &mut operand.mode {
+                if let (Mode::AbsShortable(expr), true) = (
+                    &**ea,
+                    pc_relative && allowed.intersects(EaSet::PC_DISP.bitfield()),
+                ) {
+                    **ea = Mode::AbsOrPc(expr.clone());
+                }
+            }
             if let Mode::AbsShortable(expr) = &operand.mode {
                 if !allowed.intersects(EaSet::ABS_W) {
                     operand.mode = Mode::AbsLong(expr.clone());
+                } else if pc_relative && !bit_instruction && any_row_allows_pc(position) {
+                    operand.mode = Mode::AbsOrPc(expr.clone());
                 }
             }
         }
         Ok(Instruction {
             row,
-            resizable_branch: size.is_none()
-                && matches!(row.encoding, Encoding::Branch | Encoding::FpBranch)
-                && self.parser.optimisations.rule(RULE_BRANCHES),
+            from_jump,
+            pc_relative,
+            resizable_branch: from_jump
+                || size.is_none()
+                    && matches!(row.encoding, Encoding::Branch | Encoding::FpBranch)
+                    && self.parser.optimisations.rule(RULE_BRANCHES),
             drops_zero_displacement: self.parser.optimisations.rule(RULE_DISPLACEMENTS),
             shortens_absolutes: self.parser.optimisations.rule(RULE_ABSOLUTES),
             quick_move,
@@ -2765,7 +2805,11 @@ impl LineParser<'_, '_, '_> {
             drops_zero_outer: self.parser.optimisations.rule(RULE_NULL_OUTER),
             short_next_is_no_op: self.parser.optimisations.rule(RULE_SHORT_NEXT),
             rewrites,
-            branch_form: Cell::new(BranchForm::Word),
+            branch_form: Cell::new(if from_jump {
+                BranchForm::Jump
+            } else {
+                BranchForm::Word
+            }),
             size: size.or(row.default_size),
             operands,
             wide,

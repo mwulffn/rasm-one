@@ -94,6 +94,8 @@ pub(crate) enum Mode {
     /// An address without a size where a word would also do, under optimisation.
     /// Encoding sees this only for rows that have both, and resolves it.
     AbsShortable(Expr),
+    /// Like [`Mode::AbsShortable`], where PC-relative would also do.
+    AbsOrPc(Expr),
     PcDisp(Expr),
     PcDispWord(Expr),
     PcIndex(Expr, IndexReg),
@@ -150,7 +152,7 @@ impl Mode {
             Mode::Disp(..) | Mode::DispWord(..) => EaSet::DISP,
             Mode::Index(..) => EaSet::INDEX,
             Mode::AbsWord(_) => EaSet::ABS_W,
-            Mode::AbsLong(_) | Mode::AbsShortable(_) => EaSet::ABS_L,
+            Mode::AbsLong(_) | Mode::AbsShortable(_) | Mode::AbsOrPc(_) => EaSet::ABS_L,
             Mode::PcDisp(_) | Mode::PcDispWord(_) => EaSet::PC_DISP,
             Mode::PcIndex(..) => EaSet::PC_INDEX,
             Mode::Full(full) => match full.base {

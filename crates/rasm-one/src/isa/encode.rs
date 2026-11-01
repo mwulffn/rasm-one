@@ -51,6 +51,10 @@ pub(crate) struct Instruction {
     pub drops_zero_base: bool,
     /// True if an outer displacement of zero without a width can be left out.
     pub drops_zero_outer: bool,
+    /// True if labels without a size can become PC-relative.
+    pub pc_relative: bool,
+    /// True if this was written as `jmp` or `jsr`, which stays one out of reach.
+    pub from_jump: bool,
     /// The form of a resizable branch, which layout chooses.
     pub branch_form: Cell<BranchForm>,
 }
@@ -100,6 +104,8 @@ pub(crate) enum BranchForm {
     /// A `jmp` or `jsr` for a 68000, where no branch reaches. A conditional branch
     /// first skips it on the opposite condition.
     Jump,
+    /// The same with a word address, for a number that fits.
+    JumpWord,
 }
 
 /// How to find an operand's values, for choosing extension forms.
@@ -217,6 +223,8 @@ enum ExtensionPlan {
     NoDisplacement,
     /// An address that fits a word, written as one.
     ShortAbsolute,
+    /// An address near enough to be written relative to the PC.
+    PcRelative,
     /// The brief forms and everything else of a fixed size.
     Fixed(i64),
     Full(FullPlan),
@@ -226,7 +234,7 @@ impl ExtensionPlan {
     fn bytes(self) -> i64 {
         match self {
             ExtensionPlan::NoDisplacement => 0,
-            ExtensionPlan::ShortAbsolute => 2,
+            ExtensionPlan::ShortAbsolute | ExtensionPlan::PcRelative => 2,
             ExtensionPlan::Fixed(bytes) => bytes,
             ExtensionPlan::Full(plan) => plan.bytes(),
         }
@@ -343,6 +351,24 @@ fn plan_extension(
         | Mode::PcDispWord(_)
         | Mode::PcIndex(..) => ExtensionPlan::Fixed(2),
         Mode::AbsLong(_) => ExtensionPlan::Fixed(4),
+        Mode::AbsOrPc(expr) => {
+            let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup);
+            match value.map(|value| {
+                let kind = plain_disp_kind(value, fixed);
+                (value, kind)
+            }) {
+                Ok((_, DispKind::Number(number))) if fits_word(number) => {
+                    ExtensionPlan::ShortAbsolute
+                }
+                Ok((value, _)) if value.base == Base::Section(sizer.section) => {
+                    match pc_disp_kind(value, pc, sizer) {
+                        DispKind::Number(number) if fits_word(number) => ExtensionPlan::PcRelative,
+                        _ => ExtensionPlan::Fixed(4),
+                    }
+                }
+                _ => ExtensionPlan::Fixed(4),
+            }
+        }
         Mode::AbsShortable(expr) => {
             let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup);
             match value.map(|value| plain_disp_kind(value, fixed)) {
@@ -440,6 +466,13 @@ impl Instruction {
             return false;
         }
         let current = self.branch_form.get();
+        if self.from_jump {
+            if let Some(form) = self.constant_jump_form(sizer) {
+                let changed = form != current;
+                self.branch_form.set(form);
+                return changed;
+            }
+        }
         let far = |form| matches!(form, BranchForm::Jump | BranchForm::Long);
         let conditional = self.is_conditional_branch();
         // A conditional branch judged out of reach stays that way, like vasm.
@@ -476,6 +509,22 @@ impl Instruction {
         }
         self.branch_form.set(form);
         true
+    }
+
+    /// A `jmp` or `jsr` to a number stays one.
+    fn constant_jump_form(&self, sizer: &Sizer) -> Option<BranchForm> {
+        let Mode::AbsLong(expr) = &self.operands.first()?.mode else {
+            return None;
+        };
+        let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup).ok()?;
+        let DispKind::Number(number) = plain_disp_kind(value, self.fixed_addresses) else {
+            return None;
+        };
+        Some(if fits_word(number) {
+            BranchForm::JumpWord
+        } else {
+            BranchForm::Jump
+        })
     }
 
     /// The distance from the PC of this branch to its target, if already known.
@@ -528,7 +577,7 @@ impl Instruction {
             BranchForm::Short
         } else if fits_word(distance) {
             BranchForm::Word
-        } else if self.wide {
+        } else if self.wide && !self.from_jump {
             BranchForm::Long
         } else {
             BranchForm::Jump
@@ -541,6 +590,7 @@ impl Instruction {
             BranchForm::Short => 2,
             BranchForm::Word => 4,
             BranchForm::Long => 6,
+            BranchForm::JumpWord => 4,
             BranchForm::Jump if self.is_conditional_branch() => 8,
             BranchForm::Jump => 6,
         }
@@ -1531,7 +1581,7 @@ fn mode_reg(mode: &Mode) -> (u16, u16) {
         Mode::Disp(_, r) => (5, u16::from(*r)),
         Mode::Index(_, r, _) => (6, u16::from(*r)),
         Mode::AbsWord(_) => (7, 0),
-        Mode::AbsLong(_) | Mode::AbsShortable(_) => (7, 1),
+        Mode::AbsLong(_) | Mode::AbsShortable(_) | Mode::AbsOrPc(_) => (7, 1),
         Mode::PcDisp(_) => (7, 2),
         Mode::PcIndex(..) => (7, 3),
         Mode::Immediate(_) => (7, 4),
@@ -1614,15 +1664,17 @@ fn emit_extension(op: &Operand, size: Size, insn: &Instruction, ctx: &mut EmitCo
         Mode::AbsWord(expr) => {
             emit_short_field(expr, "absolute short address out of range", op.span, ctx);
         }
-        Mode::AbsLong(expr) | Mode::AbsShortable(expr) => match ctx.evaluate(expr, pc, op.span) {
-            Some(value) => {
-                if !fits_long(value.offset) {
-                    ctx.error("out-of-range", "address doesn't fit in 32 bits", op.span);
+        Mode::AbsLong(expr) | Mode::AbsShortable(expr) | Mode::AbsOrPc(expr) => {
+            match ctx.evaluate(expr, pc, op.span) {
+                Some(value) => {
+                    if !fits_long(value.offset) {
+                        ctx.error("out-of-range", "address doesn't fit in 32 bits", op.span);
+                    }
+                    ctx.put_value(value, 4);
                 }
-                ctx.put_value(value, 4);
+                None => ctx.put_zero(4),
             }
-            None => ctx.put_zero(4),
-        },
+        }
         Mode::PcDisp(expr) | Mode::PcDispWord(expr) => {
             let target = ctx.evaluate(expr, pc, op.span);
             emit_pc_field(
@@ -1693,13 +1745,21 @@ fn resolve_growth(mode: &Mode, plan: ExtensionPlan) -> Option<Mode> {
     };
     match (mode, plan) {
         (Mode::Disp(_, r), ExtensionPlan::NoDisplacement) => return Some(Mode::Indirect(*r)),
-        (Mode::AbsShortable(expr), ExtensionPlan::ShortAbsolute) => {
+        (Mode::AbsOrPc(expr), ExtensionPlan::PcRelative) => {
+            return Some(Mode::PcDispWord(expr.clone()));
+        }
+        (Mode::AbsShortable(expr) | Mode::AbsOrPc(expr), ExtensionPlan::ShortAbsolute) => {
             return Some(Mode::AbsWord(expr.clone()));
         }
-        (Mode::AbsShortable(expr), _) => return Some(Mode::AbsLong(expr.clone())),
+        (Mode::AbsShortable(expr) | Mode::AbsOrPc(expr), _) => {
+            return Some(Mode::AbsLong(expr.clone()))
+        }
         (
             Mode::PackedStore { ea, factor },
-            ExtensionPlan::NoDisplacement | ExtensionPlan::ShortAbsolute | ExtensionPlan::Fixed(_),
+            ExtensionPlan::NoDisplacement
+            | ExtensionPlan::ShortAbsolute
+            | ExtensionPlan::PcRelative
+            | ExtensionPlan::Fixed(_),
         ) => {
             return resolve_growth(ea, plan).map(|ea| Mode::PackedStore {
                 ea: Box::new(ea),
@@ -1708,7 +1768,10 @@ fn resolve_growth(mode: &Mode, plan: ExtensionPlan) -> Option<Mode> {
         }
         (
             Mode::BitField { ea, offset, width },
-            ExtensionPlan::NoDisplacement | ExtensionPlan::ShortAbsolute | ExtensionPlan::Fixed(_),
+            ExtensionPlan::NoDisplacement
+            | ExtensionPlan::ShortAbsolute
+            | ExtensionPlan::PcRelative
+            | ExtensionPlan::Fixed(_),
         ) => {
             return resolve_growth(ea, plan).map(|ea| Mode::BitField {
                 ea: Box::new(ea),
@@ -2059,6 +2122,8 @@ const NO_OP_LEA: u16 = 0x4DD6;
 const BRA_OPCODE: u16 = 0x6000;
 const BSR_OPCODE: u16 = 0x6100;
 const JMP_LONG: u16 = 0x4EF9;
+const JMP_WORD: u16 = 0x4EF8;
+const JSR_WORD: u16 = 0x4EB8;
 const JSR_LONG: u16 = 0x4EB9;
 /// The bit that gives an `FBcc` or `PBcc` a long displacement.
 const FP_BRANCH_LONG: u16 = 0x0040;
@@ -2080,11 +2145,13 @@ fn emit_long_branch(target: &Operand, span: Span, ctx: &mut EmitContext) {
 /// Writes a `jmp` or `jsr` to a branch's target, which a loader may relocate.
 fn emit_branch_as_jump(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     let opcode = insn.row.opcode;
-    ctx.diagnostics.push(Diagnostic::warning(
-        "branch-to-jump",
-        "branch out of range changed to a jump",
-        span,
-    ));
+    if !insn.from_jump {
+        ctx.diagnostics.push(Diagnostic::warning(
+            "branch-to-jump",
+            "branch out of range changed to a jump",
+            span,
+        ));
+    }
     if insn.is_conditional_branch() {
         // Skips the jump, which is 6 bytes, on the opposite condition.
         ctx.put_word((opcode ^ 0x0100) | 6);
@@ -2095,7 +2162,16 @@ fn emit_branch_as_jump(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
         JMP_LONG
     });
     let target = &insn.operands[0];
-    match branch_target(target, ctx) {
+    let value = if insn.from_jump {
+        let Mode::AbsLong(expr) = &target.mode else {
+            return ctx.put_zero(4);
+        };
+        let pc = ctx.star();
+        ctx.evaluate(expr, pc, target.span)
+    } else {
+        branch_target(target, ctx)
+    };
+    match value {
         Some(value) => ctx.put_value(value, 4),
         None => ctx.put_zero(4),
     }
@@ -2107,6 +2183,17 @@ fn encode_branch(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     let short = match insn.branch_form.get() {
         BranchForm::Deleted => return,
         BranchForm::Jump => return emit_branch_as_jump(insn, span, ctx),
+        BranchForm::JumpWord => {
+            ctx.put_word(if opcode == BSR_OPCODE {
+                JSR_WORD
+            } else {
+                JMP_WORD
+            });
+            let Mode::AbsLong(expr) = &target.mode else {
+                return ctx.put_zero(2);
+            };
+            return emit_short_field(expr, "absolute short address out of range", span, ctx);
+        }
         BranchForm::Long => {
             ctx.put_word(opcode | 0x00FF);
             return emit_long_branch(target, span, ctx);

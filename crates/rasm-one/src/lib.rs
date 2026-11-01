@@ -191,7 +191,8 @@ impl Optimisations {
         | 1 << RULE_ADD_TO_LEA
         | 1 << RULE_LEA_TO_QUICK
         | 1 << RULE_WORD_IMMEDIATE
-        | 1 << RULE_GENERIC;
+        | 1 << RULE_GENERIC
+        | 1 << RULE_PC_RELATIVE;
 
     /// Every rule that exists, which can be changed with `opt`.
     pub fn all() -> Self {
@@ -273,6 +274,10 @@ pub(crate) const RULE_WORD_IMMEDIATE: u32 = 12;
 
 /// Rule 16: vasm's `og`, safe replacements that no other rule covers.
 pub(crate) const RULE_GENERIC: u32 = 16;
+
+/// What only `o+` switches on: labels without a size become PC-relative if near enough,
+/// and `jmp` and `jsr` become branches. This has no name of its own in vasm.
+pub(crate) const RULE_PC_RELATIVE: u32 = 17;
 
 impl Options {
     /// Options for assembling `main` for a 68000.
