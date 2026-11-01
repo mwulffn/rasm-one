@@ -28,10 +28,23 @@ pub(crate) enum AtomKind {
         count: Expr,
         fill: Option<Expr>,
     },
+    /// Gives a symbol a value at this point in the source.
+    Equate(SymId, Expr),
+    /// Pads to the next multiple of `alignment`, then on by `offset`. Pads
+    /// with NOPs in code sections if `nops` is set, and otherwise with zeros.
+    Align {
+        alignment: i64,
+        offset: i64,
+        nops: bool,
+    },
+    /// Pads with zeros up to an address, if it isn't already past it.
+    Rorg(Expr),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Atom {
     pub kind: AtomKind,
     pub span: Span,
+    /// Index of the section it belongs to.
+    pub section: usize,
 }

@@ -24,6 +24,9 @@ pub enum OutputError {
     /// Two sections would occupy the same addresses in a raw binary.
     #[error("sections {0} and {1} overlap")]
     Overlap(String, String),
+    /// `org` gives fixed addresses, but this format is relocatable.
+    #[error("org cannot be used in a relocatable format")]
+    FixedAddress,
     /// The format cannot represent this relocation.
     #[error("{size}-byte relocation at {section}+{offset:#x} is not supported by this format")]
     UnsupportedReloc {

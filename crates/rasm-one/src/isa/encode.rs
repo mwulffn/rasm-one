@@ -9,7 +9,7 @@ use crate::expr::{eval, EvalError, Expr, SymId, Value};
 use crate::isa::table::{Encoding, InsnRow};
 use crate::isa::{IndexReg, Mode, Operand};
 use crate::source::Span;
-use crate::types::Size;
+use crate::types::{SectionKind, Size};
 use crate::{Reloc, RelocKind};
 
 /// An instruction matched to its table row.
@@ -64,6 +64,11 @@ fn extension_len(operands: &[Operand], size: Size) -> u32 {
 /// Everything an encoder needs from the surrounding assembly.
 pub(crate) struct EmitContext<'a> {
     pub section: usize,
+    /// Kind of that section.
+    pub kind: SectionKind,
+    /// Fixed address of that section, if it has one. Its symbols are then
+    /// constants, so addresses have to include this.
+    pub origin: Option<i64>,
     /// Source of the atom being emitted.
     pub span: Span,
     /// Start of the current instruction, which is what `*` means in operands.
@@ -80,12 +85,20 @@ impl EmitContext<'_> {
         self.data.len() as i64
     }
 
+    /// The address of a position in the section, as a value.
+    pub fn address_of(&self, offset: i64) -> Value {
+        match self.origin {
+            Some(origin) => Value::abs(origin + offset),
+            None => Value {
+                section: Some(self.section),
+                offset,
+            },
+        }
+    }
+
     /// The value of `*` in an operand.
     fn star(&self) -> Value {
-        Value {
-            section: Some(self.section),
-            offset: self.instruction_start,
-        }
+        self.address_of(self.instruction_start)
     }
 
     fn error(&mut self, code: &'static str, message: impl Into<String>, span: Span) {
@@ -483,7 +496,7 @@ fn pc_relative(expr: &Expr, span: Span, ctx: &mut EmitContext) -> Option<i64> {
             );
             None
         }
-        _ => Some(value.offset - ctx.offset()),
+        _ => Some(value.offset - ctx.address_of(ctx.offset()).offset),
     }
 }
 
@@ -524,7 +537,7 @@ fn branch_distance(target: &Operand, ctx: &mut EmitContext) -> Option<i64> {
         ctx.error("cross-section", "branch to another section", target.span);
         return None;
     }
-    Some(value.offset - (ctx.instruction_start + 2))
+    Some(value.offset - ctx.address_of(ctx.instruction_start + 2).offset)
 }
 
 fn emit_branch_word(target: &Operand, span: Span, ctx: &mut EmitContext) {

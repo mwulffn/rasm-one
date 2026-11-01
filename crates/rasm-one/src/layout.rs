@@ -1,11 +1,13 @@
 //! Assigns addresses to symbols and generates section contents.
 
+use std::cell::Cell;
+
 use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::Diagnostic;
 use crate::expr::{eval, Value};
 use crate::isa::encode::{encode, EmitContext};
-use crate::parser::Program;
-use crate::types::Size;
+use crate::parser::{Program, SectionEntry};
+use crate::types::{SectionKind, Size};
 use crate::{LineEntry, Reloc, Section, Symbol};
 
 /// Forward references in `ds` counts settle quickly; this bound only catches
@@ -15,8 +17,10 @@ const MAX_PASSES: usize = 32;
 /// Largest permitted `ds`/`blk` size in bytes.
 const MAX_SPACE: i64 = 0x7FFF_FFFF;
 
-/// Symbol values for one layout pass.
-type SymbolValues = Vec<Option<Value>>;
+/// Current symbol values. Walking the source updates them in order, so a `set`
+/// symbol has the value of its latest definition, and a forward reference sees
+/// the value from the end of the previous walk.
+type SymbolValues = Vec<Cell<Option<Value>>>;
 
 /// Result of [`build`].
 pub(crate) struct Built {
@@ -29,12 +33,12 @@ pub(crate) struct Built {
 /// Lays out a parsed program and generates its bytes.
 pub(crate) fn build(program: Program) -> Built {
     let mut diagnostics = program.diagnostics;
-    let mut values: SymbolValues = vec![None; program.symbols.len()];
+    let values: SymbolValues = vec![Cell::new(None); program.symbols.len()];
     let mut settled = false;
     for _ in 0..MAX_PASSES {
-        let next = layout_pass(&program.sections, &values);
-        settled = next == values;
-        values = next;
+        let before = values.clone();
+        layout_pass(&program.sections, &program.atoms, &values);
+        settled = before == values;
         if settled {
             break;
         }
@@ -49,52 +53,62 @@ pub(crate) fn build(program: Program) -> Built {
         });
     }
 
-    let lookup = |id: u32| values[id as usize];
+    let lookup = |id: u32| values[id as usize].get();
     let name_of = |id: u32| program.symbols[id as usize].name.clone();
     let mut line_table = Vec::new();
-    let mut sections = Vec::with_capacity(program.sections.len());
-    for (index, entry) in program.sections.iter().enumerate() {
-        let mut data = Vec::new();
-        let mut relocs: Vec<Reloc> = Vec::new();
-        for atom in &entry.atoms {
-            let start = data.len() as u32;
-            let mut ctx = EmitContext {
+    let mut datas: Vec<Vec<u8>> = vec![Vec::new(); program.sections.len()];
+    let mut relocs: Vec<Vec<Reloc>> = vec![Vec::new(); program.sections.len()];
+    for atom in &program.atoms {
+        let index = atom.section;
+        let entry = &program.sections[index];
+        let start = datas[index].len() as u32;
+        let mut ctx = EmitContext {
+            section: index,
+            kind: entry.kind,
+            origin: entry.origin,
+            span: atom.span,
+            instruction_start: 0,
+            lookup: &lookup,
+            name_of: &name_of,
+            data: &mut datas[index],
+            relocs: &mut relocs[index],
+            diagnostics: &mut diagnostics,
+        };
+        emit_atom(atom, &values, &mut ctx);
+        let len = datas[index].len() as u32 - start;
+        if len > 0 {
+            line_table.push(LineEntry {
                 section: index,
+                offset: start,
+                len,
                 span: atom.span,
-                instruction_start: 0,
-                lookup: &lookup,
-                name_of: &name_of,
-                data: &mut data,
-                relocs: &mut relocs,
-                diagnostics: &mut diagnostics,
-            };
-            emit_atom(atom, &mut ctx);
-            let len = data.len() as u32 - start;
-            if len > 0 {
-                line_table.push(LineEntry {
-                    section: index,
-                    offset: start,
-                    len,
-                    span: atom.span,
-                    expansion: None,
-                });
-            }
+                expansion: None,
+            });
         }
-        sections.push(Section {
+    }
+    line_table.sort_by_key(|entry| (entry.section, entry.offset));
+
+    let sections = program
+        .sections
+        .iter()
+        .zip(datas)
+        .zip(relocs)
+        .map(|((entry, data), relocs)| Section {
             name: entry.name.clone(),
             kind: entry.kind,
             mem: entry.mem,
+            origin: entry.origin.map(|origin| origin as u32),
             data,
             relocs,
-        });
-    }
+        })
+        .collect();
 
     let symbols = program
         .symbols
         .iter()
         .zip(&values)
         .filter_map(|(entry, value)| {
-            let value = (*value)?;
+            let value = value.get()?;
             Some(Symbol {
                 name: entry.name.clone(),
                 section: value.section,
@@ -113,29 +127,50 @@ pub(crate) fn build(program: Program) -> Built {
     }
 }
 
-/// Computes symbol values using `previous` for forward references, which are
-/// taken as zero until known.
-fn layout_pass(sections: &[crate::parser::SectionEntry], previous: &SymbolValues) -> SymbolValues {
-    let mut values = vec![None; previous.len()];
-    for (index, section) in sections.iter().enumerate() {
-        let mut offset: i64 = 0;
-        for atom in &section.atoms {
-            if let AtomKind::Label(id) = atom.kind {
-                values[id as usize] = Some(Value {
-                    section: Some(index),
-                    offset,
-                });
-            }
-            offset += atom_len(atom, index, offset, previous);
-        }
+/// The address of a position in a section, as a value.
+fn address(section: usize, entry: &SectionEntry, offset: i64) -> Value {
+    match entry.origin {
+        Some(origin) => Value::abs(origin + offset),
+        None => Value {
+            section: Some(section),
+            offset,
+        },
     }
-    values
 }
 
-fn atom_len(atom: &Atom, section: usize, offset: i64, values: &SymbolValues) -> i64 {
+/// Walks the source once, assigning symbols. Forward references that are not
+/// known yet count as zero when sizing.
+fn layout_pass(sections: &[SectionEntry], atoms: &[Atom], values: &SymbolValues) {
+    let mut offsets = vec![0i64; sections.len()];
+    for atom in atoms {
+        let section = atom.section;
+        let entry = &sections[section];
+        let offset = offsets[section];
+        let here = address(section, entry, offset);
+        match &atom.kind {
+            AtomKind::Label(id) => values[*id as usize].set(Some(here)),
+            AtomKind::Equate(id, expr) => {
+                let lookup = |id: u32| values[id as usize].get();
+                if let Ok(value) = eval(expr, here, &lookup) {
+                    values[*id as usize].set(Some(value));
+                }
+            }
+            _ => offsets[section] += atom_len(atom, here, offset, entry, values),
+        }
+    }
+}
+
+fn atom_len(
+    atom: &Atom,
+    here: Value,
+    offset: i64,
+    entry: &SectionEntry,
+    values: &SymbolValues,
+) -> i64 {
+    let lookup = |id: u32| values[id as usize].get().or(Some(Value::abs(0)));
     match &atom.kind {
-        AtomKind::Label(_) => 0,
-        AtomKind::AlignInstruction => offset & 1,
+        AtomKind::Label(_) | AtomKind::Equate(..) => 0,
+        AtomKind::AlignInstruction => here.offset & 1,
         AtomKind::Instruction(instruction) => i64::from(instruction.len()),
         AtomKind::Data { size, items } => items
             .iter()
@@ -144,30 +179,54 @@ fn atom_len(atom: &Atom, section: usize, offset: i64, values: &SymbolValues) -> 
                 DataItem::Expr(..) => i64::from(size.bytes()),
             })
             .sum(),
-        AtomKind::Space { size, count, .. } => {
-            let pc = Value {
-                section: Some(section),
-                offset,
-            };
-            let lookup = |id: u32| values[id as usize].or(Some(Value::abs(0)));
-            match eval(count, pc, &lookup) {
-                Ok(Value {
-                    section: None,
-                    offset: n,
-                }) if (0..=MAX_SPACE).contains(&n) => {
-                    n.saturating_mul(i64::from(size.bytes())).min(MAX_SPACE)
-                }
-                _ => 0,
+        AtomKind::Space { size, count, .. } => match eval(count, here, &lookup) {
+            Ok(Value {
+                section: None,
+                offset: n,
+            }) if (0..=MAX_SPACE).contains(&n) => {
+                n.saturating_mul(i64::from(size.bytes())).min(MAX_SPACE)
             }
-        }
+            _ => 0,
+        },
+        AtomKind::Align {
+            alignment, offset, ..
+        } => padding(here.offset, *alignment, *offset),
+        AtomKind::Rorg(expr) => match eval(expr, here, &lookup) {
+            Ok(value) => rorg_padding(value, offset, entry.origin),
+            Err(_) => 0,
+        },
     }
 }
 
-fn emit_atom(atom: &Atom, ctx: &mut EmitContext) {
+/// Bytes from `address` to the next multiple of `alignment`, plus `offset`.
+fn padding(address: i64, alignment: i64, offset: i64) -> i64 {
+    if alignment <= 0 {
+        return 0;
+    }
+    let rounded = (address + alignment - 1) / alignment * alignment;
+    rounded + offset - address
+}
+
+/// Bytes from section position `offset` up to the address `target`, if any.
+fn rorg_padding(target: Value, offset: i64, origin: Option<i64>) -> i64 {
+    let position = target.offset - origin.unwrap_or(0);
+    (position - offset).clamp(0, MAX_SPACE)
+}
+
+fn emit_atom(atom: &Atom, values: &SymbolValues, ctx: &mut EmitContext) {
     match &atom.kind {
-        AtomKind::Label(_) => {}
+        AtomKind::Label(id) => {
+            let here = ctx.address_of(ctx.data.len() as i64);
+            values[*id as usize].set(Some(here));
+        }
+        AtomKind::Equate(id, expr) => {
+            let here = ctx.address_of(ctx.data.len() as i64);
+            if let Some(value) = ctx.evaluate(expr, here, atom.span) {
+                values[*id as usize].set(Some(value));
+            }
+        }
         AtomKind::AlignInstruction => {
-            if ctx.data.len() % 2 != 0 {
+            if ctx.address_of(ctx.data.len() as i64).offset % 2 != 0 {
                 ctx.diagnostics.push(Diagnostic::warning(
                     "instruction-aligned",
                     "instruction at an odd address has been aligned",
@@ -183,7 +242,42 @@ fn emit_atom(atom: &Atom, ctx: &mut EmitContext) {
             }
         }
         AtomKind::Space { size, count, fill } => emit_space(atom, *size, count, fill, ctx),
+        AtomKind::Align {
+            alignment,
+            offset,
+            nops,
+        } => {
+            let start = ctx.address_of(ctx.data.len() as i64).offset;
+            let count = padding(start, *alignment, *offset);
+            let use_nops = *nops && ctx.kind == SectionKind::Code;
+            emit_padding(start, count, use_nops, ctx);
+        }
+        AtomKind::Rorg(expr) => {
+            let offset = ctx.data.len() as i64;
+            let here = ctx.address_of(offset);
+            if let Some(value) = ctx.evaluate(expr, here, atom.span) {
+                let count = rorg_padding(value, offset, ctx.origin);
+                ctx.data.resize(ctx.data.len() + count as usize, 0);
+            }
+        }
     }
+}
+
+/// Writes padding starting at `address`. NOPs only fit at even addresses, so
+/// odd bytes at either end are zero.
+fn emit_padding(address: i64, count: i64, nops: bool, ctx: &mut EmitContext) {
+    let mut left = count;
+    if nops && address % 2 != 0 && left > 0 {
+        ctx.data.push(0);
+        left -= 1;
+    }
+    if nops {
+        while left >= 2 {
+            ctx.data.extend_from_slice(&[0x4E, 0x71]);
+            left -= 2;
+        }
+    }
+    ctx.data.resize(ctx.data.len() + left as usize, 0);
 }
 
 fn emit_data_item(item: &DataItem, size: Size, ctx: &mut EmitContext) {
@@ -194,10 +288,7 @@ fn emit_data_item(item: &DataItem, size: Size, ctx: &mut EmitContext) {
         }
         DataItem::Expr(expr, span) => (expr, *span),
     };
-    let pc = Value {
-        section: Some(ctx.section),
-        offset: ctx.data.len() as i64,
-    };
+    let pc = ctx.address_of(ctx.data.len() as i64);
     let bytes = size.bytes();
     let Some(value) = ctx.evaluate(expr, pc, span) else {
         ctx.put_zero(bytes);
@@ -232,10 +323,7 @@ fn emit_space(
     fill: &Option<crate::expr::Expr>,
     ctx: &mut EmitContext,
 ) {
-    let pc = Value {
-        section: Some(ctx.section),
-        offset: ctx.data.len() as i64,
-    };
+    let pc = ctx.address_of(ctx.data.len() as i64);
     let Some(value) = ctx.evaluate(count, pc, atom.span) else {
         return;
     };

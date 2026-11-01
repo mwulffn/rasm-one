@@ -79,6 +79,8 @@ pub struct Section {
     pub kind: SectionKind,
     /// Memory requirement.
     pub mem: MemKind,
+    /// Fixed address given by `org`. Its labels are constants.
+    pub origin: Option<u32>,
     /// Contents.
     pub data: Vec<u8>,
     /// Relocations, in increasing offset order.
@@ -243,7 +245,7 @@ mod tests {
     fn test_assemble_redefined_label_points_at_first_definition() {
         let assembly = run("foo: nop\nfoo: nop\n");
         let diagnostic = &assembly.diagnostics[0];
-        assert_eq!(diagnostic.code, "redefined-label");
+        assert_eq!(diagnostic.code, "redefined-symbol");
         assert_eq!(diagnostic.related[0].span.line, 1);
     }
 
@@ -312,6 +314,48 @@ mod tests {
     #[test]
     fn test_write_bin_refuses_failed_assembly() {
         assert_eq!(write_bin(&run(" bogus\n")), Err(OutputError::HasErrors));
+    }
+
+    #[test]
+    fn test_write_hunk_exe_org_is_error() {
+        let assembly = run(" org $1000\n nop\n");
+        assert_eq!(write_hunk_exe(&assembly), Err(OutputError::FixedAddress));
+    }
+
+    #[test]
+    fn test_line_table_is_sorted_when_sections_alternate() {
+        let source = " section a,code\n nop\n section b,data\n dc.w 1\n section a,code\n rts\n";
+        let assembly = run(source);
+        let order: Vec<_> = assembly
+            .line_table
+            .iter()
+            .map(|e| (e.section, e.offset, e.span.line))
+            .collect();
+        assert_eq!(order, [(0, 0, 2), (0, 2, 6), (1, 0, 4)]);
+    }
+
+    #[test]
+    fn test_line_table_covers_padding_directives() {
+        let assembly = run(" dc.b 1\n cnop 0,4\n dc.b 2\n");
+        let line = |offset| assembly.line_for_address(0, offset).map(|e| e.span.line);
+        assert_eq!(
+            (line(0), line(1), line(3), line(4)),
+            (Some(1), Some(2), Some(2), Some(3))
+        );
+    }
+
+    #[test]
+    fn test_end_stops_assembly() {
+        let assembly = run(" nop\n end\n bogus\n");
+        assert!(!assembly.has_errors());
+        assert_eq!(assembly.sections[0].data.len(), 2);
+    }
+
+    #[test]
+    fn test_fail_reports_its_message() {
+        let assembly = run(" fail \"oops\"\n");
+        assert_eq!(assembly.diagnostics[0].code, "fail");
+        assert!(assembly.diagnostics[0].message.contains("oops"));
     }
 
     #[test]

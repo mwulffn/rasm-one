@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::{Diagnostic, Related};
-use crate::expr::{BinaryOp, Expr, SymId, UnaryOp};
+use crate::expr::{eval, BinaryOp, Expr, SymId, UnaryOp, Value};
 use crate::isa::encode::Instruction;
 use crate::isa::table::{rows_for, InsnRow};
 use crate::isa::{IndexReg, Mode, Operand};
@@ -16,8 +16,10 @@ use crate::types::{Cpu, MemKind, SectionKind, Size};
 #[derive(Debug, Clone)]
 pub(crate) struct SymbolEntry {
     pub name: String,
-    /// Where the label is defined; `None` if it has only been referenced.
+    /// Where it is defined; `None` if it has only been referenced.
     pub defined_at: Option<Span>,
+    /// True if defined by `set`, which may define it again.
+    pub redefinable: bool,
 }
 
 /// A section being collected.
@@ -26,13 +28,16 @@ pub(crate) struct SectionEntry {
     pub name: String,
     pub kind: SectionKind,
     pub mem: MemKind,
-    pub atoms: Vec<Atom>,
+    /// Fixed address given by `org`.
+    pub origin: Option<i64>,
 }
 
 /// Output of parsing.
 #[derive(Debug, Default)]
 pub(crate) struct Program {
     pub sections: Vec<SectionEntry>,
+    /// All atoms, in source order.
+    pub atoms: Vec<Atom>,
     pub symbols: Vec<SymbolEntry>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -71,8 +76,48 @@ fn parse_reg(name: &str) -> Option<Reg> {
 }
 
 fn is_directive(name: &str) -> bool {
-    matches!(name, "dc" | "ds" | "blk" | "section")
+    matches!(
+        name,
+        "dc" | "ds"
+            | "blk"
+            | "dcb"
+            | "section"
+            | "even"
+            | "odd"
+            | "cnop"
+            | "align"
+            | "org"
+            | "rorg"
+            | "equ"
+            | "set"
+            | "reg"
+            | "equr"
+            | "rs"
+            | "rsreset"
+            | "rsset"
+            | "fail"
+            | "end"
+    ) || section_shortcut(name).is_some()
 }
+
+/// Maps `code`, `data_c` and so on to a section name, kind and memory type.
+fn section_shortcut(name: &str) -> Option<(&'static str, SectionKind, MemKind)> {
+    Some(match name {
+        "code" => ("CODE", SectionKind::Code, MemKind::Any),
+        "code_c" => ("CODE_C", SectionKind::Code, MemKind::Chip),
+        "code_f" => ("CODE_F", SectionKind::Code, MemKind::Fast),
+        "data" => ("DATA", SectionKind::Data, MemKind::Any),
+        "data_c" => ("DATA_C", SectionKind::Data, MemKind::Chip),
+        "data_f" => ("DATA_F", SectionKind::Data, MemKind::Fast),
+        "bss" => ("BSS", SectionKind::Bss, MemKind::Any),
+        "bss_c" => ("BSS_C", SectionKind::Bss, MemKind::Chip),
+        "bss_f" => ("BSS_F", SectionKind::Bss, MemKind::Fast),
+        _ => return None,
+    })
+}
+
+/// Name of the symbol holding the `rs` counter.
+const RS_COUNTER: &str = "__RS";
 
 /// Parses whole files into a [`Program`].
 pub(crate) struct Parser {
@@ -81,6 +126,14 @@ pub(crate) struct Parser {
     symbol_ids: HashMap<String, SymId>,
     sections_by_key: HashMap<(String, SectionKind), usize>,
     current: Option<usize>,
+    /// Register names defined by `equr`.
+    register_aliases: HashMap<String, Reg>,
+    /// Values of symbols already known while parsing, for directives whose
+    /// operand has to be constant at that point.
+    constants: HashMap<SymId, i64>,
+    rs_counter: i64,
+    /// Set by `end`.
+    ended: bool,
 }
 
 impl Parser {
@@ -91,6 +144,10 @@ impl Parser {
             symbol_ids: HashMap::new(),
             sections_by_key: HashMap::new(),
             current: None,
+            register_aliases: HashMap::new(),
+            constants: HashMap::new(),
+            rs_counter: 0,
+            ended: false,
         }
     }
 
@@ -100,6 +157,9 @@ impl Parser {
 
     pub fn parse_file(&mut self, file: FileId, source: &[u8]) {
         for (index, raw) in source.split(|&b| b == b'\n').enumerate() {
+            if self.ended {
+                break;
+            }
             let text = raw.strip_suffix(b"\r").unwrap_or(raw);
             let line = LineParser {
                 parser: self,
@@ -113,6 +173,14 @@ impl Parser {
         }
     }
 
+    /// Looks up a register by name, including names defined by `equr`.
+    fn reg(&self, name: &str) -> Option<Reg> {
+        self.register_aliases
+            .get(name)
+            .copied()
+            .or_else(|| parse_reg(name))
+    }
+
     fn symbol(&mut self, name: &str) -> SymId {
         if let Some(&id) = self.symbol_ids.get(name) {
             return id;
@@ -121,6 +189,7 @@ impl Parser {
         self.program.symbols.push(SymbolEntry {
             name: name.to_string(),
             defined_at: None,
+            redefinable: false,
         });
         self.symbol_ids.insert(name.to_string(), id);
         id
@@ -128,43 +197,95 @@ impl Parser {
 
     /// The current section, creating the default one if there is none yet.
     fn section(&mut self) -> usize {
-        match self.current {
-            Some(section) => section,
-            None => {
-                let section = self.open_section(DEFAULT_SECTION, SectionKind::Code, MemKind::Any);
-                self.current = Some(section);
-                section
-            }
-        }
-    }
-
-    /// Finds or creates a section. Name and kind identify it, so one name can
-    /// be used for both code and data. A later memory requirement replaces an
-    /// earlier one.
-    fn open_section(&mut self, name: &str, kind: SectionKind, mem: MemKind) -> usize {
-        let key = (name.to_string(), kind);
-        if let Some(&section) = self.sections_by_key.get(&key) {
-            if mem != MemKind::Any {
-                self.program.sections[section].mem = mem;
-            }
+        if let Some(section) = self.current {
             return section;
         }
-        let section = self.program.sections.len();
+        let key = (DEFAULT_SECTION.to_string(), SectionKind::Code);
+        let section = self.add_section(DEFAULT_SECTION, SectionKind::Code, MemKind::Any, None);
+        self.sections_by_key.insert(key, section);
+        self.current = Some(section);
+        section
+    }
+
+    fn add_section(
+        &mut self,
+        name: &str,
+        kind: SectionKind,
+        mem: MemKind,
+        origin: Option<i64>,
+    ) -> usize {
         self.program.sections.push(SectionEntry {
             name: name.to_string(),
             kind,
             mem,
-            atoms: Vec::new(),
+            origin,
         });
-        self.sections_by_key.insert(key, section);
-        section
+        self.program.sections.len() - 1
+    }
+
+    /// Finds or creates a section and makes it current. Name and kind identify
+    /// it, so one name can be used for both code and data. A section without a
+    /// memory type can gain one, but one with a type can't change it.
+    fn open_section(
+        &mut self,
+        name: &str,
+        kind: SectionKind,
+        mem: MemKind,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let key = (name.to_string(), kind);
+        let section = match self.sections_by_key.get(&key) {
+            Some(&section) => {
+                let existing = &mut self.program.sections[section];
+                if existing.mem == MemKind::Any {
+                    existing.mem = mem;
+                } else if existing.mem != mem {
+                    return Err(Diagnostic::error(
+                        "section-attributes",
+                        format!("section {name} already has a different memory type"),
+                        span,
+                    ));
+                }
+                section
+            }
+            None => {
+                let section = self.add_section(name, kind, mem, None);
+                self.sections_by_key.insert(key, section);
+                section
+            }
+        };
+        self.current = Some(section);
+        Ok(())
     }
 
     fn push_atom(&mut self, kind: AtomKind, span: Span) {
         let section = self.section();
-        self.program.sections[section]
-            .atoms
-            .push(Atom { kind, span });
+        self.program.atoms.push(Atom {
+            kind,
+            span,
+            section,
+        });
+    }
+
+    /// Evaluates an operand that must be constant by this point in the source.
+    fn constant(&self, expr: &Expr, span: Span) -> Result<i64, Diagnostic> {
+        // A `*` evaluates to a section offset, which is not constant.
+        let pc = Value {
+            section: Some(usize::MAX),
+            offset: 0,
+        };
+        let lookup = |id: SymId| self.constants.get(&id).map(|&v| Value::abs(v));
+        match eval(expr, pc, &lookup) {
+            Ok(Value {
+                section: None,
+                offset,
+            }) => Ok(offset),
+            _ => Err(Diagnostic::error(
+                "not-constant",
+                "expression must be constant here",
+                span,
+            )),
+        }
     }
 }
 
@@ -301,34 +422,226 @@ impl LineParser<'_, '_> {
                 ));
             }
         }
-        if !self.lexer.at_blank() && self.peek()? != Tok::End {
+        let at_equals = self.peek_is(Punct::Eq)?;
+        if !self.lexer.at_blank() && !at_equals && self.peek()? != Tok::End {
             return Err(self.error_at("syntax", "unexpected text after label", self.lexer.pos()));
         }
         self.parse_statement(Some((name, span)))
     }
 
     fn define_label(&mut self, name: &str, span: Span) -> Result<(), Diagnostic> {
-        if parse_reg(name).is_some() {
+        let id = self.claim_symbol(name, span, false)?;
+        self.parser.push_atom(AtomKind::Label(id), span);
+        Ok(())
+    }
+
+    /// Marks a symbol as defined, failing if it can't be defined (again).
+    fn claim_symbol(
+        &mut self,
+        name: &str,
+        span: Span,
+        redefinable: bool,
+    ) -> Result<SymId, Diagnostic> {
+        if self.parser.reg(name).is_some() {
             return Err(Diagnostic::error(
                 "reserved-name",
-                format!("{name} is a register and cannot be a label"),
+                format!("{name} is a register and cannot be a symbol"),
                 span,
             ));
         }
         let id = self.parser.symbol(name);
         let entry = &mut self.parser.program.symbols[id as usize];
         if let Some(first) = entry.defined_at {
-            let mut diagnostic =
-                Diagnostic::error("redefined-label", format!("label {name} redefined"), span);
-            diagnostic.related.push(Related {
-                message: "first defined here".to_string(),
-                span: first,
-            });
-            return Err(diagnostic);
+            if !(redefinable && entry.redefinable) {
+                let mut diagnostic =
+                    Diagnostic::error("redefined-symbol", format!("symbol {name} redefined"), span);
+                diagnostic.related.push(Related {
+                    message: "first defined here".to_string(),
+                    span: first,
+                });
+                return Err(diagnostic);
+            }
         }
         entry.defined_at = Some(span);
-        self.parser.push_atom(AtomKind::Label(id), span);
+        entry.redefinable = redefinable;
+        Ok(id)
+    }
+
+    /// Defines a symbol as `expr`, recording its value if it's already known.
+    fn define_equate(
+        &mut self,
+        name: &str,
+        expr: Expr,
+        redefinable: bool,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let id = self.claim_symbol(name, span, redefinable)?;
+        match self.parser.constant(&expr, span) {
+            Ok(value) => self.parser.constants.insert(id, value),
+            Err(_) => self.parser.constants.remove(&id),
+        };
+        self.parser.push_atom(AtomKind::Equate(id, expr), span);
         Ok(())
+    }
+
+    /// Parses the expression of `equ`, `=` or `set` and defines the label.
+    fn parse_equate(
+        &mut self,
+        label: Option<(String, Span)>,
+        redefinable: bool,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let (name, label_span) = self.required_label(label, span)?;
+        let expr = self.parse_expr()?;
+        self.expect_end()?;
+        self.define_equate(&name, expr, redefinable, label_span)
+    }
+
+    fn required_label(
+        &self,
+        label: Option<(String, Span)>,
+        span: Span,
+    ) -> Result<(String, Span), Diagnostic> {
+        label.ok_or_else(|| Diagnostic::error("syntax", "a label is required here", span))
+    }
+
+    fn expect_end(&self) -> Result<(), Diagnostic> {
+        if self.peek()? == Tok::End {
+            return Ok(());
+        }
+        Err(self.error_at("syntax", "unexpected text in operand", self.lexer.pos()))
+    }
+
+    fn no_size(&self, size: Option<Size>, span: Span) -> Result<(), Diagnostic> {
+        match size {
+            None => Ok(()),
+            Some(_) => Err(Diagnostic::error(
+                "bad-size",
+                "this directive takes no size",
+                span,
+            )),
+        }
+    }
+
+    fn parse_constant(&mut self) -> Result<i64, Diagnostic> {
+        let start = self.lexer.pos();
+        let expr = self.parse_expr()?;
+        self.parser.constant(&expr, self.span(start))
+    }
+
+    /// Parses the operands of the alignment directives into an atom.
+    fn parse_alignment(&mut self, directive: &str, span: Span) -> Result<AtomKind, Diagnostic> {
+        let (alignment, offset, nops) = match directive {
+            "even" => (2, 0, false),
+            "odd" => (2, 1, false),
+            "align" => {
+                let bits = self.parse_constant()?;
+                self.expect_end()?;
+                if !(0..=31).contains(&bits) {
+                    return Err(Diagnostic::error(
+                        "out-of-range",
+                        "align takes a number of bits from 0 to 31",
+                        span,
+                    ));
+                }
+                (1 << bits, 0, false)
+            }
+            _ => {
+                let offset = self.parse_constant()?;
+                self.expect(Punct::Comma, ",")?;
+                let alignment = self.parse_constant()?;
+                self.expect_end()?;
+                if alignment < 0 || offset < 0 {
+                    return Err(Diagnostic::error(
+                        "out-of-range",
+                        "cnop takes non-negative values",
+                        span,
+                    ));
+                }
+                (alignment, offset, true)
+            }
+        };
+        Ok(AtomKind::Align {
+            alignment,
+            offset,
+            nops,
+        })
+    }
+
+    /// `org` starts a new section at a fixed address.
+    fn parse_org(&mut self, span: Span) -> Result<(), Diagnostic> {
+        let address = self.parse_constant()?;
+        self.expect_end()?;
+        if !(0..=0xFFFF_FFFF).contains(&address) {
+            return Err(Diagnostic::error(
+                "out-of-range",
+                "org address out of range",
+                span,
+            ));
+        }
+        let name = format!("org{address:x}");
+        let section =
+            self.parser
+                .add_section(&name, SectionKind::Code, MemKind::Any, Some(address));
+        self.parser.current = Some(section);
+        Ok(())
+    }
+
+    /// `reg` gives a symbol the mask of a register list.
+    fn parse_reg_directive(
+        &mut self,
+        label: Option<(String, Span)>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let (name, label_span) = self.required_label(label, span)?;
+        let start = self.lexer.pos();
+        let mask = match self.parse_mode()? {
+            Mode::DataReg(n) => 1 << n,
+            Mode::AddrReg(n) => 1 << (n + 8),
+            Mode::RegList(mask) => mask,
+            _ => return Err(self.error_at("syntax", "register list expected", start)),
+        };
+        self.expect_end()?;
+        self.define_equate(&name, Expr::Num(i64::from(mask)), false, label_span)
+    }
+
+    /// `equr` gives a data or address register another name.
+    fn parse_equr(&mut self, label: Option<(String, Span)>, span: Span) -> Result<(), Diagnostic> {
+        let (name, label_span) = self.required_label(label, span)?;
+        let start = self.lexer.pos();
+        let reg = self.eat_ident()?.and_then(|word| self.parser.reg(&word));
+        let reg = reg
+            .filter(|reg| matches!(reg, Reg::Data(_) | Reg::Addr(_)))
+            .ok_or_else(|| self.error_at("syntax", "data or address register expected", start))?;
+        self.expect_end()?;
+        self.claim_symbol(&name, label_span, false)?;
+        self.parser.register_aliases.insert(name, reg);
+        Ok(())
+    }
+
+    /// `rs` gives its label the counter's value and advances the counter.
+    fn parse_rs(
+        &mut self,
+        label: Option<(String, Span)>,
+        size: Option<Size>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let size = self.data_size(size, span)?;
+        let count = self.parse_constant()?;
+        self.expect_end()?;
+        let value = self.parser.rs_counter;
+        if let Some((name, label_span)) = label {
+            self.define_equate(&name, Expr::Num(value), false, label_span)?;
+        }
+        self.set_rs_counter(
+            value.wrapping_add(count.wrapping_mul(i64::from(size.bytes()))),
+            span,
+        )
+    }
+
+    fn set_rs_counter(&mut self, value: i64, span: Span) -> Result<(), Diagnostic> {
+        self.parser.rs_counter = value;
+        self.define_equate(RS_COUNTER, Expr::Num(value), true, span)
     }
 
     /// Parses what follows the label, if any, and defines the label. A label
@@ -342,6 +655,11 @@ impl LineParser<'_, '_> {
         }
         self.lexer.skip_blanks();
         let start = self.lexer.pos();
+        if label.is_some() && self.eat(Punct::Eq)? {
+            self.lexer.skip_blanks();
+            let span = self.span(start);
+            return self.parse_equate(label, false, span);
+        }
         let Some(name) = self.eat_ident()? else {
             if let Some((label, span)) = label {
                 self.define_label(&label, span)?;
@@ -369,19 +687,97 @@ impl LineParser<'_, '_> {
             return Ok(());
         }
 
-        if let Some((label, label_span)) = label {
-            self.define_label(&label, label_span)?;
-        }
         self.lexer.skip_blanks();
+        // These use the label as the symbol they define.
+        match lower.as_str() {
+            "equ" => {
+                self.no_size(size, span)?;
+                return self.parse_equate(label, false, span);
+            }
+            "set" => {
+                self.no_size(size, span)?;
+                return self.parse_equate(label, true, span);
+            }
+            "reg" => {
+                self.no_size(size, span)?;
+                return self.parse_reg_directive(label, span);
+            }
+            "equr" => {
+                self.no_size(size, span)?;
+                return self.parse_equr(label, span);
+            }
+            "rs" => return self.parse_rs(label, size, span),
+            _ => {}
+        }
+        // These move the location first, so a label takes the new location.
+        match lower.as_str() {
+            "even" | "odd" | "align" | "cnop" => {
+                self.no_size(size, span)?;
+                let mut atom = self.parse_alignment(&lower, span)?;
+                // vasm pads with zeros if a label shares the line with cnop.
+                if let (AtomKind::Align { nops, .. }, true) = (&mut atom, label.is_some()) {
+                    *nops = false;
+                }
+                self.parser.push_atom(atom, span);
+                return self.define_optional_label(label);
+            }
+            "org" => {
+                self.no_size(size, span)?;
+                self.parse_org(span)?;
+                return self.define_optional_label(label);
+            }
+            _ => {}
+        }
+        self.define_optional_label(label)?;
+        if lower == "rorg" {
+            self.no_size(size, span)?;
+            let expr = self.parse_expr()?;
+            self.expect_end()?;
+            self.parser.push_atom(AtomKind::Rorg(expr), span);
+            return Ok(());
+        }
+        if let Some((section, kind, mem)) = section_shortcut(&lower) {
+            self.no_size(size, span)?;
+            return self.parser.open_section(section, kind, mem, span);
+        }
         match lower.as_str() {
             "dc" => self.parse_dc(size, span),
-            "ds" | "blk" => self.parse_space(&lower, size, span),
+            "ds" | "blk" | "dcb" => self.parse_space(&lower, size, span),
             "section" => self.parse_section(size, span),
+            "rsreset" => {
+                self.no_size(size, span)?;
+                self.set_rs_counter(0, span)
+            }
+            "rsset" => {
+                self.no_size(size, span)?;
+                let value = self.parse_constant()?;
+                self.expect_end()?;
+                self.set_rs_counter(value, span)
+            }
+            "fail" => {
+                let text = String::from_utf8_lossy(self.lexer.rest()).into_owned();
+                Err(Diagnostic::error(
+                    "fail",
+                    format!("fail: {}", text.trim()),
+                    span,
+                ))
+            }
+            "end" => {
+                self.parser.ended = true;
+                Ok(())
+            }
             _ => Err(Diagnostic::error(
                 "unknown-mnemonic",
                 format!("unknown mnemonic {name}"),
                 span,
             )),
+        }
+    }
+
+    fn define_optional_label(&mut self, label: Option<(String, Span)>) -> Result<(), Diagnostic> {
+        match label {
+            Some((label, span)) => self.define_label(&label, span),
+            None => Ok(()),
         }
     }
 
@@ -519,7 +915,7 @@ impl LineParser<'_, '_> {
             return Ok(Mode::Immediate(self.parse_expr()?));
         }
         if let Tok::Ident(name) = self.peek()? {
-            match parse_reg(name) {
+            match self.parser.reg(name) {
                 Some(Reg::Data(n)) => return self.parse_after_register(n, Mode::DataReg(n)),
                 Some(Reg::Addr(n)) => return self.parse_after_register(n + 8, Mode::AddrReg(n)),
                 Some(Reg::Sr) => {
@@ -585,7 +981,11 @@ impl LineParser<'_, '_> {
 
     fn parse_list_register(&mut self) -> Result<u8, Diagnostic> {
         let start = self.lexer.pos();
-        match self.eat_ident()?.as_deref().and_then(parse_reg) {
+        match self
+            .eat_ident()?
+            .as_deref()
+            .and_then(|word| self.parser.reg(word))
+        {
             Some(Reg::Data(n)) => Ok(n),
             Some(Reg::Addr(n)) => Ok(n + 8),
             _ => Err(self.error_at("syntax", "register expected in list", start)),
@@ -598,7 +998,7 @@ impl LineParser<'_, '_> {
         let saved = self.lexer.pos();
         if self.eat(Punct::Minus)? && self.eat(Punct::LParen)? {
             if let Some(name) = self.eat_ident()? {
-                if let Some(Reg::Addr(n)) = parse_reg(&name) {
+                if let Some(Reg::Addr(n)) = self.parser.reg(&name) {
                     if self.eat(Punct::RParen)? {
                         return Ok(Some(Mode::PreDec(n)));
                     }
@@ -642,7 +1042,7 @@ impl LineParser<'_, '_> {
 
     fn next_is_base_register(&self) -> Result<bool, Diagnostic> {
         Ok(match self.peek()? {
-            Tok::Ident(name) => matches!(parse_reg(name), Some(Reg::Addr(_) | Reg::Pc)),
+            Tok::Ident(name) => matches!(self.parser.reg(name), Some(Reg::Addr(_) | Reg::Pc)),
             _ => false,
         })
     }
@@ -653,7 +1053,7 @@ impl LineParser<'_, '_> {
         let base = self
             .eat_ident()?
             .as_deref()
-            .and_then(parse_reg)
+            .and_then(|word| self.parser.reg(word))
             .filter(|reg| !matches!(reg, Reg::Data(_)));
         let Some(base) = base else {
             return Err(self.error_at("syntax", "address register or PC expected", start));
@@ -674,7 +1074,11 @@ impl LineParser<'_, '_> {
 
     fn parse_index(&mut self) -> Result<IndexReg, Diagnostic> {
         let start = self.lexer.pos();
-        let reg = match self.eat_ident()?.as_deref().and_then(parse_reg) {
+        let reg = match self
+            .eat_ident()?
+            .as_deref()
+            .and_then(|word| self.parser.reg(word))
+        {
             Some(Reg::Data(n)) => n,
             Some(Reg::Addr(n)) => n + 8,
             _ => return Err(self.error_at("syntax", "index register expected", start)),
@@ -731,7 +1135,7 @@ impl LineParser<'_, '_> {
     ) -> Result<(), Diagnostic> {
         let size = self.data_size(size, span)?;
         let count = self.parse_expr()?;
-        let fill = if directive == "blk" && self.eat(Punct::Comma)? {
+        let fill = if directive != "ds" && self.eat(Punct::Comma)? {
             Some(self.parse_expr()?)
         } else {
             None
@@ -790,9 +1194,7 @@ impl LineParser<'_, '_> {
         if self.peek()? != Tok::End {
             return Err(self.error_at("syntax", "unexpected text in section", self.lexer.pos()));
         }
-        let section = self.parser.open_section(&name, kind, mem);
-        self.parser.current = Some(section);
-        Ok(())
+        self.parser.open_section(&name, kind, mem, span)
     }
 
     fn parse_expr(&mut self) -> Result<Expr, Diagnostic> {
@@ -851,7 +1253,7 @@ impl LineParser<'_, '_> {
                 let name = name.to_string();
                 self.advance()?;
                 let span = self.span(start);
-                if parse_reg(&name).is_some() {
+                if self.parser.reg(&name).is_some() {
                     return Err(Diagnostic::error(
                         "register-in-expression",
                         format!("register {name} cannot be used in an expression"),
