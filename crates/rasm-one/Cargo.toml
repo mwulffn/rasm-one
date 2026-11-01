@@ -6,3 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[dependencies]
+thiserror = "1"
+
+[dev-dependencies]
+rasm-oracle = { path = "../rasm-oracle" }
