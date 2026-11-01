@@ -27,6 +27,14 @@ pub enum OutputError {
     /// `org` gives fixed addresses, but this format is relocatable.
     #[error("org cannot be used in a relocatable format")]
     FixedAddress,
+    /// A symbol from another object file is used, but this format can't link.
+    #[error("external symbol {name} needs a linker; write an object file instead")]
+    UnresolvedExternal {
+        /// The symbol.
+        name: String,
+        /// Where it is used.
+        span: Span,
+    },
     /// The format cannot represent this relocation.
     #[error("{size}-byte relocation at {section}+{offset:#x} is not supported by this format")]
     UnsupportedReloc {

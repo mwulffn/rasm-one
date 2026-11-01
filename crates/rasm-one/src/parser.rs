@@ -6,7 +6,7 @@ use std::rc::Rc;
 use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
-use crate::expr::{eval, BinaryOp, Expr, SymId, UnaryOp, Value};
+use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
 use crate::isa::encode::Instruction;
 use crate::isa::table::{rows_for, InsnRow};
 use crate::isa::{IndexReg, Mode, Operand};
@@ -23,6 +23,10 @@ pub(crate) struct SymbolEntry {
     pub defined_at: Option<Span>,
     /// True if defined by `set`, which may define it again.
     pub redefinable: bool,
+    /// True if declared by `xref`.
+    pub external: bool,
+    /// Where `xdef` or `::` exported it.
+    pub exported_at: Option<Span>,
 }
 
 /// A section being collected.
@@ -107,6 +111,9 @@ fn is_directive(name: &str) -> bool {
             | "include"
             | "incbin"
             | "incdir"
+            | "xref"
+            | "xdef"
+            | "public"
             | "macro"
             | "endm"
             | "mexit"
@@ -866,6 +873,8 @@ impl<'f> Parser<'f> {
             name: name.to_string(),
             defined_at: None,
             redefinable: false,
+            external: false,
+            exported_at: None,
         });
         self.symbol_ids.insert(key, id);
         id
@@ -948,13 +957,13 @@ impl<'f> Parser<'f> {
     fn constant(&self, expr: &Expr, span: Span) -> Result<i64, Diagnostic> {
         // A `*` evaluates to a section offset, which is not constant.
         let pc = Value {
-            section: Some(usize::MAX),
+            base: Base::Section(usize::MAX),
             offset: 0,
         };
         let lookup = |id: SymId| self.constants.get(&id).map(|&v| Value::abs(v));
         match eval(expr, pc, &lookup) {
             Ok(Value {
-                section: None,
+                base: Base::Absolute,
                 offset,
             }) => Ok(offset),
             _ => Err(Diagnostic::error(
@@ -1093,8 +1102,8 @@ impl LineParser<'_, '_, '_> {
         let start = self.lexer.pos();
         if let Some(name) = self.eat_label_name()? {
             if self.peek_is(Punct::Colon)? {
-                self.eat_colons()?;
                 let span = self.span(start);
+                self.eat_colons(&name, span)?;
                 return self.parse_statement(Some((name, span)));
             }
         }
@@ -1111,9 +1120,72 @@ impl LineParser<'_, '_, '_> {
         self.eat_ident()
     }
 
-    fn eat_colons(&mut self) -> Result<(), Diagnostic> {
+    /// Reads the colons after a label. A second one exports it.
+    fn eat_colons(&mut self, label: &str, span: Span) -> Result<(), Diagnostic> {
         self.expect(Punct::Colon, "colon")?;
-        self.eat(Punct::Colon)?;
+        if self.eat(Punct::Colon)? {
+            self.export_symbol(label, span)?;
+        }
+        Ok(())
+    }
+
+    fn export_symbol(&mut self, name: &str, span: Span) -> Result<(), Diagnostic> {
+        if is_local_label(name) {
+            return Err(Diagnostic::error(
+                "local-export",
+                format!("local label {name} cannot be exported"),
+                span,
+            ));
+        }
+        let id = self.parser.symbol(name);
+        self.parser.program.symbols[id as usize].exported_at = Some(span);
+        Ok(())
+    }
+
+    /// `xref` and `xdef` take a list of names.
+    fn parse_symbol_list(&mut self, directive: &str, span: Span) -> Result<(), Diagnostic> {
+        loop {
+            let start = self.lexer.pos();
+            let Some(name) = self.eat_label_name()? else {
+                return Err(self.error_at("syntax", "symbol name expected", start));
+            };
+            let name_span = self.span(start);
+            if directive == "xref" {
+                self.declare_external(&name, name_span)?;
+            } else {
+                self.export_symbol(&name, name_span)?;
+            }
+            if !self.eat(Punct::Comma)? {
+                break;
+            }
+        }
+        self.expect_end().map_err(|_| {
+            Diagnostic::error(
+                "syntax",
+                format!("unexpected text after {directive} list"),
+                span,
+            )
+        })
+    }
+
+    fn declare_external(&mut self, name: &str, span: Span) -> Result<(), Diagnostic> {
+        if is_local_label(name) {
+            return Err(Diagnostic::error(
+                "local-export",
+                format!("local label {name} cannot be external"),
+                span,
+            ));
+        }
+        let id = self.parser.symbol(name);
+        let entry = &mut self.parser.program.symbols[id as usize];
+        if entry.defined_at.is_some() {
+            return Err(Diagnostic::error(
+                "external-defined",
+                format!("{name} is already defined and cannot be external"),
+                span,
+            ));
+        }
+        entry.external = true;
         Ok(())
     }
 
@@ -1124,7 +1196,7 @@ impl LineParser<'_, '_, '_> {
         };
         let span = self.span(start);
         if self.peek_is(Punct::Colon)? {
-            self.eat_colons()?;
+            self.eat_colons(&name, span)?;
         } else {
             let lower = name.to_ascii_lowercase();
             if rows_for(&lower).is_some() || is_directive(&lower) {
@@ -1167,6 +1239,13 @@ impl LineParser<'_, '_, '_> {
         }
         let id = self.parser.symbol(name);
         let entry = &mut self.parser.program.symbols[id as usize];
+        if entry.external {
+            return Err(Diagnostic::error(
+                "external-defined",
+                format!("{name} is declared external and cannot be defined here"),
+                span,
+            ));
+        }
         if let Some(first) = entry.defined_at {
             if !(redefinable && entry.redefinable) {
                 let mut diagnostic =
@@ -1651,6 +1730,11 @@ impl LineParser<'_, '_, '_> {
             return self.parse_if(&lower, span);
         }
         match lower.as_str() {
+            "xref" | "xdef" | "public" => {
+                self.no_size(size, span)?;
+                let directive = if lower == "xref" { "xref" } else { "xdef" };
+                return self.parse_symbol_list(directive, span);
+            }
             "else" | "elif" | "elseif" | "endc" | "endif" => {
                 self.no_size(size, span)?;
                 return self.parse_block_change(&lower, span);

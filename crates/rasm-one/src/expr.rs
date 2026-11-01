@@ -44,17 +44,28 @@ pub(crate) enum Expr {
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
 }
 
-/// A value: a constant, or an offset from the start of a section.
+/// What a value's offset is relative to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Base {
+    /// Nothing: the value is a constant.
+    Absolute,
+    /// The start of a section.
+    Section(usize),
+    /// An external symbol, resolved by a linker.
+    External(SymId),
+}
+
+/// A value: a constant, or an offset from something placed later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Value {
-    pub section: Option<usize>,
+    pub base: Base,
     pub offset: i64,
 }
 
 impl Value {
     pub fn abs(offset: i64) -> Self {
         Self {
-            section: None,
+            base: Base::Absolute,
             offset,
         }
     }
@@ -95,25 +106,20 @@ pub(crate) fn eval(
 }
 
 fn binary(op: BinaryOp, a: Value, b: Value) -> Result<Value, EvalError> {
-    match (op, a.section, b.section) {
-        (BinaryOp::Add, Some(_), None) | (BinaryOp::Sub, Some(_), None) => {
-            let delta = if op == BinaryOp::Add {
-                b.offset
-            } else {
-                b.offset.wrapping_neg()
-            };
+    match (op, a.base, b.base) {
+        (BinaryOp::Add, base, Base::Absolute) | (BinaryOp::Add, Base::Absolute, base) => {
             return Ok(Value {
-                section: a.section,
-                offset: a.offset.wrapping_add(delta),
-            });
-        }
-        (BinaryOp::Add, None, Some(_)) => {
-            return Ok(Value {
-                section: b.section,
+                base,
                 offset: a.offset.wrapping_add(b.offset),
             });
         }
-        (BinaryOp::Sub, Some(x), Some(y)) if x == y => {
+        (BinaryOp::Sub, base, Base::Absolute) => {
+            return Ok(Value {
+                base,
+                offset: a.offset.wrapping_sub(b.offset),
+            });
+        }
+        (BinaryOp::Sub, Base::Section(x), Base::Section(y)) if x == y => {
             return Ok(Value::abs(a.offset.wrapping_sub(b.offset)));
         }
         _ => {}
@@ -160,9 +166,9 @@ fn truth(b: bool) -> i64 {
 }
 
 fn absolute(value: Value) -> Result<i64, EvalError> {
-    match value.section {
-        None => Ok(value.offset),
-        Some(_) => Err(EvalError::NotAbsolute),
+    match value.base {
+        Base::Absolute => Ok(value.offset),
+        _ => Err(EvalError::NotAbsolute),
     }
 }
 
@@ -195,7 +201,7 @@ mod tests {
     #[test]
     fn test_binary_section_difference_is_absolute() {
         let at = |offset| Value {
-            section: Some(0),
+            base: Base::Section(0),
             offset,
         };
         assert_eq!(binary(BinaryOp::Sub, at(6), at(2)), Ok(Value::abs(4)));
@@ -204,11 +210,32 @@ mod tests {
     #[test]
     fn test_binary_different_sections_are_not_absolute() {
         let at = |section| Value {
-            section: Some(section),
+            base: Base::Section(section),
             offset: 0,
         };
         assert_eq!(
             binary(BinaryOp::Sub, at(0), at(1)),
+            Err(EvalError::NotAbsolute)
+        );
+    }
+
+    #[test]
+    fn test_binary_external_keeps_its_base_only_with_constants() {
+        let external = Value {
+            base: Base::External(7),
+            offset: 0,
+        };
+        let moved = binary(BinaryOp::Add, Value::abs(2), external);
+        assert_eq!(
+            moved.map(|v| (v.base, v.offset)),
+            Ok((Base::External(7), 2))
+        );
+        assert_eq!(
+            binary(BinaryOp::Sub, external, external),
+            Err(EvalError::NotAbsolute)
+        );
+        assert_eq!(
+            binary(BinaryOp::Mul, external, Value::abs(2)),
             Err(EvalError::NotAbsolute)
         );
     }

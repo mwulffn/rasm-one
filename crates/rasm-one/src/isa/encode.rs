@@ -5,12 +5,12 @@
 //! an error, and layout never disagrees with encoding.
 
 use crate::error::Diagnostic;
-use crate::expr::{eval, EvalError, Expr, SymId, Value};
+use crate::expr::{eval, Base, EvalError, Expr, SymId, Value};
 use crate::isa::table::{Encoding, InsnRow};
 use crate::isa::{IndexReg, Mode, Operand};
 use crate::source::Span;
 use crate::types::{SectionKind, Size};
-use crate::{Reloc, RelocKind};
+use crate::{Reloc, RelocKind, RelocTarget};
 
 /// An instruction matched to its table row.
 #[derive(Debug, Clone)]
@@ -90,7 +90,7 @@ impl EmitContext<'_> {
         match self.origin {
             Some(origin) => Value::abs(origin + offset),
             None => Value {
-                section: Some(self.section),
+                base: Base::Section(self.section),
                 offset,
             },
         }
@@ -143,10 +143,19 @@ impl EmitContext<'_> {
         self.data.extend_from_slice(&all[4 - bytes as usize..]);
     }
 
-    /// Records a relocation for `value` if it is section-relative, then
-    /// writes it. Relocations always cover the field about to be written.
+    /// What a value must be relocated against, if anything.
+    fn reloc_target(&self, base: Base) -> Option<RelocTarget> {
+        match base {
+            Base::Absolute => None,
+            Base::Section(section) => Some(RelocTarget::Section(section)),
+            Base::External(id) => Some(RelocTarget::External((self.name_of)(id))),
+        }
+    }
+
+    /// Records a relocation for `value` if it needs one, then writes it.
+    /// Relocations always cover the field about to be written.
     pub fn put_value(&mut self, value: Value, bytes: u32) {
-        if let Some(target) = value.section {
+        if let Some(target) = self.reloc_target(value.base) {
             self.relocs.push(Reloc {
                 offset: self.data.len() as u32,
                 size: bytes as u8,
@@ -374,7 +383,7 @@ fn opcode_constant(
     let Some(value) = ctx.evaluate(expr, pc, op.span) else {
         return 0;
     };
-    if value.section.is_some() {
+    if value.base != Base::Absolute {
         ctx.error("not-absolute", "immediate must be a constant", op.span);
         return 0;
     }
@@ -444,18 +453,29 @@ fn emit_extension(op: &Operand, size: Size, ctx: &mut EmitContext) {
             None => ctx.put_zero(4),
         },
         Mode::PcDisp(expr) => {
-            let d = pc_relative(expr, op.span, ctx).unwrap_or(0);
-            if !(-0x8000..=0x7FFF).contains(&d) {
-                ctx.error("out-of-range", "displacement out of range", op.span);
-            }
-            ctx.put(d as u32, 2);
+            let target = ctx.evaluate(expr, pc, op.span);
+            let extension = ctx.offset();
+            emit_pc_field(
+                target,
+                extension,
+                2,
+                "displacement out of range",
+                op.span,
+                ctx,
+            );
         }
         Mode::PcIndex(expr, index) => {
-            let d = pc_relative(expr, op.span, ctx).unwrap_or(0);
-            if !(-0x80..=0x7F).contains(&d) {
-                ctx.error("out-of-range", "displacement out of range", op.span);
-            }
-            ctx.put(u32::from(index_bits(*index) | (d as u16 & 0xFF)), 2);
+            let target = ctx.evaluate(expr, pc, op.span);
+            let extension = ctx.offset();
+            ctx.put(u32::from(index_bits(*index) >> 8), 1);
+            emit_pc_field(
+                target,
+                extension,
+                1,
+                "displacement out of range",
+                op.span,
+                ctx,
+            );
         }
         Mode::Immediate(expr) => emit_immediate(expr, size, op.span, ctx),
         _ => {}
@@ -482,22 +502,52 @@ fn emit_short_field(expr: &Expr, range_message: &str, span: Span, ctx: &mut Emit
     );
 }
 
-/// Returns the distance from the current address to the target. A constant
-/// target is an address, not a displacement.
-fn pc_relative(expr: &Expr, span: Span, ctx: &mut EmitContext) -> Option<i64> {
-    let pc = ctx.star();
-    let value = ctx.evaluate(expr, pc, span)?;
-    match value.section {
-        Some(section) if section != ctx.section => {
-            ctx.error(
-                "cross-section",
-                "PC-relative reference to another section",
+/// Writes a PC-relative field, whose PC is at section position `pc`. A target
+/// in the same section, or a constant address, gives a known distance. Anything
+/// else needs a relocation, and the field holds what the linker must add to the
+/// target's address: the offset, adjusted for where the field is relative to PC.
+/// Returns the distance if it is known.
+fn emit_pc_field(
+    target: Option<Value>,
+    pc: i64,
+    bytes: u32,
+    range_message: &str,
+    span: Span,
+    ctx: &mut EmitContext,
+) -> Option<i64> {
+    let Some(value) = target else {
+        ctx.put_zero(bytes);
+        return None;
+    };
+    let is_local = match value.base {
+        Base::Absolute => true,
+        Base::Section(section) => section == ctx.section,
+        Base::External(_) => false,
+    };
+    if !is_local {
+        if let Some(target) = ctx.reloc_target(value.base) {
+            ctx.relocs.push(Reloc {
+                offset: ctx.data.len() as u32,
+                size: bytes as u8,
+                target,
+                kind: RelocKind::PcRelative,
                 span,
-            );
-            None
+            });
         }
-        _ => Some(value.offset - ctx.address_of(ctx.offset()).offset),
+        ctx.put((value.offset + ctx.offset() - pc) as u32, bytes);
+        return None;
     }
+    let distance = value.offset - ctx.address_of(pc).offset;
+    let (min, max) = if bytes == 1 {
+        (-0x80, 0x7F)
+    } else {
+        (-0x8000, 0x7FFF)
+    };
+    if !(min..=max).contains(&distance) {
+        ctx.error("out-of-range", range_message, span);
+    }
+    ctx.put(distance as u32, bytes);
+    Some(distance)
 }
 
 fn emit_immediate(expr: &Expr, size: Size, span: Span, ctx: &mut EmitContext) {
@@ -524,39 +574,34 @@ fn emit_immediate(expr: &Expr, size: Size, span: Span, ctx: &mut EmitContext) {
     }
 }
 
-/// Returns the distance from the end of the opcode word to a branch target,
-/// which must be in the current section or a constant.
-fn branch_distance(target: &Operand, ctx: &mut EmitContext) -> Option<i64> {
+fn branch_target(target: &Operand, ctx: &mut EmitContext) -> Option<Value> {
     let Mode::AbsLong(expr) = &target.mode else {
         // Row matching only lets a bare address through.
         return None;
     };
     let pc = ctx.star();
-    let value = ctx.evaluate(expr, pc, target.span)?;
-    if value.section.is_some_and(|s| s != ctx.section) {
-        ctx.error("cross-section", "branch to another section", target.span);
-        return None;
-    }
-    Some(value.offset - ctx.address_of(ctx.instruction_start + 2).offset)
+    ctx.evaluate(expr, pc, target.span)
 }
 
+const BRANCH_RANGE: &str = "branch destination out of range";
+
 fn emit_branch_word(target: &Operand, span: Span, ctx: &mut EmitContext) {
-    let d = branch_distance(target, ctx).unwrap_or(0);
-    if !(-0x8000..=0x7FFF).contains(&d) {
-        ctx.error("out-of-range", "branch destination out of range", span);
-    }
-    ctx.put(d as u32 & 0xFFFF, 2);
+    let value = branch_target(target, ctx);
+    let pc = ctx.instruction_start + 2;
+    emit_pc_field(value, pc, 2, BRANCH_RANGE, span, ctx);
 }
 
 fn encode_branch(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     let target = &insn.operands[0];
     let opcode = insn.row.opcode;
     if matches!(insn.size, Some(Size::Short | Size::Byte)) {
-        let d = branch_distance(target, ctx).unwrap_or(2);
-        if d == 0 || !(-0x80..=0x7F).contains(&d) {
-            ctx.error("out-of-range", "branch destination out of range", span);
+        let value = branch_target(target, ctx);
+        let pc = ctx.instruction_start + 2;
+        ctx.put(u32::from(opcode >> 8), 1);
+        // A zero displacement would mean a word branch.
+        if emit_pc_field(value, pc, 1, BRANCH_RANGE, span, ctx) == Some(0) {
+            ctx.error("out-of-range", BRANCH_RANGE, span);
         }
-        ctx.put_word(opcode | (d as u16 & 0xFF));
     } else {
         ctx.put_word(opcode);
         emit_branch_word(target, span, ctx);

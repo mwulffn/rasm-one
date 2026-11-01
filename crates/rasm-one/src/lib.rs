@@ -25,7 +25,7 @@ mod types;
 
 pub use error::{Diagnostic, FileError, OutputError, Related, Severity};
 pub use output::bin::write_bin;
-pub use output::hunk::write_hunk_exe;
+pub use output::hunk::{write_hunk_exe, write_hunk_object};
 pub use source::{FileId, FileProvider, MemoryProvider, Span};
 pub use types::{Cpu, CpuSet, MemKind, SectionKind, Size};
 
@@ -54,8 +54,19 @@ impl Options {
 /// What a relocation's value means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelocKind {
-    /// The field holds an offset from the start of the target section.
+    /// The field gets the target's address added.
     Absolute,
+    /// The field gets the distance to the target's address added.
+    PcRelative,
+}
+
+/// What a relocation refers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelocTarget {
+    /// A section, by index.
+    Section(usize),
+    /// A symbol from another object file.
+    External(String),
 }
 
 /// A field that must be adjusted by the final address of a section.
@@ -65,8 +76,8 @@ pub struct Reloc {
     pub offset: u32,
     /// Width of the field in bytes.
     pub size: u8,
-    /// Index of the section the field refers to.
-    pub target: usize,
+    /// What the field refers to.
+    pub target: RelocTarget,
     /// Kind of relocation.
     pub kind: RelocKind,
     /// Source of the field.
@@ -103,6 +114,8 @@ pub struct Symbol {
     pub span: Span,
     /// True for a local label (`.x` or `x$`). Several can share a name.
     pub local: bool,
+    /// True if made visible to other object files.
+    pub exported: bool,
 }
 
 /// What caused an [`Expansion`].
