@@ -26,6 +26,8 @@ pub(crate) struct Instruction {
     pub wide: bool,
     /// True if labels are final addresses, as in a raw binary.
     pub fixed_addresses: bool,
+    /// True if a 68851 is present, whose function codes and masks are wider.
+    pub mmu_68851: bool,
 }
 
 /// How to find an operand's values, for choosing extension forms.
@@ -264,6 +266,12 @@ impl Instruction {
             | Encoding::FpControlStore
             | Encoding::FpMovemStore => (2, operands.get(1..).unwrap_or(&[])),
             Encoding::FpTrap => (2, &[]),
+            Encoding::MmuFlush => (2, operands.get(2..).unwrap_or(&[])),
+            Encoding::MmuLoad | Encoding::MmuFromRegister | Encoding::MmuToRegisterEa1 => {
+                (2, operands.get(1..).unwrap_or(&[]))
+            }
+            Encoding::MmuTest => (2, operands.get(1..2).unwrap_or(&[])),
+            Encoding::MmuToRegister => (2, operands.get(..1).unwrap_or(&[])),
             Encoding::FpTrapImmediate => (2, operands),
             Encoding::Bkpt | Encoding::Stop | Encoding::CacheOp => (
                 if self.row.encoding == Encoding::Stop {
@@ -480,6 +488,31 @@ fn pair(mode: &Mode) -> (u16, u16) {
         Mode::RegPair(a, b) => (u16::from(*a), u16::from(*b)),
         Mode::IndirectPair(a, b) => (u16::from(*a), u16::from(*b)),
         _ => (0, 0),
+    }
+}
+
+fn mmu_register(mode: &Mode) -> u16 {
+    match mode {
+        Mode::MmuReg(bits) => *bits,
+        _ => 0,
+    }
+}
+
+/// The function code field of an MMU command word.
+fn function_code(op: &Operand, insn: &Instruction, ctx: &mut EmitContext) -> u16 {
+    match &op.mode {
+        Mode::FunctionCode(bits) => *bits,
+        Mode::DataReg(n) => 0x08 | u16::from(*n),
+        _ => 0x10 | opcode_constant(op, 0, mmu_field_max(insn), false, ctx) as u16,
+    }
+}
+
+/// The largest function code or flush mask: 4 bits on a 68851, 3 on a 68030.
+fn mmu_field_max(insn: &Instruction) -> i64 {
+    if insn.mmu_68851 {
+        15
+    } else {
+        7
     }
 }
 
@@ -867,6 +900,53 @@ pub(crate) fn encode(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
             ctx.put_word(insn.row.extension);
             emit_extension(op(0), size, insn, ctx);
         }
+        Encoding::MmuFlush => {
+            let ea = insn.operands.get(2);
+            let ea_bits = ea.map_or(0, |operand| mode_bits(&operand.mode));
+            ctx.put_word(base | ea_bits);
+            let code = function_code(op(0), insn, ctx);
+            let mask = opcode_constant(op(1), 0, mmu_field_max(insn), false, ctx) as u16;
+            ctx.put_word(insn.row.extension | mask << 5 | code);
+            if let Some(operand) = ea {
+                emit_extension(operand, size, insn, ctx);
+            }
+        }
+        Encoding::MmuLoad => {
+            ctx.put_word(base | mode_bits(&op(1).mode));
+            let code = function_code(op(0), insn, ctx);
+            ctx.put_word(insn.row.extension | code);
+            emit_extension(op(1), size, insn, ctx);
+        }
+        Encoding::MmuTest => {
+            ctx.put_word(base | mode_bits(&op(1).mode));
+            let code = function_code(op(0), insn, ctx);
+            let level = opcode_constant(op(2), 0, 7, false, ctx) as u16;
+            let register = insn
+                .operands
+                .get(3)
+                .map_or(0, |operand| 0x0100 | mode_reg(&operand.mode).1 << 5);
+            ctx.put_word(insn.row.extension | level << 10 | register | code);
+            emit_extension(op(1), size, insn, ctx);
+        }
+        Encoding::MmuToRegister => {
+            ctx.put_word(base | mode_bits(&op(0).mode));
+            ctx.put_word(mmu_register(&op(1).mode) | insn.row.extension);
+            emit_extension(op(0), size, insn, ctx);
+        }
+        Encoding::MmuFromRegister => {
+            ctx.put_word(base | mode_bits(&op(1).mode));
+            ctx.put_word(mmu_register(&op(0).mode) | insn.row.extension);
+            emit_extension(op(1), size, insn, ctx);
+        }
+        Encoding::MmuToRegisterEa1 => {
+            ctx.put_word(base | mode_bits(&op(1).mode));
+            let register = match op(0).mode {
+                Mode::AddrReg(n) => u16::from(n),
+                _ => 0,
+            };
+            ctx.put_word(insn.row.extension | register);
+            emit_extension(op(1), size, insn, ctx);
+        }
         Encoding::Lpstop => {
             ctx.put_word(base);
             ctx.put_word(insn.row.extension);
@@ -1011,7 +1091,9 @@ fn mode_reg(mode: &Mode) -> (u16, u16) {
         | Mode::FpPair(..)
         | Mode::FpList(_)
         | Mode::FpControl(_)
-        | Mode::FpControlList(_) => (0, 0),
+        | Mode::FpControlList(_)
+        | Mode::MmuReg(_)
+        | Mode::FunctionCode(_) => (0, 0),
         Mode::Float(_) => (7, 4),
     }
 }
@@ -1396,6 +1478,13 @@ fn emit_immediate(expr: &Expr, size: Size, span: Span, ctx: &mut EmitContext) {
                 ctx.data.resize(ctx.data.len() + size.bytes() as usize, 0);
             }
         }
+        return;
+    }
+    if size == Size::Quad {
+        if value.base != Base::Absolute {
+            ctx.error("not-absolute", "64-bit immediate must be a constant", span);
+        }
+        ctx.data.extend_from_slice(&value.offset.to_be_bytes());
         return;
     }
     let (min, max) = match size {

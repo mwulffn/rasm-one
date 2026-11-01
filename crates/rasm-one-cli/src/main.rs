@@ -9,7 +9,7 @@ use rasm_one::{
 };
 
 const USAGE: &str =
-    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-I<dir>]... [-L <listing>]";
+    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>]";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -39,6 +39,7 @@ struct Args {
     kickstart1: bool,
     cpu: Cpu,
     fpu: FpuChoice,
+    mmu_68851: bool,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
@@ -49,6 +50,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut kickstart1 = false;
     let mut cpu = Cpu::default();
     let mut fpu = FpuChoice::default();
+    let mut mmu_68851 = false;
     let mut args = args;
     while let Some(arg) = args.next() {
         if arg == "-o" {
@@ -67,6 +69,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             include_dirs.push(directory.to_string());
         } else if arg == "-m68881" || arg == "-m68882" {
             fpu = FpuChoice::Coprocessor;
+        } else if arg == "-m68851" {
+            mmu_68851 = true;
         } else if arg == "-no-fpu" {
             fpu = FpuChoice::None;
         } else if let Some(found) = arg
@@ -91,6 +95,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             kickstart1,
             cpu,
             fpu,
+            mmu_68851,
         }),
         _ => bail!("{USAGE}"),
     }
@@ -102,6 +107,7 @@ fn main() -> Result<()> {
     options.include_dirs = args.include_dirs;
     options.cpu = args.cpu;
     options.fpu = args.fpu;
+    options.mmu_68851 = args.mmu_68851;
     options.fixed_addresses = args.format == Format::Bin;
     let assembly = assemble(&options, &NativeProvider);
     if let Some(path) = &args.listing {

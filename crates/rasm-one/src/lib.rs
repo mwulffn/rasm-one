@@ -148,6 +148,8 @@ pub struct Options {
     /// Whether a floating-point unit is available. By default only the 68040 and
     /// 68060, which have one built in, can use FPU instructions.
     pub fpu: FpuChoice,
+    /// Whether a 68851 MMU is available alongside a 68020 or 68030.
+    pub mmu_68851: bool,
     /// Directories to search for `include` and `incbin` files.
     pub include_dirs: Vec<String>,
     /// Set this for a raw binary, where labels are final addresses. Displacements
@@ -163,6 +165,7 @@ impl Options {
             main: main.into(),
             cpu: Cpu::default(),
             fpu: FpuChoice::default(),
+            mmu_68851: false,
             include_dirs: Vec::new(),
             fixed_addresses: false,
         }

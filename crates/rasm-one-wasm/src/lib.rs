@@ -24,6 +24,7 @@ pub struct Project {
     include_dirs: Vec<String>,
     cpu: Option<Cpu>,
     has_coprocessor: bool,
+    has_68851: bool,
 }
 
 #[wasm_bindgen]
@@ -55,6 +56,11 @@ impl Project {
         self.has_coprocessor = present;
     }
 
+    /// Says that a 68851 MMU is available, alongside a 68020 or 68030.
+    pub fn set_68851(&mut self, present: bool) {
+        self.has_68851 = present;
+    }
+
     /// Assembles `main` into `format`: `"hunkexe"`, `"hunkexe-kick1"` (which also
     /// loads on Kickstart 1.x), `"hunk"` or `"bin"`.
     pub fn assemble(&self, main: &str, format: &str) -> AssemblyResult {
@@ -64,6 +70,7 @@ impl Project {
         if let Some(cpu) = self.cpu {
             options.cpu = cpu;
         }
+        options.mmu_68851 = self.has_68851;
         if self.has_coprocessor {
             options.fpu = FpuChoice::Coprocessor;
         }
