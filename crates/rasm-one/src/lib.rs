@@ -101,6 +101,8 @@ pub struct Symbol {
     pub value: i64,
     /// Where it is defined.
     pub span: Span,
+    /// True for a local label (`.x` or `x$`). Several can share a name.
+    pub local: bool,
 }
 
 /// What caused an [`Expansion`].
@@ -108,12 +110,18 @@ pub struct Symbol {
 pub enum ExpansionKind {
     /// An `include` directive.
     Include,
+    /// A macro call.
+    Macro,
+    /// One iteration of a `rept` block.
+    Repeat,
 }
 
 impl ExpansionKind {
     pub(crate) fn description(self) -> &'static str {
         match self {
             ExpansionKind::Include => "included from here",
+            ExpansionKind::Macro => "expanded from this macro call",
+            ExpansionKind::Repeat => "repeated by this rept",
         }
     }
 }
@@ -461,6 +469,52 @@ mod tests {
         }
         let assembly = assemble(&Options::new("t.s"), &Failing);
         assert!(assembly.diagnostics[0].message.contains("disk on fire"));
+    }
+
+    #[test]
+    fn test_macro_error_reports_body_line_and_call() {
+        let assembly = run("m macro\n bogus\n endm\n\n m\n");
+        let diagnostic = &assembly.diagnostics[0];
+        assert_eq!(diagnostic.span.map(|s| s.line), Some(2));
+        assert_eq!(diagnostic.related[0].span.line, 5);
+    }
+
+    #[test]
+    fn test_line_table_maps_macro_bytes_to_body_and_call() {
+        let assembly = run("m macro\n nop\n endm\n m\n");
+        let entry = assembly.line_for_address(0, 0);
+        assert_eq!(entry.map(|e| e.span.line), Some(2));
+        let expansion = entry.and_then(|e| e.expansion).map(|id| id as usize);
+        assert_eq!(
+            expansion.map(|id| assembly.expansions[id].site.line),
+            Some(4)
+        );
+        assert_eq!(
+            expansion.map(|id| assembly.expansions[id].kind),
+            Some(ExpansionKind::Macro)
+        );
+    }
+
+    #[test]
+    fn test_macro_recursion_is_error_not_crash() {
+        let assembly = run("m macro\n m\n endm\n m\n");
+        assert!(assembly.diagnostics.iter().any(|d| d.code == "macro-depth"));
+    }
+
+    #[test]
+    fn test_unterminated_blocks_are_located() {
+        let assembly = run("\n if 1\n");
+        assert_eq!(assembly.diagnostics[0].span.map(|s| s.line), Some(2));
+        let assembly = run("\n rept 2\n nop\n");
+        assert_eq!(assembly.diagnostics[0].span.map(|s| s.line), Some(2));
+        let assembly = run("\nm macro\n nop\n");
+        assert_eq!(assembly.diagnostics[0].span.map(|s| s.line), Some(2));
+    }
+
+    #[test]
+    fn test_local_label_symbol_keeps_its_written_name() {
+        let assembly = run("a: nop\n.l: nop\n");
+        assert_eq!(assembly.symbols[1].name, ".l");
     }
 
     #[test]

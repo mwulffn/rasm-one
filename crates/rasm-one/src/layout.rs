@@ -122,6 +122,7 @@ pub(crate) fn build(program: Program) -> Built {
                 section: value.section,
                 value: value.offset,
                 span: entry.defined_at?,
+                local: entry.name.starts_with('.') || entry.name.ends_with('$'),
             })
         })
         .collect();
