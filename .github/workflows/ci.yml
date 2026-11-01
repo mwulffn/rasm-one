@@ -16,4 +16,5 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: echo "RASM_VASM=$(scripts/fetch-vasm.sh)" >> "$GITHUB_ENV"
       - run: cargo test --workspace
+      - run: cargo test --release -p rasm-one --test perf_budget -- --nocapture
       - run: cargo build -p rasm-one --target wasm32-unknown-unknown
