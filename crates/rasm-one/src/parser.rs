@@ -188,7 +188,7 @@ const MAX_EXPANSION_DEPTH: usize = 200;
 
 /// Parentheses and unary operators nested deeper than this are an error, since
 /// parsing and evaluating them recurse.
-const MAX_EXPRESSION_DEPTH: usize = 100;
+const MAX_EXPRESSION_DEPTH: usize = 32;
 
 /// Binary operators in one expression; each deepens the tree that is evaluated.
 const MAX_EXPRESSION_CHAIN: usize = 1000;

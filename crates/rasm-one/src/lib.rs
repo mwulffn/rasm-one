@@ -762,14 +762,31 @@ mod tests {
     }
 
     #[test]
-    fn test_deep_nesting_is_an_error_not_a_crash() {
-        let parens = format!(" dc.w {}1{}\n", "(".repeat(5000), ")".repeat(5000));
-        let minus = format!(" dc.w {}1\n", "-".repeat(5000));
-        let chain = format!(" dc.w 1{}\n", "+1".repeat(20000));
-        let rept = format!("{}{}", " rept 1\n".repeat(5000), " endr\n".repeat(5000));
-        for source in [parens, minus, chain, rept] {
-            assert!(run(&source).has_errors());
-        }
+    fn test_deep_parentheses_are_an_error_not_a_crash() {
+        let source = format!(" dc.w {}1{}\n", "(".repeat(5000), ")".repeat(5000));
+        assert!(run(&source).has_errors());
+    }
+
+    #[test]
+    fn test_reasonable_parentheses_are_accepted() {
+        let source = format!(" dc.w {}1{}\n", "(".repeat(30), ")".repeat(30));
+        assert!(!run(&source).has_errors());
+    }
+
+    #[test]
+    fn test_deep_unary_operators_are_an_error_not_a_crash() {
+        assert!(run(&format!(" dc.w {}1\n", "-".repeat(5000))).has_errors());
+    }
+
+    #[test]
+    fn test_long_operator_chains_are_an_error_not_a_crash() {
+        assert!(run(&format!(" dc.w 1{}\n", "+1".repeat(20000))).has_errors());
+    }
+
+    #[test]
+    fn test_deep_rept_is_an_error_not_a_crash() {
+        let source = format!("{}{}", " rept 1\n".repeat(5000), " endr\n".repeat(5000));
+        assert!(run(&source).has_errors());
     }
 
     #[test]
