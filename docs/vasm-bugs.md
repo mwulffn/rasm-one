@@ -117,3 +117,14 @@ register is selected". vasm accepts a list and writes the value with zero paddin
 `f23c 9800 0000 0000 0000 0002`.
 
 **rasm-one:** reports an error. `tests/vasm_fpu.rs`.
+
+## 10. `pload` with SFC or DFC rejected on the 68030
+
+**Source:** `ploadr sfc,(a0)` or `ploadw dfc,(a0)` with `-m68030`.
+
+**Bug:** vasm rejects these with `illegal operand types`, but accepts them with `-m68851`, and
+accepts `pflush sfc,#2` on the 68030. The PRM's `PLOAD` page lists the SFC and DFC registers
+as function codes.
+
+**rasm-one:** accepts them, encoding `ploadr sfc,(a0)` as `f010 2200`, the bytes vasm gives
+with `-m68851`. `vasm_wrongly_rejects` in `tests/sweep_cpus.rs`.

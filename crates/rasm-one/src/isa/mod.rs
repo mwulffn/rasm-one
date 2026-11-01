@@ -106,6 +106,10 @@ pub(crate) enum Mode {
     IndirectPair(u8, u8),
     ControlReg(u16),
     Cache(u8),
+    /// An MMU register for `pmove` or `pvalid`, as its bits in the command word.
+    MmuReg(u16),
+    /// A function code named `sfc` or `dfc`, as its bits in the command word.
+    FunctionCode(u16),
     /// A floating-point literal, as an immediate.
     Float(FloatLiteral),
     FpReg(u8),
@@ -158,6 +162,14 @@ impl Mode {
             Mode::IndirectPair(..) => EaSet::INDIRECT_PAIR,
             Mode::ControlReg(_) => EaSet::CONTROL_REG,
             Mode::Cache(_) => EaSet::CACHE,
+            // The 68851's PCSR can only be read.
+            Mode::MmuReg(0x6400) => EaSet::MMU_REG_READ_ONLY,
+            Mode::MmuReg(0x5400) => EaSet::MMU_VAL,
+            // SRP, CRP and DRP hold 64 bits, so no register can take them.
+            Mode::MmuReg(0x4400 | 0x4800 | 0x4C00) => EaSet::MMU_QUAD,
+            Mode::MmuReg(0x6000) => EaSet::MMU_STATUS,
+            Mode::MmuReg(_) => EaSet::MMU_REG,
+            Mode::FunctionCode(_) => EaSet::FUNCTION_CODE,
             Mode::Float(_) => EaSet::FLOAT,
             Mode::FpReg(_) => EaSet::FP,
             Mode::FpPair(..) => EaSet::FP_PAIR,

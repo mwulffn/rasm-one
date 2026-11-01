@@ -63,6 +63,18 @@ impl EaSet {
     pub const FP_IAR: EaSet = EaSet(1 << 25);
     /// A floating-point literal.
     pub const FLOAT: EaSet = EaSet(1 << 26);
+    /// An MMU register.
+    pub const MMU_REG: EaSet = EaSet(1 << 27);
+    /// An MMU register holding 64 bits.
+    pub const MMU_QUAD: EaSet = EaSet(1 << 31);
+    /// The MMU status register, which `pmovefd` can't write.
+    pub const MMU_STATUS: EaSet = EaSet(1 << 56);
+    /// The 68851's VAL register, the only one that `pvalid` takes.
+    pub const MMU_VAL: EaSet = EaSet(1 << 30);
+    /// An MMU register that can only be read.
+    pub const MMU_REG_READ_ONLY: EaSet = EaSet(1 << 29);
+    /// `sfc` or `dfc`, as a function code.
+    pub const FUNCTION_CODE: EaSet = EaSet(1 << 28);
     /// A branch target: an address expression written without a mode.
     pub const LABEL: EaSet = EaSet::ABS_L;
 
@@ -131,8 +143,11 @@ pub enum Coprocessor {
     None,
     /// A floating-point unit.
     Fpu,
-    /// A memory management unit.
+    /// A memory management unit: the 68030's, or a 68851 alongside a 68020 or
+    /// 68030.
     Mmu,
+    /// Only a 68851.
+    Mmu851,
 }
 
 /// How a row's fields are combined into machine code. Names give the opcode
@@ -242,6 +257,18 @@ pub enum Encoding {
     CacheOp,
     /// Opcode, extension word, then an unsigned 16-bit immediate
     Lpstop,
+    /// `ea2` if present; a command word with the function code and mask
+    MmuFlush,
+    /// `ea1`; a command word with the function code
+    MmuLoad,
+    /// `ea1`; a command word with the function code, level and optional An
+    MmuTest,
+    /// `ea0`; a command word with the register of operand 1
+    MmuToRegister,
+    /// `ea1`; a command word with the register of operand 0 in `reg << 10` form
+    MmuToRegisterEa1,
+    /// `ea1`; a command word with the register of operand 0
+    MmuFromRegister,
     /// `F200`, then `src << 10 | dst << 7 | opmode`, for two FP registers
     FpRegisters,
     /// `F200`, then `src << 10 | src << 7 | opmode`, for one FP register
@@ -324,6 +351,18 @@ impl InsnRow {
         self
     }
 
+    /// This row, needing the 68030's MMU or a 68851.
+    pub const fn mmu(mut self) -> InsnRow {
+        self.coprocessor = Coprocessor::Mmu;
+        self
+    }
+
+    /// This row, needing a 68851.
+    pub const fn mmu851(mut self) -> InsnRow {
+        self.coprocessor = Coprocessor::Mmu851;
+        self
+    }
+
     /// This row, with fixed extension word bits.
     pub const fn ext(mut self, extension: u16) -> InsnRow {
         self.extension = extension;
@@ -355,6 +394,9 @@ const UP020: CpuSet = CpuSet(0x3C);
 const ONLY020: CpuSet = CpuSet(0x04);
 const UP040: CpuSet = CpuSet(0x30);
 const ONLY060: CpuSet = CpuSet(0x20);
+const ONLY040: CpuSet = CpuSet(0x10);
+const ONLY030: CpuSet = CpuSet(0x08);
+const CPU_020_030: CpuSet = CpuSet(0x0C);
 
 const fn row(
     mnemonic: &'static str,
@@ -404,6 +446,17 @@ const CREG: EaSet = EaSet::CONTROL_REG;
 const CACHE: EaSet = EaSet::CACHE;
 const IND: EaSet = EaSet::IND;
 const ABSL: EaSet = EaSet::ABS_L;
+/// A function code: `sfc`, `dfc`, a data register or an immediate.
+const FC: EaSet = EaSet(EaSet::FUNCTION_CODE.0 | DN.0 | IMM.0);
+const MMU_EA: EaSet = EaSet::CONTROL_ALTERABLE;
+const MMU_SIZES: &[Size] = &[Size::Byte, Size::Word, Size::Long, Size::Quad];
+const PFLUSHR_SIZES: &[Size] = &[Size::Quad, Size::Double];
+/// Registers of any size that the 68851 can move to more kinds of operand.
+const MMU_NARROW: EaSet = EaSet(EaSet::MMU_REG.0 | EaSet::MMU_VAL.0 | EaSet::MMU_STATUS.0);
+const MMU_WRITABLE: EaSet = EaSet(MMU_NARROW.0 | EaSet::MMU_QUAD.0);
+const MMU_READABLE: EaSet = EaSet(MMU_NARROW.0 | EaSet::MMU_REG_READ_ONLY.0);
+/// Registers `pmovefd` can load.
+const MMU_FD: EaSet = EaSet(EaSet::MMU_REG.0 | EaSet::MMU_QUAD.0);
 const FP: EaSet = EaSet::FP;
 const FP_REGS: EaSet = EaSet(EaSet::FP.0 | EaSet::FP_LIST.0);
 const FP_C: EaSet = EaSet(EaSet::FP_CONTROL.0 | EaSet::FP_IAR.0);
@@ -4962,6 +5015,1093 @@ pub const TABLE: &[InsnRow] = &[
     .on(UP020)
     .fpu()
     .ext(0x1F),
+    row("pflusha", &[], None, &[], 0xF000, Encoding::FpTrap)
+        .mmu()
+        .on(CPU_020_030)
+        .ext(0x2400),
+    row("pflusha", &[], None, &[], 0xF518, Encoding::Fixed).on(UP040),
+    row("pflushan", &[], None, &[], 0xF510, Encoding::Fixed).on(UP040),
+    row("pflushn", &[], None, &[IND], 0xF500, Encoding::Reg0).on(UP040),
+    row("pflush", &[], None, &[IND], 0xF508, Encoding::Reg0).on(UP040),
+    row("pflush", &[], None, &[FC, IMM], 0xF000, Encoding::MmuFlush)
+        .mmu()
+        .on(CPU_020_030)
+        .ext(0x3000),
+    row(
+        "pflush",
+        &[],
+        None,
+        &[FC, IMM, MMU_EA],
+        0xF000,
+        Encoding::MmuFlush,
+    )
+    .mmu()
+    .on(CPU_020_030)
+    .ext(0x3800),
+    row("pflushs", &[], None, &[FC, IMM], 0xF000, Encoding::MmuFlush)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x3400),
+    row(
+        "pflushs",
+        &[],
+        None,
+        &[FC, IMM, MMU_EA],
+        0xF000,
+        Encoding::MmuFlush,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x3C00),
+    row(
+        "pflushr",
+        PFLUSHR_SIZES,
+        Some(Size::Quad),
+        &[FP_CONTROL_MEM],
+        0xF000,
+        Encoding::FpSet,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0xA000),
+    row(
+        "ploadr",
+        &[],
+        None,
+        &[FC, MMU_EA],
+        0xF000,
+        Encoding::MmuLoad,
+    )
+    .mmu()
+    .on(CPU_020_030)
+    .ext(0x2200),
+    row(
+        "ploadw",
+        &[],
+        None,
+        &[FC, MMU_EA],
+        0xF000,
+        Encoding::MmuLoad,
+    )
+    .mmu()
+    .on(CPU_020_030)
+    .ext(0x2000),
+    row("ptestr", &[], None, &[IND], 0xF568, Encoding::Reg0).on(ONLY040),
+    row(
+        "ptestr",
+        &[],
+        None,
+        &[FC, MMU_EA, IMM],
+        0xF000,
+        Encoding::MmuTest,
+    )
+    .mmu()
+    .on(CPU_020_030)
+    .ext(0x8200),
+    row(
+        "ptestr",
+        &[],
+        None,
+        &[FC, MMU_EA, IMM, AN],
+        0xF000,
+        Encoding::MmuTest,
+    )
+    .mmu()
+    .on(CPU_020_030)
+    .ext(0x8200),
+    row("ptestw", &[], None, &[IND], 0xF548, Encoding::Reg0).on(ONLY040),
+    row(
+        "ptestw",
+        &[],
+        None,
+        &[FC, MMU_EA, IMM],
+        0xF000,
+        Encoding::MmuTest,
+    )
+    .mmu()
+    .on(CPU_020_030)
+    .ext(0x8000),
+    row(
+        "ptestw",
+        &[],
+        None,
+        &[FC, MMU_EA, IMM, AN],
+        0xF000,
+        Encoding::MmuTest,
+    )
+    .mmu()
+    .on(CPU_020_030)
+    .ext(0x8000),
+    row(
+        "pmove",
+        MMU_SIZES,
+        WORD,
+        &[FP_CONTROL_MEM, EaSet::MMU_QUAD],
+        0xF000,
+        Encoding::MmuToRegister,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pmove",
+        MMU_SIZES,
+        WORD,
+        &[MMU_READABLE, EaSet::ALTERABLE],
+        0xF000,
+        Encoding::MmuFromRegister,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0200),
+    row(
+        "pmove",
+        MMU_SIZES,
+        WORD,
+        &[ALL, MMU_NARROW],
+        0xF000,
+        Encoding::MmuToRegister,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pmove",
+        MMU_SIZES,
+        WORD,
+        &[MMU_WRITABLE, MMU_EA],
+        0xF000,
+        Encoding::MmuFromRegister,
+    )
+    .mmu()
+    .on(CPU_020_030)
+    .ext(0x0200),
+    row(
+        "pmove",
+        MMU_SIZES,
+        WORD,
+        &[MMU_EA, MMU_WRITABLE],
+        0xF000,
+        Encoding::MmuToRegister,
+    )
+    .mmu()
+    .on(CPU_020_030),
+    row(
+        "pmovefd",
+        MMU_SIZES,
+        WORD,
+        &[MMU_EA, MMU_FD],
+        0xF000,
+        Encoding::MmuToRegister,
+    )
+    .on(ONLY030)
+    .ext(0x0100),
+    row(
+        "pvalid",
+        L,
+        LONG,
+        &[EaSet::MMU_VAL, MMU_EA],
+        0xF000,
+        Encoding::MmuToRegisterEa1,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x2800),
+    row(
+        "pvalid",
+        L,
+        LONG,
+        &[AN, MMU_EA],
+        0xF000,
+        Encoding::MmuToRegisterEa1,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x2C00),
+    row(
+        "psave",
+        &[],
+        None,
+        &[EaSet::CONTROL_ALTERABLE.or(PRE)],
+        0xF100,
+        Encoding::Ea0,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "prestore",
+        &[],
+        None,
+        &[CTRL.or(POST)],
+        0xF140,
+        Encoding::Ea0,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row("plpar", &[], None, &[IND], 0xF5C8, Encoding::Reg0).on(ONLY060),
+    row("plpaw", &[], None, &[IND], 0xF588, Encoding::Reg0).on(ONLY060),
+    row("pbbs", W, WORD, &[EaSet::LABEL], 0xF080, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbbs",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C0,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbbs",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x00),
+    row("psbs", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x00),
+    row("ptrapbs", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x00),
+    row(
+        "ptrapbs",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x00),
+    row(
+        "ptrapbs",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x00),
+    row("pbbc", W, WORD, &[EaSet::LABEL], 0xF081, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbbc",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C1,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbbc",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x01),
+    row("psbc", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x01),
+    row("ptrapbc", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x01),
+    row(
+        "ptrapbc",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x01),
+    row(
+        "ptrapbc",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x01),
+    row("pbls", W, WORD, &[EaSet::LABEL], 0xF082, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbls",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C2,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbls",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x02),
+    row("psls", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x02),
+    row("ptrapls", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x02),
+    row(
+        "ptrapls",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x02),
+    row(
+        "ptrapls",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x02),
+    row("pblc", W, WORD, &[EaSet::LABEL], 0xF083, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pblc",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C3,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdblc",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x03),
+    row("pslc", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x03),
+    row("ptraplc", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x03),
+    row(
+        "ptraplc",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x03),
+    row(
+        "ptraplc",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x03),
+    row("pbss", W, WORD, &[EaSet::LABEL], 0xF084, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbss",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C4,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbss",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x04),
+    row("psss", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x04),
+    row("ptrapss", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x04),
+    row(
+        "ptrapss",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x04),
+    row(
+        "ptrapss",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x04),
+    row("pbsc", W, WORD, &[EaSet::LABEL], 0xF085, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbsc",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C5,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbsc",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x05),
+    row("pssc", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x05),
+    row("ptrapsc", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x05),
+    row(
+        "ptrapsc",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x05),
+    row(
+        "ptrapsc",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x05),
+    row("pbas", W, WORD, &[EaSet::LABEL], 0xF086, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbas",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C6,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbas",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x06),
+    row("psas", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x06),
+    row("ptrapas", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x06),
+    row(
+        "ptrapas",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x06),
+    row(
+        "ptrapas",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x06),
+    row("pbac", W, WORD, &[EaSet::LABEL], 0xF087, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbac",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C7,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbac",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x07),
+    row("psac", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x07),
+    row("ptrapac", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x07),
+    row(
+        "ptrapac",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x07),
+    row(
+        "ptrapac",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x07),
+    row("pbws", W, WORD, &[EaSet::LABEL], 0xF088, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbws",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C8,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbws",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x08),
+    row("psws", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x08),
+    row("ptrapws", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x08),
+    row(
+        "ptrapws",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x08),
+    row(
+        "ptrapws",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x08),
+    row("pbwc", W, WORD, &[EaSet::LABEL], 0xF089, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbwc",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0C9,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbwc",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x09),
+    row("pswc", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x09),
+    row("ptrapwc", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x09),
+    row(
+        "ptrapwc",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x09),
+    row(
+        "ptrapwc",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x09),
+    row("pbis", W, WORD, &[EaSet::LABEL], 0xF08A, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbis",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0CA,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbis",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0A),
+    row("psis", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0A),
+    row("ptrapis", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0A),
+    row(
+        "ptrapis",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0A),
+    row(
+        "ptrapis",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0A),
+    row("pbic", W, WORD, &[EaSet::LABEL], 0xF08B, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbic",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0CB,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbic",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0B),
+    row("psic", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0B),
+    row("ptrapic", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0B),
+    row(
+        "ptrapic",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0B),
+    row(
+        "ptrapic",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0B),
+    row("pbgs", W, WORD, &[EaSet::LABEL], 0xF08C, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbgs",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0CC,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbgs",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0C),
+    row("psgs", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0C),
+    row("ptrapgs", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0C),
+    row(
+        "ptrapgs",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0C),
+    row(
+        "ptrapgs",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0C),
+    row("pbgc", W, WORD, &[EaSet::LABEL], 0xF08D, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbgc",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0CD,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbgc",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0D),
+    row("psgc", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0D),
+    row("ptrapgc", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0D),
+    row(
+        "ptrapgc",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0D),
+    row(
+        "ptrapgc",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0D),
+    row("pbcs", W, WORD, &[EaSet::LABEL], 0xF08E, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbcs",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0CE,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbcs",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0E),
+    row("pscs", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0E),
+    row("ptrapcs", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0E),
+    row(
+        "ptrapcs",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0E),
+    row(
+        "ptrapcs",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0E),
+    row("pbcc", W, WORD, &[EaSet::LABEL], 0xF08F, Encoding::FpBranch)
+        .mmu851()
+        .on(CPU_020_030),
+    row(
+        "pbcc",
+        L,
+        WORD,
+        &[EaSet::LABEL],
+        0xF0CF,
+        Encoding::FpBranchLong,
+    )
+    .mmu851()
+    .on(CPU_020_030),
+    row(
+        "pdbcc",
+        W,
+        WORD,
+        &[DN, EaSet::LABEL],
+        0xF048,
+        Encoding::FpDecrementBranch,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0F),
+    row("pscc", B, BYTE, &[DALT], 0xF040, Encoding::FpSet)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0F),
+    row("ptrapcc", &[], None, &[], 0xF07C, Encoding::FpTrap)
+        .mmu851()
+        .on(CPU_020_030)
+        .ext(0x0F),
+    row(
+        "ptrapcc",
+        W,
+        WORD,
+        &[IMM],
+        0xF07A,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0F),
+    row(
+        "ptrapcc",
+        L,
+        WORD,
+        &[IMM],
+        0xF07B,
+        Encoding::FpTrapImmediate,
+    )
+    .mmu851()
+    .on(CPU_020_030)
+    .ext(0x0F),
     set("st", 0),
     set("sf", 1),
     set("shi", 2),
@@ -4999,6 +6139,34 @@ pub const TABLE: &[InsnRow] = &[
     decrement("dblt", 13),
     decrement("dbgt", 14),
     decrement("dble", 15),
+];
+
+/// Where an MMU register exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmuRegisterHome {
+    /// The 68851 and the 68030.
+    Both,
+    /// Only the 68851.
+    Only851,
+    /// Only the 68030.
+    Only030,
+}
+
+/// An MMU register for `pmove`: name, command word bits, where it is, and size.
+pub const MMU_REGISTERS: &[(&str, u16, MmuRegisterHome, Size)] = &[
+    ("tc", 0x4000, MmuRegisterHome::Both, Size::Long),
+    ("srp", 0x4800, MmuRegisterHome::Both, Size::Quad),
+    ("crp", 0x4C00, MmuRegisterHome::Both, Size::Quad),
+    ("psr", 0x6000, MmuRegisterHome::Both, Size::Word),
+    ("mmusr", 0x6000, MmuRegisterHome::Both, Size::Word),
+    ("drp", 0x4400, MmuRegisterHome::Only851, Size::Quad),
+    ("cal", 0x5000, MmuRegisterHome::Only851, Size::Byte),
+    ("val", 0x5400, MmuRegisterHome::Only851, Size::Byte),
+    ("scc", 0x5800, MmuRegisterHome::Only851, Size::Byte),
+    ("ac", 0x5C00, MmuRegisterHome::Only851, Size::Word),
+    ("pcsr", 0x6400, MmuRegisterHome::Only851, Size::Word),
+    ("tt0", 0x0800, MmuRegisterHome::Only030, Size::Long),
+    ("tt1", 0x0C00, MmuRegisterHome::Only030, Size::Long),
 ];
 
 /// A control register for `movec`: name, code and the CPUs that have it.

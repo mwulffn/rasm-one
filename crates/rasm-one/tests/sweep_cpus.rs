@@ -15,6 +15,7 @@ struct Machine {
     name: &'static str,
     cpu: Cpu,
     fpu: FpuChoice,
+    mmu_68851: bool,
     vasm_args: &'static [&'static str],
 }
 
@@ -23,6 +24,7 @@ const fn machine(name: &'static str, cpu: Cpu) -> Machine {
         name,
         cpu,
         fpu: FpuChoice::BuiltIn,
+        mmu_68851: false,
         vasm_args: &[],
     }
 }
@@ -38,13 +40,22 @@ const MACHINES: &[Machine] = &[
         name: "68020",
         cpu: Cpu::M68020,
         fpu: FpuChoice::Coprocessor,
+        mmu_68851: false,
         vasm_args: &["-m68881"],
     },
     Machine {
         name: "68030",
         cpu: Cpu::M68030,
         fpu: FpuChoice::Coprocessor,
+        mmu_68851: false,
         vasm_args: &["-m68882"],
+    },
+    Machine {
+        name: "68020",
+        cpu: Cpu::M68020,
+        fpu: FpuChoice::BuiltIn,
+        mmu_68851: true,
+        vasm_args: &["-m68851"],
     },
 ];
 
@@ -77,8 +88,53 @@ const FPU_MNEMONICS: &[&str] = &[
     "fsub", "ftan", "ftanh", "ftentox", "ftrapeq", "ftrapngl", "ftst", "ftwotox",
 ];
 
+/// A sample of the MMU's mnemonics. The condition codes are tested separately.
+const MMU_MNEMONICS: &[&str] = &[
+    "pbbs", "pbcc", "pdbbs", "pflush", "pflusha", "pflushan", "pflushn", "pflushr", "pflushs",
+    "plpar", "plpaw", "ploadr", "ploadw", "pmove", "pmovefd", "prestore", "psave", "psbs",
+    "ptestr", "ptestw", "ptrapbs", "pvalid",
+];
+
+/// Operands only MMU instructions know. Anywhere else they would be symbols.
+const MMU_OPERANDS: &[&str] = &[
+    "tc", "srp", "crp", "psr", "mmusr", "drp", "cal", "val", "scc", "ac", "pcsr", "bad0", "bac7",
+    "tt0", "tt1", "sfc", "dfc",
+];
+
+/// Whole operand lists for MMU forms with several operands.
+const MMU_LISTS: &[&str] = &[
+    "#1,#2",
+    "#1,#2,(a3)",
+    "d1,#2",
+    "sfc,#2",
+    "dfc,#2,6(a6)",
+    "#1,#2,(a4)+",
+    "#1,(a3)",
+    "sfc,(a3)",
+    "d1,6(a6)",
+    "#1,(a3),#2",
+    "d1,6(a6),#2",
+    "sfc,(a3),#2,a1",
+    "#1,(a4)+,#2",
+    "tc,(a3)",
+    "(a3),tc",
+    "crp,6(a6)",
+    "$20.w,srp",
+    "tc,d1",
+    "d1,tc",
+    "tc,a2",
+    "(a3)+,tc",
+    "tc,-(a5)",
+    "*+8(pc),tc",
+    "#1,tc",
+    "val,(a3)",
+    "a1,(a3)",
+    "a1,6(a6)",
+];
+
 const SIZES: &[&str] = &["", ".b", ".w", ".l", ".s"];
 const FPU_SIZES: &[&str] = &[".d", ".x", ".p"];
+const MMU_SIZES: &[&str] = &[".q"];
 
 /// Operands only FPU instructions know. Anywhere else they would be symbols.
 const FPU_OPERANDS: &[&str] = &[
@@ -200,7 +256,14 @@ const THREE_OPERANDS: &[&str] = &[
 fn vasm_wrongly_rejects(line: &str) -> bool {
     let head = line.split_whitespace().next().unwrap_or("");
     let mnemonic = head.split('.').next().unwrap_or("");
-    (matches!(mnemonic, "divs" | "divu" | "muls" | "mulu") && line.ends_with(" (100000,a6),d4"))
+    let operands = line
+        .trim_start()
+        .split_once(' ')
+        .map_or("", |(_, rest)| rest);
+    (matches!(mnemonic, "ploadr" | "ploadw")
+        && (operands.starts_with("sfc,") || operands.starts_with("dfc,")))
+        || (matches!(mnemonic, "divs" | "divu" | "muls" | "mulu")
+            && line.ends_with(" (100000,a6),d4"))
         || (matches!(mnemonic, "jmp" | "jsr") && line.ends_with(" (100000,pc)"))
 }
 
@@ -221,7 +284,8 @@ fn stricter_than_vasm(line: &str) -> bool {
         .unwrap_or((line.trim_start(), ""));
     let (mnemonic, suffix) = head.split_once('.').unwrap_or((head, ""));
     let is_trapcc = (mnemonic.starts_with("trap") && !matches!(mnemonic, "trap" | "trapv"))
-        || mnemonic.starts_with("ftrap");
+        || mnemonic.starts_with("ftrap")
+        || mnemonic.starts_with("ptrap");
     let valid_trapcc = match suffix {
         "" => operands.is_empty() || operands == "#1",
         "w" | "l" => operands == "#1",
@@ -230,10 +294,18 @@ fn stricter_than_vasm(line: &str) -> bool {
     let trapcc_with_junk = is_trapcc && !valid_trapcc;
     // vasm stores the bits of a float as a long here, listed in docs/vasm-bugs.md.
     let float_as_long = head.ends_with(".l") && operands.starts_with("#1.5");
+    // vasm ignores `.q` on some forms of these unsized instructions, and refuses
+    // it on others. It means nothing on any of them.
+    let quad_on_unsized_mmu = head.ends_with(".q")
+        && matches!(
+            mnemonic,
+            "pflush" | "ploadr" | "ploadw" | "ptestr" | "ptestw"
+        );
     // The PRM allows an immediate for only one control register.
     let immediate_to_list =
         head.starts_with("fmovem") && operands.starts_with('#') && operands.contains("/fps");
     movea_to_non_address
+        || quad_on_unsized_mmu
         || address_as_mask
         || trapcc_with_junk
         || float_as_long
@@ -243,7 +315,12 @@ fn stricter_than_vasm(line: &str) -> bool {
 fn lines_for(mnemonic: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let is_fpu = FPU_MNEMONICS.contains(&mnemonic);
-    let extra_sizes: &[&str] = if is_fpu { FPU_SIZES } else { &[] };
+    let is_mmu = MMU_MNEMONICS.contains(&mnemonic);
+    let extra_sizes: &[&str] = match (is_fpu, is_mmu) {
+        (true, _) => FPU_SIZES,
+        (_, true) => MMU_SIZES,
+        _ => &[],
+    };
     for size in SIZES.iter().chain(extra_sizes) {
         let head = format!(" {mnemonic}{size}");
         lines.push(head.clone());
@@ -257,6 +334,7 @@ fn lines_for(mnemonic: &str) -> Vec<String> {
             "movec" => CONTROL_REGISTERS,
             "cinva" | "cinvl" | "cinvp" | "cpusha" | "cpushl" | "cpushp" => CACHES,
             _ if is_fpu => FPU_OPERANDS,
+            _ if is_mmu => MMU_OPERANDS,
             _ => &[],
         };
         for rare in RARE_OPERANDS.iter().chain(words) {
@@ -268,6 +346,11 @@ fn lines_for(mnemonic: &str) -> Vec<String> {
         }
         for list in THREE_OPERANDS {
             lines.push(format!("{head} {list}"));
+        }
+        if is_mmu {
+            for list in MMU_LISTS {
+                lines.push(format!("{head} {list}"));
+            }
         }
     }
     lines
@@ -364,6 +447,7 @@ fn assemble_source(source: &str, machine: &Machine) -> Assembly {
     let mut options = Options::new("t.s");
     options.cpu = machine.cpu;
     options.fpu = machine.fpu;
+    options.mmu_68851 = machine.mmu_68851;
     options.fixed_addresses = true;
     assemble(&options, &files)
 }
@@ -408,7 +492,7 @@ fn sweep_machine(vasm: &Vasm, machine: &Machine) -> Result<String, String> {
     let mut wrongly_rejected = Vec::new();
     let mut accepted = Vec::new();
     let mut total = 0;
-    for mnemonic in MNEMONICS.iter().chain(FPU_MNEMONICS) {
+    for mnemonic in MNEMONICS.iter().chain(FPU_MNEMONICS).chain(MMU_MNEMONICS) {
         let lines = lines_for(mnemonic);
         total += lines.len();
         let verdict = vasm_verdict(vasm, &lines, machine)?;

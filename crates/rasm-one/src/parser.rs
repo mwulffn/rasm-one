@@ -9,7 +9,9 @@ use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
 use crate::float::FloatLiteral;
 use crate::isa::encode::Instruction;
-use crate::isa::table::{rows_for, Coprocessor, InsnRow, CONTROL_REGISTERS, CPU_020_UP};
+use crate::isa::table::{
+    rows_for, Coprocessor, InsnRow, MmuRegisterHome, CONTROL_REGISTERS, CPU_020_UP, MMU_REGISTERS,
+};
 use crate::isa::{
     BitFieldArg, FullBase, FullDisp, FullMode, IndexReg, Indirection, Mode, Operand, Width,
 };
@@ -347,6 +349,15 @@ fn needs_020(mode: &Mode) -> bool {
     }
 }
 
+/// The size of an MMU register, from its command word bits.
+fn mmu_register_size(bits: u16) -> Size {
+    // BADn and BACn are not in the table, and are words.
+    MMU_REGISTERS
+        .iter()
+        .find(|(_, register, _, _)| *register == bits)
+        .map_or(Size::Word, |(_, _, _, size)| *size)
+}
+
 fn fp_register(name: &str) -> Option<u8> {
     match name.as_bytes() {
         [b'f', b'p', n @ b'0'..=b'7'] => Some(n - b'0'),
@@ -367,6 +378,8 @@ fn special_words(mnemonic: &str) -> SpecialWords {
     match mnemonic {
         "movec" => SpecialWords::ControlRegisters,
         "cinvl" | "cinvp" | "cinva" | "cpushl" | "cpushp" | "cpusha" => SpecialWords::CacheNames,
+        "pflush" | "pflushs" | "ploadr" | "ploadw" | "ptestr" | "ptestw" | "pmove" | "pmovefd"
+        | "pvalid" => SpecialWords::Mmu,
         _ if rows_for(mnemonic)
             .is_some_and(|rows| rows.iter().any(|row| row.coprocessor == Coprocessor::Fpu)) =>
         {
@@ -503,6 +516,7 @@ const RS_COUNTER: &str = "__RS";
 pub(crate) struct Parser<'f> {
     cpu: Cpu,
     fpu: FpuChoice,
+    mmu_68851: bool,
     fixed_addresses: bool,
     provider: &'f dyn FileProvider,
     /// Directories to search for files, from options and `incdir`.
@@ -547,6 +561,7 @@ impl<'f> Parser<'f> {
         Self {
             cpu: options.cpu,
             fpu: options.fpu,
+            mmu_68851: options.mmu_68851,
             fixed_addresses: options.fixed_addresses,
             provider,
             include_dirs: options.include_dirs.clone(),
@@ -1186,6 +1201,7 @@ enum SpecialWords {
     ControlRegisters,
     CacheNames,
     Fpu,
+    Mmu,
 }
 
 struct LineParser<'p, 'a, 'f> {
@@ -2094,7 +2110,16 @@ impl LineParser<'_, '_, '_> {
                     self.parser.fpu = FpuChoice::Coprocessor;
                     return Ok(());
                 }
+                if number == "68851" {
+                    self.parser.mmu_68851 = true;
+                    return Ok(());
+                }
                 self.set_cpu(number, span)
+            }
+            "mc68851" => {
+                self.no_size(size, span)?;
+                self.parser.mmu_68851 = true;
+                Ok(())
             }
             "mc68881" | "mc68882" => {
                 self.no_size(size, span)?;
@@ -2231,6 +2256,16 @@ impl LineParser<'_, '_, '_> {
         span: Span,
     ) -> Result<Instruction, Diagnostic> {
         let unsized_insn = rows.iter().all(|r| r.default_size.is_none());
+        // These ignore other sizes, as unsized instructions do, but `.q` is a size
+        // that only means something to an MMU instruction with 64-bit operands.
+        let mmu_operands = special_words(mnemonic) == SpecialWords::Mmu;
+        if mmu_operands && unsized_insn && size == Some(Size::Quad) {
+            return Err(Diagnostic::error(
+                "bad-size",
+                format!("{mnemonic} cannot have this size"),
+                span,
+            ));
+        }
         if unsized_insn {
             if size.is_some() {
                 self.parser.program.diagnostics.push(Diagnostic::warning(
@@ -2307,15 +2342,37 @@ impl LineParser<'_, '_, '_> {
         }
         let has_fpu = self.parser.has_fpu();
         let cpu = self.parser.cpu;
-        let Some(row) = matching
-            .find(|row| row.cpus.contains(cpu) && (row.coprocessor != Coprocessor::Fpu || has_fpu))
-        else {
+        let mmu_68851 = self.parser.mmu_68851;
+        let Some(row) = matching.find(|row| {
+            row.cpus.contains(cpu)
+                && match row.coprocessor {
+                    Coprocessor::None => true,
+                    Coprocessor::Fpu => has_fpu,
+                    Coprocessor::Mmu => cpu == Cpu::M68030 || mmu_68851,
+                    Coprocessor::Mmu851 => mmu_68851,
+                }
+        }) else {
             return Err(Diagnostic::error(
                 "unsupported-cpu",
                 format!("{mnemonic} is not available on the selected CPU"),
                 span,
             ));
         };
+        // `pmove` has the size of its MMU register, and takes no other.
+        let register_size = operands.iter().find_map(|operand| match operand.mode {
+            Mode::MmuReg(bits) if mnemonic.starts_with("pmove") => Some(mmu_register_size(bits)),
+            _ => None,
+        });
+        if let (Some(register), Some(written)) = (register_size, size) {
+            if register != written {
+                return Err(Diagnostic::error(
+                    "bad-size",
+                    "this size doesn't match the MMU register",
+                    span,
+                ));
+            }
+        }
+        let size = size.or(register_size);
         let wide = CPU_020_UP.contains(self.parser.cpu);
         if !wide && operands.iter().any(|operand| needs_020(&operand.mode)) {
             return Err(Diagnostic::error(
@@ -2330,6 +2387,7 @@ impl LineParser<'_, '_, '_> {
             operands,
             wide,
             fixed_addresses: self.parser.fixed_addresses,
+            mmu_68851: self.parser.mmu_68851,
         })
     }
 
@@ -2405,6 +2463,38 @@ impl LineParser<'_, '_, '_> {
                 self.lexer.pos(),
             )),
         }
+    }
+
+    /// Recognises an MMU register available now, or a function code.
+    fn mmu_word(&self, word: &str) -> Option<Mode> {
+        match word {
+            "sfc" => return Some(Mode::FunctionCode(0)),
+            "dfc" => return Some(Mode::FunctionCode(1)),
+            _ => {}
+        }
+        let has_851 = self.parser.mmu_68851;
+        let is_030 = self.parser.cpu == Cpu::M68030;
+        if has_851 {
+            // BADn and BACn are numbered registers on the 68851.
+            let numbered = |prefix: &str, base: u16| {
+                let digit = word.strip_prefix(prefix)?.parse::<u16>().ok()?;
+                (digit < 8).then_some(base | digit << 2)
+            };
+            if let Some(bits) = numbered("bad", 0x7000).or_else(|| numbered("bac", 0x7400)) {
+                return Some(Mode::MmuReg(bits));
+            }
+        }
+        MMU_REGISTERS
+            .iter()
+            .find(|(name, _, home, _)| {
+                *name == word
+                    && match home {
+                        MmuRegisterHome::Both => true,
+                        MmuRegisterHome::Only851 => has_851,
+                        MmuRegisterHome::Only030 => is_030,
+                    }
+            })
+            .map(|(_, bits, _, _)| Mode::MmuReg(*bits))
     }
 
     /// Reads a floating-point literal, on an FPU instruction only.
@@ -2492,6 +2582,7 @@ impl LineParser<'_, '_, '_> {
                 .iter()
                 .find(|(register, _, cpus)| *register == lower && cpus.contains(self.parser.cpu))
                 .map(|(_, code, _)| Mode::ControlReg(*code)),
+            SpecialWords::Mmu => self.mmu_word(&lower),
             _ => match lower.as_str() {
                 "nc" => Some(Mode::Cache(0)),
                 "dc" => Some(Mode::Cache(1)),
