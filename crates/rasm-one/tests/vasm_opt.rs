@@ -639,6 +639,61 @@ fn test_assemble_short_branches_to_next_match_vasm_o7() -> Result<(), Box<dyn Er
     compare_rule(&sources, &SHORT_NEXT, false)
 }
 
+const NULL_BASE: Rule = Rule {
+    number: 8,
+    flag: "-opt-o8+",
+};
+
+const NULL_OUTER: Rule = Rule {
+    number: 9,
+    flag: "-opt-o9+",
+};
+
+#[test]
+fn test_assemble_null_displacements_match_vasm_o8_o9() -> Result<(), Box<dyn Error>> {
+    let mut sources: Vec<String> = Vec::new();
+    for base in ["0", "0.w", "0.l", "4", "$8000", "z", "w", "g-f"] {
+        for outer in ["0", "0.w", "0.l", "4", "z", "w", "g-f"] {
+            for form in [
+                format!("([{base},a0],{outer})"),
+                format!("([{base},a0,d1.w],{outer})"),
+                format!("([{base},a0],d1.w,{outer})"),
+                format!("([{base},pc],{outer})"),
+                format!("([{base},d1.w],{outer})"),
+            ] {
+                sources.push(format!(" move.w {form},d0\nz equ 0\nw equ 300\nf: nop\ng:"));
+            }
+        }
+    }
+    for form in [
+        "(0.w,a0,d1.w)",
+        "(0.l,a0,d1.w)",
+        "(0,d1.w)",
+        "(0.l,a0)",
+        "(0.l,pc)",
+        "([a0])",
+        "([a0],0)",
+        "([0,a0])",
+        "(1000,a0,d1.w)",
+        "([0],0)",
+    ] {
+        sources.push(format!(" move.w {form},d0"));
+    }
+    sources.push(" xref x\n move.w ([x,a0],x),d0".to_string());
+    sources.push(" opt o8-\n opt o9-\n move.w ([0,a0],0),d0".to_string());
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for source in &sources {
+        for rule in [&NULL_BASE, &NULL_OUTER] {
+            failures.extend(compare(&vasm, source, "68020", Format::Bin, rule, false)?);
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 

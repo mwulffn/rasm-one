@@ -170,7 +170,7 @@ pub struct Options {
 /// Which optimisations apply, numbered like vasm's `-opt-oN` and `opt oN`.
 ///
 /// Only some of vasm's rules exist yet, so this is not yet what vasm does by default.
-/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`; 5, `addq` and `subq`; 7, short branches to what follows.
+/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`; 5, `addq` and `subq`; 7, short branches to what follows; 8, base displacements of zero; 9, outer displacements of zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Optimisations {
@@ -185,7 +185,9 @@ impl Optimisations {
         | 1 << RULE_ABSOLUTES
         | 1 << RULE_QUICK_MOVES
         | 1 << RULE_QUICK_ARITHMETIC
-        | 1 << RULE_SHORT_NEXT;
+        | 1 << RULE_SHORT_NEXT
+        | 1 << RULE_NULL_BASE
+        | 1 << RULE_NULL_OUTER;
 
     /// Every rule that exists, which can be changed with `opt`.
     pub fn all() -> Self {
@@ -241,6 +243,12 @@ pub(crate) const RULE_QUICK_ARITHMETIC: u32 = 5;
 
 /// Rule 7: `bra.s` or `Bcc.s` to the next instruction becomes a no-op, not an error.
 pub(crate) const RULE_SHORT_NEXT: u32 = 7;
+
+/// Rule 8: a base displacement of zero is left out.
+pub(crate) const RULE_NULL_BASE: u32 = 8;
+
+/// Rule 9: an outer displacement of zero is left out.
+pub(crate) const RULE_NULL_OUTER: u32 = 9;
 
 impl Options {
     /// Options for assembling `main` for a 68000.

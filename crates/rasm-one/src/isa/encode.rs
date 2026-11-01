@@ -42,6 +42,10 @@ pub(crate) struct Instruction {
     pub quick_row: Option<&'static InsnRow>,
     /// True if a short branch that would have a displacement of 0 can be a no-op.
     pub short_next_is_no_op: bool,
+    /// True if a base displacement of zero without a width can be left out.
+    pub drops_zero_base: bool,
+    /// True if an outer displacement of zero without a width can be left out.
+    pub drops_zero_outer: bool,
     /// The form of a resizable branch, which layout chooses.
     pub branch_form: Cell<BranchForm>,
 }
@@ -224,7 +228,22 @@ fn auto_width(kind: DispKind, deferred: Width) -> Width {
 
 fn full_plan(full: &FullMode, pc: i64, insn: &Instruction, sizer: &Sizer) -> FullPlan {
     let is_pc = full.base == FullBase::Pc;
-    let base = full.base_disp.as_ref().map(|disp| {
+    // Unlike below, what isn't known yet doesn't count as zero here.
+    let left_out = |disp: &FullDisp| {
+        disp.width.is_none()
+            && eval(&disp.expr, sizer.address_of(sizer.start), sizer.lookup).is_ok_and(|value| {
+                plain_disp_kind(value, insn.fixed_addresses) == DispKind::Number(0)
+            })
+    };
+    let base_disp = full
+        .base_disp
+        .as_ref()
+        .filter(|disp| !(insn.drops_zero_base && !is_pc && left_out(disp)));
+    let outer_disp = full
+        .outer_disp
+        .as_ref()
+        .filter(|disp| !(insn.drops_zero_outer && left_out(disp)));
+    let base = base_disp.map(|disp| {
         disp.width.unwrap_or_else(|| {
             let value = sizer.value(&disp.expr);
             if is_pc {
@@ -234,7 +253,7 @@ fn full_plan(full: &FullMode, pc: i64, insn: &Instruction, sizer: &Sizer) -> Ful
             }
         })
     });
-    let outer = full.outer_disp.as_ref().map(|disp| {
+    let outer = outer_disp.map(|disp| {
         disp.width.unwrap_or_else(|| {
             let value = sizer.value(&disp.expr);
             auto_width(plain_disp_kind(value, insn.fixed_addresses), Width::Long)
