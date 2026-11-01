@@ -96,6 +96,13 @@ const ACCEPTED: &[&str] = &[
     " opt x\nstart: nop",
     " opt l\nstart: nop",
     " opt p-\nstart: nop",
+    " opt nodebug\nstart: nop",
+    " opt debug\nstart: nop",
+    " opt xdebug\nstart: nop\nb: nop\n xdef start",
+    " opt noxdebug\nstart: nop",
+    " opt l0\nstart: nop",
+    " opt l1\nstart: nop",
+    " opt l2\nstart: nop",
     // Relocations.
     " move.l #s,s\ns: dc.l s",
     " move.l s,s\n dc.l s\ns:",

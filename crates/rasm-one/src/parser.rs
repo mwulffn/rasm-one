@@ -2012,8 +2012,9 @@ impl LineParser<'_, '_, '_> {
     }
 
     /// `opt` takes a list of options. Valid ones are as in vasm: any letter, or `o` and
-    /// one more character, with an optional `+` or `-`. `p=`, `p`, `d`, `x` and `l` work, as
-    /// they do in vasm with its optimiser off. The rest are reported as ignored:
+    /// one more character, with an optional `+` or `-`, or Devpac's name for a letter.
+    /// `p=`, `p`, `d`, `x` and `l` work, as they do in vasm with its optimiser off. The
+    /// rest are reported as ignored:
     /// vasm doesn't act on them either, except `o`, and nothing is optimised yet.
     fn parse_opt(&mut self, span: Span) -> Result<(), Diagnostic> {
         loop {
@@ -2044,11 +2045,16 @@ impl LineParser<'_, '_, '_> {
             }
             return Ok(());
         }
-        let name = lower.strip_suffix(['+', '-']).unwrap_or(&lower);
-        let switch = match lower.as_bytes().last() {
-            Some(b'+') => Some(true),
-            Some(b'-') => Some(false),
-            _ => None,
+        let (name, switch) = match opt_long_name(&lower) {
+            Some((letter, on)) => (letter, Some(on)),
+            None => (
+                lower.strip_suffix(['+', '-']).unwrap_or(&lower),
+                match lower.as_bytes().last() {
+                    Some(b'+') => Some(true),
+                    Some(b'-') => Some(false),
+                    _ => None,
+                },
+            ),
         };
         let settings = &mut self.parser.program.hunk_settings;
         match (name, switch) {
@@ -2069,6 +2075,11 @@ impl LineParser<'_, '_, '_> {
                 return Ok(());
             }
             _ => {}
+        }
+        // `l` and a level: 0 means an executable, anything else an object.
+        if let [b'l', level @ b'0'..=b'9'] = name.as_bytes() {
+            settings.linkable = Some(*level != b'0');
+            return Ok(());
         }
         let valid = match name.as_bytes() {
             [letter] => letter.is_ascii_lowercase(),
@@ -3524,6 +3535,26 @@ impl LineParser<'_, '_, '_> {
             _ => Err(self.error_at("syntax", "number or identifier expected", start)),
         }
     }
+}
+
+/// Devpac's names for `opt` letters, as the letter and whether it switches on.
+fn opt_long_name(name: &str) -> Option<(&'static str, bool)> {
+    let (positive, on) = match name.strip_prefix("no") {
+        Some(rest) => (rest, false),
+        None => (name, true),
+    };
+    let letter = match positive {
+        "autopc" => "a",
+        "case" => "c",
+        "chkpc" => "p",
+        "debug" => "d",
+        "symtab" => "s",
+        "type" => "t",
+        "warn" => "w",
+        "xdebug" => "x",
+        _ => return None,
+    };
+    Some((letter, on))
 }
 
 fn parse_section_type(word: &str) -> Option<(SectionKind, MemKind)> {

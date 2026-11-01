@@ -137,3 +137,13 @@ an error.
 **Bug:** vasm writes `7fffffff`, with no message. `dc.l` gives a warning for the same thing.
 
 **rasm-one:** reports `out-of-range`. `test_values_over_32_bits_are_errors`.
+
+## 12. `opt c-` doesn't disable case sensitivity
+
+**Source:** `opt c-` (or `opt nocase`) / `Foo: nop` / `dc.l foo`.
+
+**Bug:** vasm's manual documents the option as turning case sensitivity off, but the source
+still fails with `undefined symbol <foo>`.
+
+**rasm-one:** symbols stay case-sensitive, as they are in vasm, but it warns
+`option-ignored` so the source's author knows.
