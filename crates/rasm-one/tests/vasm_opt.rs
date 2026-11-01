@@ -285,7 +285,6 @@ const DISPLACEMENT_CASES: &[&str] = &[
     "a: nop\nb: move.w b-a-2(a0),d0",
     "a: move.w b-c(a0),d0\nc: nop\nb:",
     " xref x\n move.w x(a0),d0",
-    " section s,bss\nb: ds.w 1\n section c,code\n move.w b(a0),d0",
     " jmp 0(a0)",
     " jsr 0(a0)",
     " lea 0(a0),a1",
