@@ -2,14 +2,14 @@
 
 use std::fs;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rasm_one::{
     assemble, write_bin, write_hunk_exe_with, write_hunk_object, write_listing, Cpu, FileError,
-    FileProvider, FpuChoice, HunkExeOptions, Options, Severity,
+    FileProvider, FpuChoice, HunkExeOptions, Optimisations, Options, Severity,
 };
 
 const USAGE: &str =
-    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>]";
+    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<N>+ | -opt-o<N>-]...";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -40,6 +40,34 @@ struct Args {
     cpu: Cpu,
     fpu: FpuChoice,
     mmu_68851: bool,
+    optimisations: Optimisations,
+}
+
+/// Handles what follows `-opt-o`: a sign, or a rule's number and a sign.
+fn apply_optimisation_flag(
+    optimisations: &mut Optimisations,
+    option: &str,
+    arg: &str,
+) -> Result<()> {
+    let (rule, on) = match (option.strip_suffix('+'), option.strip_suffix('-')) {
+        (Some(rule), _) => (rule, true),
+        (_, Some(rule)) => (rule, false),
+        _ => bail!("unknown option {arg}\n{USAGE}"),
+    };
+    if !optimisations.enabled {
+        *optimisations = Optimisations::all();
+    }
+    if rule.is_empty() {
+        optimisations.set_all_rules(on);
+    } else {
+        let number = rule
+            .parse()
+            .map_err(|_| anyhow!("unknown option {arg}\n{USAGE}"))?;
+        if !optimisations.set_rule(number, on) {
+            eprintln!("warning: optimisation rule {number} doesn't exist yet, so {arg} is ignored");
+        }
+    }
+    Ok(())
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
@@ -51,6 +79,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut cpu = Cpu::default();
     let mut fpu = FpuChoice::default();
     let mut mmu_68851 = false;
+    let mut optimisations = Optimisations::default();
+    // As in vasm, this wins over any -opt- flag, wherever it is.
+    let mut no_opt = false;
     let mut args = args;
     while let Some(arg) = args.next() {
         if arg == "-o" {
@@ -71,6 +102,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             fpu = FpuChoice::Coprocessor;
         } else if arg == "-m68851" {
             mmu_68851 = true;
+        } else if arg == "-no-opt" {
+            no_opt = true;
+        } else if let Some(option) = arg.strip_prefix("-opt-o") {
+            apply_optimisation_flag(&mut optimisations, option, &arg)?;
         } else if arg == "-no-fpu" {
             fpu = FpuChoice::None;
         } else if let Some(found) = arg
@@ -96,6 +131,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             cpu,
             fpu,
             mmu_68851,
+            optimisations: if no_opt {
+                Optimisations::default()
+            } else {
+                optimisations
+            },
         }),
         _ => bail!("{USAGE}"),
     }
@@ -108,6 +148,7 @@ fn main() -> Result<()> {
     options.cpu = args.cpu;
     options.fpu = args.fpu;
     options.mmu_68851 = args.mmu_68851;
+    options.optimisations = args.optimisations;
     options.fixed_addresses = args.format == Format::Bin;
     let assembly = assemble(&options, &NativeProvider);
     if let Some(path) = &args.listing {
@@ -161,6 +202,11 @@ mod tests {
     fn test_parse_args_format_defaults_to_hunk_exe() -> Result<()> {
         assert_eq!(parse(&["a.s", "-o", "x"])?.format, Format::HunkExe);
         assert_eq!(parse(&["a.s", "-o", "x", "-Fbin"])?.format, Format::Bin);
+        let on = parse(&["a.s", "-o", "x", "-opt-o-", "-opt-o1+"])?.optimisations;
+        assert!(on.enabled);
+        let off = parse(&["-opt-o1+", "a.s", "-o", "x", "-no-opt"])?.optimisations;
+        assert!(!off.enabled);
+        assert!(parse(&["a.s", "-o", "x", "-opt-ox+"]).is_err());
         Ok(())
     }
 

@@ -163,7 +163,68 @@ pub struct Options {
     /// The most statements that may be generated, which macros and `rept` could
     /// otherwise multiply without bound. More is an error.
     pub max_atoms: usize,
+    /// What to optimise. Off by default, like vasm's `-no-opt`.
+    pub optimisations: Optimisations,
 }
+
+/// Which optimisations apply, numbered like vasm's `-opt-oN` and `opt oN`.
+///
+/// Only some of vasm's rules exist yet, so this is not yet what vasm does by default.
+/// Those implemented: 1, branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct Optimisations {
+    /// False makes this like vasm's `-no-opt`: no rule applies, and `opt` can't change that.
+    pub enabled: bool,
+    rules: u32,
+}
+
+impl Optimisations {
+    const IMPLEMENTED: u32 = 1 << RULE_BRANCHES;
+
+    /// Every rule that exists, which can be changed with `opt`.
+    pub fn all() -> Self {
+        Self {
+            enabled: true,
+            rules: Self::IMPLEMENTED,
+        }
+    }
+
+    /// No rule until `opt` asks for one, like vasm's `-opt-o-`.
+    pub fn none() -> Self {
+        Self {
+            enabled: true,
+            rules: 0,
+        }
+    }
+
+    /// Switches a rule, returning false if it doesn't exist.
+    pub fn set_rule(&mut self, rule: u32, on: bool) -> bool {
+        let bit = 1u32.checked_shl(rule).unwrap_or(0);
+        if bit & Self::IMPLEMENTED == 0 {
+            return false;
+        }
+        self.rules = if on {
+            self.rules | bit
+        } else {
+            self.rules & !bit
+        };
+        true
+    }
+
+    /// Switches every rule that exists.
+    pub fn set_all_rules(&mut self, on: bool) {
+        self.rules = if on { Self::IMPLEMENTED } else { 0 };
+    }
+
+    /// Whether a rule applies.
+    pub(crate) fn rule(&self, rule: u32) -> bool {
+        self.enabled && self.rules & (1 << rule) != 0
+    }
+}
+
+/// Rule 1: unsized branches take the smallest form that reaches.
+pub(crate) const RULE_BRANCHES: u32 = 1;
 
 impl Options {
     /// Options for assembling `main` for a 68000.
@@ -177,6 +238,7 @@ impl Options {
             fixed_addresses: false,
             max_output_bytes: 256 * 1024 * 1024,
             max_atoms: 4_000_000,
+            optimisations: Optimisations::default(),
         }
     }
 }

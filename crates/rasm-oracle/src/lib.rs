@@ -85,7 +85,8 @@ impl Vasm {
         self.assemble_with_files(source, cpu, format, &[])
     }
 
-    /// Assembles an existing file to a hunk object, from its own directory.
+    /// Assembles an existing file to a hunk object, from its own directory. As with
+    /// [`Vasm::assemble_with_args`], an `-opt-` argument replaces `-no-opt`.
     pub fn assemble_file(
         &self,
         dir: &Path,
@@ -97,7 +98,8 @@ impl Vasm {
         let out_file = out_dir.join("out");
         let run = Command::new(&self.path)
             .current_dir(dir)
-            .args(["-quiet", "-no-opt", "-maxerrors=1", "-Fhunk"])
+            .args(["-quiet", "-maxerrors=1", "-Fhunk"])
+            .args(no_opt_unless_optimising(args))
             .arg(format!("-m{cpu}"))
             .args(args)
             .arg("-o")
@@ -115,7 +117,8 @@ impl Vasm {
         })
     }
 
-    /// Like [`Vasm::assemble`], with extra command-line arguments.
+    /// Like [`Vasm::assemble`], with extra command-line arguments. If any of them
+    /// is an `-opt-` one, `-no-opt` is left out.
     pub fn assemble_with_args(
         &self,
         source: &str,
@@ -158,7 +161,8 @@ impl Vasm {
         fs::write(dir.join(SOURCE_NAME), source)?;
         let out = Command::new(&self.path)
             .current_dir(dir)
-            .args(["-quiet", "-no-opt", "-maxerrors=0"])
+            .args(["-quiet", "-maxerrors=0"])
+            .args(no_opt_unless_optimising(args))
             .arg(format!("-m{cpu}"))
             .arg(format.flag())
             .args(args)
@@ -194,4 +198,13 @@ fn unique_temp_dir() -> Result<PathBuf, std::io::Error> {
     let dir = std::env::temp_dir().join(format!("rasm-oracle-{}-{id}", std::process::id()));
     fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Asking for optimisation rules replaces the usual `-no-opt`.
+fn no_opt_unless_optimising(args: &[&str]) -> &'static [&'static str] {
+    if args.iter().any(|arg| arg.starts_with("-opt-")) {
+        &[]
+    } else {
+        &["-no-opt"]
+    }
 }

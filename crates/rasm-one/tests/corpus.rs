@@ -9,7 +9,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rasm_one::{assemble, write_hunk_object, FileError, FileProvider, Options};
+use rasm_one::{assemble, write_hunk_object, FileError, FileProvider, Optimisations, Options};
 use rasm_oracle::Vasm;
 
 /// Fewer than this means the corpus or the test has gone wrong. Hosts differ: on a
@@ -64,8 +64,28 @@ fn sources_in(dir: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
+fn asks_for_all_rules(path: &Path) -> bool {
+    let text = fs::read(path).unwrap_or_default();
+    String::from_utf8_lossy(&text).lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        let mut words = line.split_whitespace();
+        words.next() == Some("opt") && words.next().is_some_and(|list| list.contains("o+"))
+    })
+}
+
 #[test]
 fn test_corpus_matches_vasm() -> Result<(), Box<dyn Error>> {
+    corpus_matches(&[], Optimisations::default())
+}
+
+#[test]
+fn test_corpus_matches_vasm_with_o1() -> Result<(), Box<dyn Error>> {
+    let mut optimisations = Optimisations::none();
+    optimisations.set_rule(1, true);
+    corpus_matches(&["-opt-o-", "-opt-o1+"], optimisations)
+}
+
+fn corpus_matches(flags: &[&str], optimisations: Optimisations) -> Result<(), Box<dyn Error>> {
     let Some(vasm) = Vasm::from_env()? else {
         return Ok(());
     };
@@ -99,7 +119,13 @@ fn test_corpus_matches_vasm() -> Result<(), Box<dyn Error>> {
         let include_dir = corpus.join(name.split('/').next().unwrap_or(""));
         let include = format!("-I{}", include_dir.display());
         // -x makes undefined symbols errors, as they are here.
-        let theirs = vasm.assemble_file(dir, file, "68000", &["-x", &include])?;
+        // `opt o+` asks vasm for rules that rasm-one doesn't have yet.
+        if !flags.is_empty() && asks_for_all_rules(path) {
+            continue;
+        }
+        let mut args = vec!["-x", include.as_str()];
+        args.extend_from_slice(flags);
+        let theirs = vasm.assemble_file(dir, file, "68000", &args)?;
         if !theirs.success {
             skipped += 1;
             continue;
@@ -110,6 +136,7 @@ fn test_corpus_matches_vasm() -> Result<(), Box<dyn Error>> {
         };
         let mut options = Options::new(file);
         options.include_dirs = vec![provider.root.display().to_string()];
+        options.optimisations = optimisations;
         let assembly = assemble(&options, &provider);
         match write_hunk_object(&assembly) {
             Ok(bytes) if bytes == theirs.bytes => matches += 1,
