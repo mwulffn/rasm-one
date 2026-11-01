@@ -1,7 +1,14 @@
 //! rasm-one: a 68k assembler library using Motorola syntax.
 //!
 //! The library performs no direct filesystem access, so it can also run in a
-//! browser through WASM. All files come through a [`FileProvider`].
+//! browser through WASM. All files come through a [`FileProvider`]:
+//! [`MemoryProvider`] holds them in memory, and a host can implement the trait
+//! for anything else.
+//!
+//! [`assemble`] never fails outright. It returns an [`Assembly`] holding
+//! whatever it could produce, with problems listed as structured
+//! [`Diagnostic`]s. The `write_` functions turn an assembly into an output
+//! format, and refuse if it has errors.
 //!
 //! ```
 //! use rasm_one::{assemble, write_bin, MemoryProvider, Options};
@@ -10,6 +17,106 @@
 //! files.insert("main.s", " nop\n");
 //! let assembly = assemble(&Options::new("main.s"), &files);
 //! assert_eq!(write_bin(&assembly), Ok(vec![0x4E, 0x71]));
+//! ```
+//!
+//! # Diagnostics
+//!
+//! Each diagnostic has a stable code and, if it has a location, a [`Span`] for
+//! an editor to mark. Related locations include any `include` or macro call
+//! that led there.
+//!
+//! ```
+//! use rasm_one::{assemble, MemoryProvider, Options, Severity};
+//!
+//! let mut files = MemoryProvider::new();
+//! files.insert("main.s", " nop\n bogus\n");
+//! let assembly = assemble(&Options::new("main.s"), &files);
+//!
+//! let diagnostic = &assembly.diagnostics[0];
+//! assert_eq!(diagnostic.severity, Severity::Error);
+//! assert_eq!(diagnostic.code, "unknown-mnemonic");
+//! let span = diagnostic.span.expect("this diagnostic has a location");
+//! assert_eq!((span.line, span.col, span.len), (2, 2, 5));
+//! assert_eq!(
+//!     assembly.render_diagnostic(diagnostic),
+//!     "main.s:2:2: error[unknown-mnemonic]: unknown mnemonic bogus",
+//! );
+//! ```
+//!
+//! # Symbols and the line table
+//!
+//! [`Assembly::symbols`] lists defined symbols. Every emitted byte, including
+//! padding, is covered by [`Assembly::line_table`], which can be read in both
+//! directions.
+//!
+//! ```
+//! use rasm_one::{assemble, MemoryProvider, Options};
+//!
+//! let mut files = MemoryProvider::new();
+//! files.insert("main.s", "start: nop\n rts\nsize equ 4\n");
+//! let assembly = assemble(&Options::new("main.s"), &files);
+//!
+//! // A section offset, or a constant if there is no section.
+//! let start = &assembly.symbols[0];
+//! assert_eq!((start.name.as_str(), start.section, start.value), ("start", Some(0), 0));
+//! let size = &assembly.symbols[1];
+//! assert_eq!((size.name.as_str(), size.section, size.value), ("size", None, 4));
+//!
+//! // Address to source: section 0, offset 2.
+//! let entry = assembly.line_for_address(0, 2).expect("offset 2 was emitted");
+//! assert_eq!(assembly.files[entry.span.file as usize], "main.s");
+//! assert_eq!(entry.span.line, 2);
+//!
+//! // Source to addresses: file 0, line 1.
+//! let entries = assembly.addresses_for_line(0, 1);
+//! assert_eq!((entries[0].section, entries[0].offset, entries[0].len), (0, 0, 2));
+//! ```
+//!
+//! # Includes and macros
+//!
+//! Code brought in from elsewhere keeps the location of its own source line.
+//! [`LineEntry::expansion`] leads through [`Assembly::expansions`] to the line
+//! that brought it in.
+//!
+//! ```
+//! use rasm_one::{assemble, ExpansionKind, MemoryProvider, Options};
+//!
+//! let mut files = MemoryProvider::new();
+//! files.insert("main.s", "twice macro\n nop\n nop\n endm\n\n twice\n");
+//! let assembly = assemble(&Options::new("main.s"), &files);
+//!
+//! let entry = assembly.line_for_address(0, 0).expect("offset 0 was emitted");
+//! assert_eq!(entry.span.line, 2);
+//! let expansion = assembly.expansions[entry.expansion.expect("came from a macro") as usize];
+//! assert_eq!(expansion.kind, ExpansionKind::Macro);
+//! assert_eq!(expansion.site.line, 6);
+//! ```
+//!
+//! # Providing files
+//!
+//! A provider returns [`FileError::NotFound`] for a file that doesn't exist, and
+//! the assembler then tries the next place it might be: as written, beside the
+//! main source, then in each directory of [`Options::include_dirs`]. Paths are
+//! passed with `.` and `dir/..` already removed.
+//!
+//! ```
+//! use rasm_one::{assemble, write_bin, FileError, FileProvider, Options};
+//!
+//! /// A provider serving one fixed include.
+//! struct Project;
+//!
+//! impl FileProvider for Project {
+//!     fn read(&self, path: &str, _including_file: Option<&str>) -> Result<Vec<u8>, FileError> {
+//!         match path {
+//!             "main.s" => Ok(b" include \"defs.i\"\n dc.b value\n".to_vec()),
+//!             "defs.i" => Ok(b"value equ 7\n".to_vec()),
+//!             _ => Err(FileError::NotFound(path.to_string())),
+//!         }
+//!     }
+//! }
+//!
+//! let assembly = assemble(&Options::new("main.s"), &Project);
+//! assert_eq!(write_bin(&assembly), Ok(vec![7]));
 //! ```
 
 mod atom;
