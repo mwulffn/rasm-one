@@ -33,6 +33,7 @@ pub(crate) struct Built {
     pub expansions: Vec<Expansion>,
     pub unit_name: Option<String>,
     pub max_output_bytes: i64,
+    pub hunk_settings: crate::HunkSettings,
 }
 
 /// Lays out a parsed program and generates its bytes.
@@ -119,6 +120,7 @@ pub(crate) fn build(program: Program) -> Built {
             kind: entry.kind,
             origin: entry.origin,
             fixed_addresses: program.fixed_addresses,
+            position_independent: atom.position_independent,
             span: atom.span,
             instruction_start: 0,
             lookup: &lookup,
@@ -193,6 +195,7 @@ pub(crate) fn build(program: Program) -> Built {
         expansions: program.expansions,
         unit_name: program.unit_name,
         max_output_bytes: program.max_output_bytes,
+        hunk_settings: program.hunk_settings,
     }
 }
 

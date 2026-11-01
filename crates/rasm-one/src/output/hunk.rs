@@ -95,6 +95,14 @@ pub fn write_hunk_exe_with(
     options: HunkExeOptions,
 ) -> Result<Vec<u8>, OutputError> {
     check_writable(assembly)?;
+    // The source can ask for the other kind of file with `opt l+`.
+    if assembly.hunk_settings.linkable == Some(true) {
+        return object_bytes(assembly);
+    }
+    executable_bytes(assembly, options)
+}
+
+fn executable_bytes(assembly: &Assembly, options: HunkExeOptions) -> Result<Vec<u8>, OutputError> {
     let hunks = select_hunks(assembly);
     let mut out = Writer::default();
     out.long(HUNK_HEADER);
@@ -126,6 +134,14 @@ pub fn write_hunk_exe_with(
 /// Writes a linkable object file.
 pub fn write_hunk_object(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     check_writable(assembly)?;
+    // The source can ask for the other kind of file with `opt l-`.
+    if assembly.hunk_settings.linkable == Some(false) {
+        return executable_bytes(assembly, HunkExeOptions::default());
+    }
+    object_bytes(assembly)
+}
+
+fn object_bytes(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     let hunks = select_hunks(assembly);
     let mut out = Writer::default();
     out.long(HUNK_UNIT);
@@ -441,10 +457,15 @@ fn write_external_info(
 }
 
 fn write_symbols(assembly: &Assembly, section: usize, out: &mut Writer) {
+    let settings = assembly.hunk_settings;
+    if settings.no_symbols {
+        return;
+    }
     let mut symbols = assembly
         .symbols
         .iter()
         .filter(|symbol| !symbol.local && symbol.section == Some(section))
+        .filter(|symbol| symbol.exported || !settings.exported_symbols_only)
         .peekable();
     if symbols.peek().is_none() {
         return;

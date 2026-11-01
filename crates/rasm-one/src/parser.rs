@@ -58,6 +58,8 @@ pub(crate) struct Program {
     pub expansions: Vec<Expansion>,
     /// Name given by `idnt`.
     pub unit_name: Option<String>,
+    /// Hunk output settings from `opt`.
+    pub hunk_settings: crate::HunkSettings,
     /// True if labels are final addresses, as in a raw binary.
     pub fixed_addresses: bool,
     /// The limit on the size of the output.
@@ -608,6 +610,8 @@ pub(crate) struct Parser<'f> {
     rs_counter: i64,
     so_counter: i64,
     fo_counter: i64,
+    /// Set by `opt p+`, for the lines that follow.
+    position_independent: bool,
     /// Set by `end`.
     ended: bool,
     /// Set by `mexit` until the macro has been left.
@@ -649,6 +653,7 @@ impl<'f> Parser<'f> {
             rs_counter: 0,
             so_counter: 0,
             fo_counter: 0,
+            position_independent: false,
             ended: false,
             macro_exit: false,
             macros: HashMap::new(),
@@ -1274,6 +1279,7 @@ impl<'f> Parser<'f> {
             span,
             section,
             expansion: self.current_expansion,
+            position_independent: self.position_independent,
         });
     }
 
@@ -2005,6 +2011,85 @@ impl LineParser<'_, '_, '_> {
         )
     }
 
+    /// `opt` takes a list of options. Valid ones are as in vasm: any letter, or `o` and
+    /// one more character, with an optional `+` or `-`. `p=`, `p`, `d`, `x` and `l` work, as
+    /// they do in vasm with its optimiser off. The rest are reported as ignored:
+    /// vasm doesn't act on them either, except `o`, and nothing is optimised yet.
+    fn parse_opt(&mut self, span: Span) -> Result<(), Diagnostic> {
+        loop {
+            let word = String::from_utf8_lossy(self.lexer.word()).into_owned();
+            let continues = word.ends_with(',');
+            for item in word.split(',').filter(|item| !item.is_empty()) {
+                self.apply_opt_item(item, span)?;
+            }
+            if word.is_empty() || word.starts_with(',') || word.contains(",,") {
+                return Err(Diagnostic::error("bad-option", "option expected", span));
+            }
+            if !continues {
+                return Ok(());
+            }
+            self.lexer.skip_blanks();
+        }
+    }
+
+    fn apply_opt_item(&mut self, item: &str, span: Span) -> Result<(), Diagnostic> {
+        let lower = item.to_ascii_lowercase();
+        if let Some(processors) = lower.strip_prefix("p=") {
+            for processor in processors.split('/') {
+                match processor {
+                    "68881" | "68882" => self.parser.fpu = FpuChoice::Coprocessor,
+                    "68851" => self.parser.mmu_68851 = true,
+                    number => self.set_cpu(number, span)?,
+                }
+            }
+            return Ok(());
+        }
+        let name = lower.strip_suffix(['+', '-']).unwrap_or(&lower);
+        let switch = match lower.as_bytes().last() {
+            Some(b'+') => Some(true),
+            Some(b'-') => Some(false),
+            _ => None,
+        };
+        let settings = &mut self.parser.program.hunk_settings;
+        match (name, switch) {
+            ("p", Some(on)) => {
+                self.parser.position_independent = on;
+                return Ok(());
+            }
+            ("d", Some(on)) => {
+                settings.no_symbols = !on;
+                return Ok(());
+            }
+            ("x", Some(on)) => {
+                settings.exported_symbols_only = on;
+                return Ok(());
+            }
+            ("l", Some(on)) => {
+                settings.linkable = Some(on);
+                return Ok(());
+            }
+            _ => {}
+        }
+        let valid = match name.as_bytes() {
+            [letter] => letter.is_ascii_lowercase(),
+            [b'o', second] => second.is_ascii_alphanumeric(),
+            _ => false,
+        };
+        if !valid {
+            return Err(Diagnostic::error(
+                "bad-option",
+                format!("unknown option {item}"),
+                span,
+            ));
+        }
+        self.parser.program.diagnostics.push(Diagnostic::warning(
+            "option-ignored",
+            format!("option {item} is ignored"),
+            span,
+        ));
+        Ok(())
+    }
+
     /// Changes the target CPU from here on.
     fn set_cpu(&mut self, number: &str, span: Span) -> Result<(), Diagnostic> {
         let cpu = number.parse().ok().and_then(Cpu::from_number);
@@ -2344,11 +2429,10 @@ impl LineParser<'_, '_, '_> {
                 self.parser.program.unit_name = Some(name);
                 Ok(())
             }
-            "opt" => Err(Diagnostic::error(
-                "unsupported-opt",
-                "opt is not supported, because ignoring it could change what the source means",
-                span,
-            )),
+            "opt" => {
+                self.no_size(size, span)?;
+                self.parse_opt(span)
+            }
             // Listings aren't affected by these; the rest of the line is ignored.
             "list" | "nolist" | "page" | "nopage" | "ttl" | "spc" | "llen" | "plen" => {
                 self.no_size(size, span)

@@ -341,6 +341,8 @@ pub(crate) struct EmitContext<'a> {
     /// Fixed address of that section, if it has one. Its symbols are then
     /// constants, so addresses have to include this.
     pub origin: Option<i64>,
+    /// True under `opt p+`, where absolute references are errors.
+    pub position_independent: bool,
     /// Source of the atom being emitted.
     pub span: Span,
     /// Start of the current instruction, which is what `*` means in operands.
@@ -433,6 +435,13 @@ impl EmitContext<'_> {
     /// Relocations always cover the field about to be written.
     pub fn put_value(&mut self, value: Value, bytes: u32) {
         if let Some(target) = self.reloc_target(value.base) {
+            if self.position_independent {
+                self.error(
+                    "not-position-independent",
+                    "absolute reference in position-independent code",
+                    self.span,
+                );
+            }
             self.relocs.push(Reloc {
                 offset: self.data.len() as u32,
                 size: bytes as u8,

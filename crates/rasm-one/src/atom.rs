@@ -52,4 +52,6 @@ pub(crate) struct Atom {
     pub section: usize,
     /// The include or macro expansion it came from, if any.
     pub expansion: Option<u32>,
+    /// True under `opt p+`, where absolute references are errors.
+    pub position_independent: bool,
 }
