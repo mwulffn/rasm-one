@@ -6,7 +6,7 @@ use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::Diagnostic;
 use crate::expr::{eval, Base, Value};
 use crate::isa::encode::{encode, EmitContext};
-use crate::parser::{add_expansion_chain, Program, SectionEntry};
+use crate::parser::{add_expansion_chain, is_internal_symbol, Program, SectionEntry};
 use crate::types::{SectionKind, Size};
 use crate::{Expansion, LineEntry, Reloc, Section, Symbol};
 
@@ -134,6 +134,7 @@ pub(crate) fn build(program: Program) -> Built {
         .symbols
         .iter()
         .zip(&values)
+        .filter(|(entry, _)| !is_internal_symbol(&entry.name))
         .filter_map(|(entry, value)| {
             let value = value.get()?;
             Some(Symbol {
