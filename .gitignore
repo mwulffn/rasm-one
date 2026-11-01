@@ -1,4 +1,4 @@
 /target
 /.claude/settings.local.json
-# Third-party copyrighted manual; see README for the source.
-/docs/M68000PRM.pdf
+# Third-party copyrighted manuals; see README for the sources.
+/docs/*.pdf
