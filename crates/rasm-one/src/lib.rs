@@ -226,8 +226,8 @@ pub enum Rule {
     Generic,
     /// `of`: float constants use the lowest precision that holds them exactly.
     Float,
-    /// What only `o+` switches on in vasm, with no name of its own: labels without a size
-    /// become PC-relative if near enough, and `jmp` and `jsr` become branches.
+    /// `a`, not `oa`: labels without a size become PC-relative if near enough, and `jmp` and `jsr`
+    /// become branches.
     PcRelative,
 }
 

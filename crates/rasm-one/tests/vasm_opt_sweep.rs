@@ -6,7 +6,10 @@
 use std::error::Error;
 use std::sync::Mutex;
 
-use rasm_one::{assemble, write_hunk_object, Cpu, MemoryProvider, Options};
+use rasm_one::{
+    assemble, write_bin, write_hunk_object, Cpu, MemoryProvider, Optimisations, Options, Rule,
+    Target,
+};
 use rasm_oracle::{Format, Vasm};
 
 const CPUS: &[&str] = &["68000", "68010", "68020", "68060"];
@@ -99,6 +102,20 @@ fn lines() -> Vec<String> {
         lines.push(format!(" jsr {address}"));
         lines.push(format!(" pea {address}"));
     }
+    for base in ["0", "4", "z", "f", "0.w", "0.l", "$8000"] {
+        for form in [
+            format!("([{base},pc])"),
+            format!("([{base},pc],4)"),
+            format!("([{base},pc,d1.w])"),
+            format!("([{base},a0])"),
+            format!("([{base},a0],0)"),
+            format!("({base},a0,d1.w)"),
+            format!("({base},pc,d1.w)"),
+            format!("({base},d1.w)"),
+        ] {
+            lines.push(format!(" move.w {form},d0"));
+        }
+    }
     for mnemonic in ["clr", "tst", "not", "neg"] {
         for size in SIZES {
             for destination in DESTINATIONS {
@@ -156,7 +173,8 @@ fn known_difference(line: &str, cpu: &str) -> bool {
                 .next()
                 .is_some_and(|c| c == '$' || c.is_ascii_digit())
         };
-        if operands.split(',').all(bare) {
+        let zero_list = operands.starts_with("0,") || operands.starts_with("0.");
+        if operands.split(',').all(bare) && zero_list {
             return true;
         }
     }
@@ -213,10 +231,19 @@ fn test_assemble_every_combination_matches_optimising_vasm() -> Result<(), Box<d
                             continue;
                         }
                         let source = format!("{line}\nf: nop\nz equ 0\n");
-                        let Ok(theirs) =
-                            vasm.assemble_cached(&source, cpu, Format::HunkObject, &["-opt-o+"])
-                        else {
-                            continue;
+                        let theirs = match vasm.assemble_cached(
+                            &source,
+                            cpu,
+                            Format::HunkObject,
+                            &["-opt-o+"],
+                        ) {
+                            Ok(theirs) => theirs,
+                            Err(error) => {
+                                if let Ok(mut found) = found.lock() {
+                                    found.push(format!("{cpu} {line}: vasm failed: {error}"));
+                                }
+                                continue;
+                            }
                         };
                         let mine = ours(line, cpu);
                         let same = match &mine {
@@ -249,6 +276,104 @@ fn test_assemble_every_combination_matches_optimising_vasm() -> Result<(), Box<d
         "{} differences in {} lines:\n{}",
         found.len(),
         lines.len(),
+        found.join("\n")
+    );
+    Ok(())
+}
+
+/// What the hunk test leaves out: final addresses, where labels and numbers are the same thing.
+#[test]
+fn test_assemble_org_combinations_match_optimising_vasm() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut lines = Vec::new();
+    for org in ["$100", "$8000", "$20000", "$80000000"] {
+        for address in [
+            "f",
+            "f.l",
+            "4",
+            "$100",
+            "$7ffe",
+            "$8000",
+            "$20008",
+            "$80000008",
+            "(f,pc)",
+        ] {
+            for form in [
+                format!(" lea {address},a0"),
+                format!(" jmp {address}"),
+                format!(" jsr {address}"),
+                format!(" pea {address}"),
+                format!(" move.l {address},d0"),
+                format!(" move.l d0,{address}"),
+                format!(" tst.w {address}"),
+                format!(" btst #1,{address}"),
+                format!(" cmpi.l #1,{address}"),
+                format!(" move.l #{address},a0"),
+                format!(" bra {address}"),
+                format!(" bsr {address}"),
+                format!(" beq {address}"),
+                format!(" bra.w {address}"),
+            ] {
+                // Only an instruction that takes an address can have one with a size or `pc`,
+                // and rasm-one is stricter about that than vasm.
+                let plain = !address.contains('.') && !address.contains('(');
+                let takes_address = !form.contains('#') && !form.contains(" b");
+                if !plain && !takes_address {
+                    continue;
+                }
+                lines.push(format!(" org {org}\n{form}\n nop\nf: nop"));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for source in &lines {
+        for cpu in ["68000", "68020"] {
+            for flags in [
+                &["-opt-o+"][..],
+                &["-opt-o-", "-opt-a+"],
+                &["-opt-o+", "-opt-o3-"],
+            ] {
+                let theirs = vasm.assemble_cached(source, cpu, Format::Bin, flags)?;
+                let mut files = MemoryProvider::new();
+                files.insert("t.s", source.as_str());
+                let mut options = Options::new("t.s");
+                options.target = Target::RawBinary;
+                options.cpu = cpu
+                    .parse()
+                    .ok()
+                    .and_then(Cpu::from_number)
+                    .unwrap_or_default();
+                if flags[0] == "-opt-o-" {
+                    options.optimisations = Optimisations::none();
+                    options.optimisations.set_rule(Rule::PcRelative, true);
+                } else if flags.len() > 1 {
+                    options.optimisations.set_rule(Rule::Absolutes, false);
+                }
+                let mine = write_bin(&assemble(&options, &files));
+                let same = match &mine {
+                    Ok(bytes) => theirs.success && *bytes == theirs.bytes,
+                    Err(_) => !theirs.success,
+                };
+                if !same {
+                    found.push(format!(
+                        "{cpu} {flags:?} {source:?}: vasm {} ours {}",
+                        if theirs.success {
+                            hex(&theirs.bytes)
+                        } else {
+                            "refused".to_string()
+                        },
+                        mine.map_or("refused".to_string(), |bytes| hex(&bytes)),
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "{} differences:\n{}",
+        found.len(),
         found.join("\n")
     );
     Ok(())

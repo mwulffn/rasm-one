@@ -1149,6 +1149,13 @@ fn test_assemble_movem_with_a_long_address_stays_movem() {
     }
 }
 
+/// A list can only hold 16 registers, and vasm refuses or ignores what's above them.
+#[test]
+fn test_assemble_movem_list_past_16_bits_is_not_a_move() {
+    let bytes = ours(" movem.l (a0)+,#$30000", "68000", Format::Bin, &ALL, false);
+    assert!(!bytes.is_ok_and(|bytes| bytes.starts_with(&[0x30, 0x58])));
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 

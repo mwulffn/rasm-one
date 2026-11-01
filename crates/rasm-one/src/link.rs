@@ -45,7 +45,7 @@ pub fn link(inputs: &[Assembly]) -> Assembly {
     linked.max_output_bytes = inputs
         .iter()
         .map(|input| input.max_output_bytes)
-        .max()
+        .min()
         .unwrap_or(i64::MAX);
     let file_bases = merge_sources(inputs, &mut linked);
     check_inputs(inputs, &file_bases, &mut linked);
@@ -80,7 +80,7 @@ fn fits_limit(inputs: &[Assembly], limit: i64) -> bool {
         .iter()
         .flat_map(|input| &input.sections)
         .filter(|section| !section.dummy)
-        .map(|section| (section.data.len() as i64).saturating_add(3));
+        .map(|section| (section.data.len() as i64).saturating_add(3) & !3);
     sizes.fold(0i64, i64::saturating_add) <= limit.min(i64::from(u32::MAX))
 }
 
@@ -128,7 +128,8 @@ fn place_sections(inputs: &[Assembly], linked: &mut Assembly) -> Vec<Vec<Option<
         }
     }
     // Sections of a kind keep the order they were first seen in.
-    order.sort_by_key(|(section, seen)| (kind_rank(section.kind), *seen));
+    // Empty ones come last, so they don't affect the order or the memory type.
+    order.sort_by_key(|(section, seen)| (section.data.is_empty(), kind_rank(section.kind), *seen));
     for (section, _) in &order {
         let number = joined_section(section, linked);
         if number.is_none() {
@@ -143,7 +144,7 @@ fn place_sections(inputs: &[Assembly], linked: &mut Assembly) -> Vec<Vec<Option<
             });
         } else if let Some(number) = number {
             let target = &mut linked.sections[number];
-            if target.mem == MemKind::Any {
+            if target.mem == MemKind::Any && !section.data.is_empty() {
                 target.mem = section.mem;
             }
         }
@@ -444,6 +445,14 @@ fn apply_reloc(reloc: Reloc, target: Resolved, section: usize, linked: &mut Asse
 }
 
 fn add_to_field(reloc: &Reloc, addition: i64, section: usize, linked: &mut Assembly) {
+    if !matches!(reloc.size, 1 | 2 | 4) {
+        linked.diagnostics.push(Diagnostic::error(
+            "link-relocation",
+            format!("a relocation can't have {} bytes", reloc.size),
+            reloc.span,
+        ));
+        return;
+    }
     let data = &mut linked.sections[section].data;
     let start = reloc.offset as usize;
     let Some(field) = data.get_mut(start..start + usize::from(reloc.size)) else {

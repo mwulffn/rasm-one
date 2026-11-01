@@ -51,6 +51,8 @@ pub(crate) struct Instruction {
     pub drops_zero_base: bool,
     /// True if an outer displacement of zero without a width can be left out.
     pub drops_zero_outer: bool,
+    /// True if a float constant can be written in a lower precision.
+    pub narrows_floats: bool,
     /// True if labels without a size can become PC-relative.
     pub pc_relative: bool,
     /// True if this was written as `jmp` or `jsr`, which stays one out of reach.
@@ -188,8 +190,8 @@ fn pc_disp_kind(value: Value, pc: i64, sizer: &Sizer) -> DispKind {
             DispKind::Number(sign_extend_32(value.offset))
         }
         Base::Absolute => {
-            let target = sign_extend_32(value.offset);
-            DispKind::Number(target.wrapping_sub(sizer.address_of(pc).offset))
+            let distance = value.offset.wrapping_sub(sizer.address_of(pc).offset);
+            DispKind::Number(sign_extend_32(distance))
         }
         Base::Section(section) if section == sizer.section => {
             DispKind::Number(value.offset.wrapping_sub(sizer.address_of(pc).offset))
@@ -268,10 +270,11 @@ fn full_plan(full: &FullMode, pc: i64, insn: &Instruction, sizer: &Sizer) -> Ful
                 plain_disp_kind(value, insn.fixed_addresses) == DispKind::Number(0)
             })
     };
-    let base_disp = full
-        .base_disp
-        .as_ref()
-        .filter(|disp| !(insn.drops_zero_base && !is_pc && left_out(disp)));
+    let base_disp = full.base_disp.as_ref().filter(|disp| {
+        // A zero from the PC is an address if addresses are final, so not nothing.
+        let can_drop = !is_pc || !sizer.has_final_addresses();
+        !(insn.drops_zero_base && can_drop && left_out(disp))
+    });
     let outer_disp = full
         .outer_disp
         .as_ref()
@@ -352,19 +355,20 @@ fn plan_extension(
         | Mode::PcIndex(..) => ExtensionPlan::Fixed(2),
         Mode::AbsLong(_) => ExtensionPlan::Fixed(4),
         Mode::AbsOrPc(expr) => {
-            let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup);
-            match value.map(|value| {
-                let kind = plain_disp_kind(value, fixed);
-                (value, kind)
-            }) {
-                Ok((_, DispKind::Number(number))) if fits_word(number) => {
-                    ExtensionPlan::ShortAbsolute
+            let Ok(value) = eval(expr, sizer.address_of(sizer.start), sizer.lookup) else {
+                return ExtensionPlan::Fixed(4);
+            };
+            match plain_disp_kind(value, fixed) {
+                DispKind::Number(number) if insn.shortens_absolutes && fits_word(number) => {
+                    return ExtensionPlan::ShortAbsolute;
                 }
-                Ok((value, _)) if value.base == Base::Section(sizer.section) => {
-                    match pc_disp_kind(value, pc, sizer) {
-                        DispKind::Number(number) if fits_word(number) => ExtensionPlan::PcRelative,
-                        _ => ExtensionPlan::Fixed(4),
-                    }
+                _ => {}
+            }
+            let nearby = value.base == Base::Section(sizer.section)
+                || (value.base == Base::Absolute && sizer.has_final_addresses());
+            match pc_disp_kind(value, pc, sizer) {
+                DispKind::Number(number) if nearby && fits_word(number) => {
+                    ExtensionPlan::PcRelative
                 }
                 _ => ExtensionPlan::Fixed(4),
             }
@@ -372,7 +376,9 @@ fn plan_extension(
         Mode::AbsShortable(expr) => {
             let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup);
             match value.map(|value| plain_disp_kind(value, fixed)) {
-                Ok(DispKind::Number(number)) if fits_word(number) => ExtensionPlan::ShortAbsolute,
+                Ok(DispKind::Number(number)) if insn.shortens_absolutes && fits_word(number) => {
+                    ExtensionPlan::ShortAbsolute
+                }
                 _ => ExtensionPlan::Fixed(4),
             }
         }
@@ -473,7 +479,12 @@ impl Instruction {
                 return changed;
             }
         }
-        let far = |form| matches!(form, BranchForm::Jump | BranchForm::Long);
+        let far = |form| {
+            matches!(
+                form,
+                BranchForm::Jump | BranchForm::JumpWord | BranchForm::Long
+            )
+        };
         let conditional = self.is_conditional_branch();
         // A conditional branch judged out of reach stays that way, like vasm.
         if conditional && far(current) {
@@ -484,6 +495,11 @@ impl Instruction {
         };
         let bytes = self.form_bytes(current);
         let mut form = self.form_for(distance, current, grow_only);
+        // Out of reach, a number that fits a word is written as one, except after a
+        // conditional branch, as in vasm.
+        if form == BranchForm::Jump && !conditional && self.branch_target_fits_word(sizer) {
+            form = BranchForm::JumpWord;
+        }
         let moved_sizer = Sizer {
             section: sizer.section,
             origin: sizer.origin,
@@ -511,6 +527,16 @@ impl Instruction {
         true
     }
 
+    fn branch_target_fits_word(&self, sizer: &Sizer) -> bool {
+        let Some(Mode::AbsLong(expr)) = self.operands.first().map(|operand| &operand.mode) else {
+            return false;
+        };
+        self.shortens_absolutes
+            && eval(expr, sizer.address_of(sizer.start), sizer.lookup).is_ok_and(|value| {
+                value.base == Base::Absolute && fits_word(sign_extend_32(value.offset))
+            })
+    }
+
     /// A `jmp` or `jsr` to a number stays one.
     fn constant_jump_form(&self, sizer: &Sizer) -> Option<BranchForm> {
         let Mode::AbsLong(expr) = &self.operands.first()?.mode else {
@@ -520,12 +546,12 @@ impl Instruction {
         let DispKind::Number(number) = plain_disp_kind(value, self.fixed_addresses) else {
             return None;
         };
-        if fits_word(number) {
+        if self.shortens_absolutes && fits_word(number) {
             Some(BranchForm::JumpWord)
-        } else if value.base == Base::Absolute {
+        } else if value.base == Base::Absolute && !sizer.has_final_addresses() {
             Some(BranchForm::Jump)
         } else {
-            // A label in a raw binary that's too far for a word can still be near.
+            // A final address that's too far for a word can still be near.
             None
         }
     }
@@ -646,6 +672,7 @@ impl Instruction {
             .map(Rewritten::QuickMove)
             .or_else(|| self.rewritten(sizer).map(Rewritten::One))
             .or_else(|| self.generic_rewrite(sizer))
+            .or_else(|| self.narrowed_raw_float(sizer))
     }
 
     /// This as another instruction, if its values now allow one.
@@ -1820,7 +1847,9 @@ fn resolve_growth(mode: &Mode, plan: ExtensionPlan) -> Option<Mode> {
 
 /// A copy of the instruction with any grown modes resolved, if there are any.
 fn with_growth_resolved(insn: &Instruction, sizer: &Sizer) -> Option<Instruction> {
-    if !insn.wide && !insn.drops_zero_displacement && !insn.shortens_absolutes {
+    let optimises_modes =
+        insn.drops_zero_displacement || insn.shortens_absolutes || insn.pc_relative;
+    if !insn.wide && !optimises_modes {
         return None;
     }
     let size = insn.size.unwrap_or(Size::Word);
@@ -2028,15 +2057,12 @@ fn emit_pc_field(
             span,
         ));
     }
-    let target = if value.base == Base::Absolute {
-        sign_extend_32(value.offset)
-    } else {
-        value.offset
-    };
     let distance = if literal {
-        target
+        sign_extend_32(value.offset)
+    } else if value.base == Base::Absolute {
+        sign_extend_32(value.offset.wrapping_sub(ctx.address_of(pc).offset))
     } else {
-        target.wrapping_sub(ctx.address_of(pc).offset)
+        value.offset.wrapping_sub(ctx.address_of(pc).offset)
     };
     let (min, max) = match bytes {
         1 => (-0x80, 0x7F),

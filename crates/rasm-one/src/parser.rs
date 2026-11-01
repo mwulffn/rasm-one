@@ -8,8 +8,9 @@ use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
-use crate::float::{self, FloatLiteral, Narrowed};
+use crate::float::{self, FloatLiteral};
 use crate::isa::encode::{BranchForm, Instruction, QuickMoves, Rewrites};
+use crate::isa::rewrite::narrowed_float_row;
 use crate::isa::table::{
     rows_for, Coprocessor, EaSet, Encoding, InsnRow, MmuRegisterHome, CONTROL_REGISTERS,
     CPU_020_UP, MMU_REGISTERS,
@@ -2142,6 +2143,10 @@ impl LineParser<'_, '_, '_> {
             optimisations.set_all_rules(on);
             return true;
         }
+        if name == "a" {
+            optimisations.set_rule(Rule::PcRelative, on);
+            return true;
+        }
         match name.strip_prefix('o').and_then(Rule::named) {
             Some(rule) => {
                 optimisations.set_rule(rule, on);
@@ -2800,6 +2805,11 @@ impl LineParser<'_, '_, '_> {
                 }
             }
         }
+        // A literal is narrowed now, and only raw bits later, or it would be narrowed twice.
+        let raw_float = matches!(
+            operands.first().map(|operand| &operand.mode),
+            Some(Mode::Immediate(_))
+        );
         let (row, size, operands) = self.narrow_float(mnemonic, row, size, operands);
         Ok(Instruction {
             row,
@@ -2813,6 +2823,11 @@ impl LineParser<'_, '_, '_> {
             shortens_absolutes: self.parser.optimisations.rule(Rule::Absolutes),
             quick_move,
             generic_rewrites: self.parser.optimisations.rule(Rule::Generic),
+            narrows_floats: raw_float
+                && self.parser.optimisations.rule(Rule::Float)
+                && mnemonic != "ftst"
+                && row.coprocessor == Coprocessor::Fpu
+                && row.encoding != Encoding::FpSinCosEa,
             cpu: self.parser.cpu,
             drops_zero_base: self.parser.optimisations.rule(Rule::NullBase),
             drops_zero_outer: self.parser.optimisations.rule(Rule::NullOuter),
@@ -2861,30 +2876,11 @@ impl LineParser<'_, '_, '_> {
         if mnemonic == "ftst" || row.encoding == Encoding::FpSinCosEa {
             return (row, size, operands);
         }
-        let multiplication = match mnemonic {
-            "fdiv" => Some("fmul"),
-            "fsdiv" => Some("fsmul"),
-            "fddiv" => Some("fdmul"),
-            "fsgldiv" => Some("fsglmul"),
-            _ => None,
+        let Some(bytes) = float::float_bytes(&literal.text, written) else {
+            return (row, size, operands);
         };
-        let same_row = |name: &str, size: Size| {
-            rows_for(name)?
-                .iter()
-                .find(|other| other.encoding == row.encoding && other.sizes.contains(&size))
-        };
-        let reciprocal = multiplication
-            .and_then(|name| same_row(name, Size::Single))
-            .zip(float::reciprocal_of_power_of_two(&literal.text, written));
-        let (new_row, new_size, bits) = if let Some((other, bits)) = reciprocal {
-            (other, Size::Single, bits)
-        } else {
-            match float::narrowed(&literal.text, written) {
-                Some(Narrowed::Word(value)) => (row, Size::Word, value),
-                Some(Narrowed::Single(bits)) => (row, Size::Single, bits),
-                Some(Narrowed::Double(bits)) => (row, Size::Double, bits),
-                None => return (row, size, operands),
-            }
+        let Some((new_row, new_size, bits)) = narrowed_float_row(row, written, &bytes) else {
+            return (row, size, operands);
         };
         operands[0].mode = Mode::Immediate(Expr::Num(bits));
         (new_row, Some(new_size), operands)
@@ -3032,7 +3028,11 @@ impl LineParser<'_, '_, '_> {
         }
         match self.parse_size_suffix()? {
             Some(Size::Word) => Ok(Mode::AbsWord(expr)),
-            None if self.parser.optimisations.rule(Rule::Absolutes) => Ok(Mode::AbsShortable(expr)),
+            None if self.parser.optimisations.rule(Rule::Absolutes)
+                || self.parser.optimisations.rule(Rule::PcRelative) =>
+            {
+                Ok(Mode::AbsShortable(expr))
+            }
             Some(Size::Long) | None => Ok(Mode::AbsLong(expr)),
             Some(_) => Err(self.error_at(
                 "bad-size",

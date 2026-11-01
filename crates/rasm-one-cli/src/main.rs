@@ -114,6 +114,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             mmu_68851 = true;
         } else if arg == "-no-opt" {
             no_opt = true;
+        } else if arg == "-opt-a+" || arg == "-opt-a-" {
+            optimisations.set_rule(Rule::PcRelative, arg.ends_with('+'));
         } else if let Some(option) = arg.strip_prefix("-opt-o") {
             apply_optimisation_flag(&mut optimisations, option, &arg)?;
         } else if arg == "-no-fpu" {

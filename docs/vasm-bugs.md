@@ -178,7 +178,7 @@ becomes a correct `lea`. `test_assemble_subtracting_8000_from_address_register_s
 **Source:** `eor.b #$ffff,d0` with `-opt-og+`.
 
 **Bug:** the value doesn't fit a byte, and without the option this is an error. With it, vasm
-writes `not.b d0`, with no message.
+writes `not.b d0`, with no message. `eor.b #$7fff`, `eor.b #$1ff` and `eor.w #$100000000` do the same.
 
 **rasm-one:** stays an error. `test_assemble_eor_byte_out_of_range_stays_an_error`.
 
@@ -201,3 +201,30 @@ into a double infinity and `1e-400` into `0`, both of which an extended holds as
 and leaves `d1` alone. `asl #1,d1` and `asl d0` are correct.
 
 **rasm-one:** writes `add.w d1,d1` (`d241`). `test_assemble_one_operand_asl_keeps_its_register`.
+
+## 18. A `jmp` after a branch to itself is dropped
+
+**Source:** `bra *+2` / `jmp l1` / `addq.l #4,d1` / `l1: rts`, with default options and `-Fhunk`.
+
+**Bug:** vasm writes `6000 0000 5881 4e75`, with no `jmp` at all, so the `addq` now runs. A raw
+binary keeps it.
+
+**rasm-one:** keeps the branch to `l1`, as `6002`.
+
+## 19. `opt o-` is ignored after the first statement
+
+**Source:** `nop` / `opt o-` / `move.w 4,d0`, with default options.
+
+**Bug:** vasm still optimises to `3038 0004`. With `opt o-` as the first line it writes `3039 0000 0004`.
+
+**rasm-one:** obeys `opt o-` wherever it is, as `opt o1-` and the like do in vasm.
+
+## 20. Hunk numbers above 65535 are cut short
+
+**Source:** a reference to a hunk above 65535, in an executable.
+
+**Bug:** vasm writes its low 16 bits in `HUNK_RELOC32SHORT`, so `$11170` becomes `$1170`, which is
+another hunk.
+
+**rasm-one:** uses `HUNK_RELOC32` for those.
+`test_write_hunk_exe_relocation_to_a_high_hunk_keeps_its_number`.

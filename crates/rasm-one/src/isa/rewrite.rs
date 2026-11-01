@@ -2,7 +2,8 @@
 //! depend on the values of its operands.
 
 use crate::expr::{eval, Expr, Value};
-use crate::isa::encode::{Instruction, QuickMoveForm, Sizer};
+use crate::float::{self, Narrowed};
+use crate::isa::encode::{raw_float_bits, Instruction, QuickMoveForm, Sizer};
 use crate::isa::table::{rows_for, Encoding, InsnRow};
 use crate::isa::{Mode, Operand};
 use crate::types::{Cpu, Size};
@@ -23,6 +24,38 @@ pub(crate) enum Known {
     Number(i64),
     /// An address that is only known when loading or linking.
     Address,
+}
+
+/// The row, size and raw bits for a float constant in its lowest precision. A division by a
+/// power of two becomes a multiplication.
+pub(crate) fn narrowed_float_row(
+    row: &'static InsnRow,
+    size: Size,
+    bytes: &[u8],
+) -> Option<(&'static InsnRow, Size, i64)> {
+    let multiplication = match row.mnemonic {
+        "fdiv" => Some("fmul"),
+        "fsdiv" => Some("fsmul"),
+        "fddiv" => Some("fdmul"),
+        "fsgldiv" => Some("fsglmul"),
+        _ => None,
+    };
+    let same_row = |name: &str| {
+        rows_for(name)?
+            .iter()
+            .find(|other| other.encoding == row.encoding && other.sizes.contains(&Size::Single))
+    };
+    let reciprocal = multiplication
+        .and_then(same_row)
+        .zip(float::reciprocal_of_power_of_two(bytes));
+    if let Some((other, bits)) = reciprocal {
+        return Some((other, Size::Single, bits));
+    }
+    Some(match float::narrowed(bytes, size)? {
+        Narrowed::Word(value) => (row, Size::Word, value),
+        Narrowed::Single(bits) => (row, Size::Single, bits),
+        Narrowed::Double(bits) => (row, Size::Double, bits),
+    })
 }
 
 impl Instruction {
@@ -55,7 +88,6 @@ impl Instruction {
             rewrites: None,
             generic_rewrites: false,
             quick_move: None,
-            shortens_absolutes: true,
             ..self.clone()
         })
     }
@@ -175,6 +207,36 @@ impl Instruction {
         }
     }
 
+    /// Writes raw float bits in the lowest precision that holds them, as `narrow_float` in the
+    /// parser does for a literal. These can depend on symbols, so wait for their values.
+    pub(crate) fn narrowed_raw_float(&self, sizer: &Sizer) -> Option<Rewritten> {
+        if !self.narrows_floats {
+            return None;
+        }
+        let first = self.operands.first()?;
+        let Mode::Immediate(expr) = &first.mode else {
+            return None;
+        };
+        let size = self.size?;
+        if !matches!(size, Size::Single | Size::Double) {
+            return None;
+        }
+        let Known::Number(number) = self.known(expr, sizer)? else {
+            return None;
+        };
+        let bytes = raw_float_bits(number, size);
+        let (row, new_size, bits) = narrowed_float_row(self.row, size, &bytes)?;
+        let mut operands = self.operands.clone();
+        operands[0].mode = Mode::Immediate(Expr::Num(bits));
+        Some(Rewritten::One(Instruction {
+            row,
+            size: Some(new_size),
+            operands,
+            narrows_floats: false,
+            ..self.clone()
+        }))
+    }
+
     fn rewrite_movem(
         &self,
         first: &Operand,
@@ -205,6 +267,9 @@ impl Instruction {
             Mode::AddrReg(n) => 1 << (n + 8),
             _ => mask(second)?,
         };
+        if !(0..=0xFFFF).contains(&bits) {
+            return None;
+        }
         // A register that `(Ax)+` also changes has to stay in `movem`.
         let source = match first.mode {
             Mode::PostInc(from) => Some(1i64 << (u32::from(from) + 8)),

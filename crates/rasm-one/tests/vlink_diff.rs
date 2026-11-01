@@ -193,6 +193,13 @@ const PROGRAMS: &[&[&str]] = &[
         " ds.b 32000\n xdef t\nt: rts",
     ],
     &[" nop", " nop", " nop\n rts"],
+    &[" section d,data\n dc.l 1", " section d,data_f\n even"],
+    &[" section b,bss\n ds.l 1", " section b,bss_c\n ds.b 0"],
+    &[
+        " section d,data_c\n even",
+        " nop",
+        " section d,data\n dc.l 1",
+    ],
     &[
         " section c,code\n nop",
         " section c,code_c\n rts",
@@ -360,6 +367,17 @@ fn test_link_enforces_the_size_limit() {
         .diagnostics
         .iter()
         .any(|d| d.code == "limit-exceeded"));
+}
+
+#[test]
+fn test_link_size_limit_is_the_smallest_and_allows_an_exact_fit() {
+    let mut small = Options::unoptimised("t.s");
+    small.max_output_bytes = 12;
+    let fits = inputs(&[" ds.b 6", " ds.b 2"], &small);
+    assert!(!link(&fits).has_errors());
+    let large = inputs(&[" ds.b 40"], &Options::unoptimised("t.s"));
+    let both = [fits[0].clone(), large[0].clone()];
+    assert!(link(&both).has_errors());
 }
 
 #[test]

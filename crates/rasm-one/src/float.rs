@@ -359,17 +359,16 @@ fn double_bits(negative: bool, mantissa: u64, exponent: i32) -> Option<i64> {
     })
 }
 
-/// What a literal of this size can be written as instead, if anything. Unlike vasm this
+/// What a value of this size, as bytes, can be written as instead, if anything. Unlike vasm this
 /// never loses bits: see vasm-bugs.md.
-pub(crate) fn narrowed(text: &str, size: Size) -> Option<Narrowed> {
+pub(crate) fn narrowed(bytes: &[u8], size: Size) -> Option<Narrowed> {
     if !matches!(size, Size::Single | Size::Double | Size::Extended) {
         return None;
     }
-    let bytes = float_bytes(text, size)?;
     if bytes.iter().all(|byte| *byte & 0x7F == 0) && bytes[1..].iter().all(|byte| *byte == 0) {
         return Some(Narrowed::Word(0));
     }
-    let (negative, mantissa, exponent) = decode(&bytes)?;
+    let (negative, mantissa, exponent) = decode(bytes)?;
     if (0..=15).contains(&exponent) && mantissa.trailing_zeros() >= (63 - exponent) as u32 {
         let magnitude = (mantissa >> (63 - exponent)) as i64;
         let value = if negative { -magnitude } else { magnitude };
@@ -390,10 +389,9 @@ pub(crate) fn narrowed(text: &str, size: Size) -> Option<Narrowed> {
     None
 }
 
-/// The bits of a single that holds one over a power of two, if this literal is one.
-pub(crate) fn reciprocal_of_power_of_two(text: &str, size: Size) -> Option<i64> {
-    let bytes = float_bytes(text, size)?;
-    let (negative, mantissa, exponent) = decode(&bytes)?;
+/// The bits of a single that holds one over a power of two, if this value is one.
+pub(crate) fn reciprocal_of_power_of_two(bytes: &[u8]) -> Option<i64> {
+    let (negative, mantissa, exponent) = decode(bytes)?;
     if mantissa != 1 << 63 {
         return None;
     }
