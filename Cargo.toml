@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rasm-one", "crates/rasm-one-cli", "crates/rasm-oracle"]
+members = ["crates/rasm-one", "crates/rasm-one-cli", "crates/rasm-oracle", "crates/rasm-one-wasm"]
 resolver = "2"
 
 [workspace.package]
