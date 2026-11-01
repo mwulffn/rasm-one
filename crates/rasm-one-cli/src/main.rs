@@ -4,12 +4,12 @@ use std::fs;
 
 use anyhow::{bail, Context, Result};
 use rasm_one::{
-    assemble, write_bin, write_hunk_exe, write_hunk_object, FileError, FileProvider, Options,
-    Severity,
+    assemble, write_bin, write_hunk_exe, write_hunk_object, write_listing, FileError, FileProvider,
+    Options, Severity,
 };
 
 const USAGE: &str =
-    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-I<dir>]...";
+    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-I<dir>]... [-L <listing>]";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -35,16 +35,20 @@ struct Args {
     output: String,
     format: Format,
     include_dirs: Vec<String>,
+    listing: Option<String>,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut source, mut output) = (None, None);
     let mut format = Format::HunkExe;
     let mut include_dirs = Vec::new();
+    let mut listing = None;
     let mut args = args;
     while let Some(arg) = args.next() {
         if arg == "-o" {
             output = Some(args.next().context("-o needs a file name")?);
+        } else if arg == "-L" {
+            listing = Some(args.next().context("-L needs a file name")?);
         } else if arg == "-Fhunkexe" {
             format = Format::HunkExe;
         } else if arg == "-Fhunk" {
@@ -65,6 +69,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             output,
             format,
             include_dirs,
+            listing,
         }),
         _ => bail!("{USAGE}"),
     }
@@ -75,6 +80,10 @@ fn main() -> Result<()> {
     let mut options = Options::new(args.source);
     options.include_dirs = args.include_dirs;
     let assembly = assemble(&options, &NativeProvider);
+    if let Some(path) = &args.listing {
+        let text = write_listing(&assembly, &NativeProvider);
+        fs::write(path, text).with_context(|| format!("writing {path}"))?;
+    }
     for diagnostic in &assembly.diagnostics {
         eprintln!("{}", assembly.render_diagnostic(diagnostic));
     }
@@ -124,6 +133,14 @@ mod tests {
     fn test_parse_args_include_dirs_in_order() -> Result<()> {
         let args = parse(&["a.s", "-o", "x", "-Ione", "-Itwo"])?;
         assert_eq!(args.include_dirs, ["one", "two"]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_args_listing_file() -> Result<()> {
+        let args = parse(&["a.s", "-o", "x", "-L", "a.lst"])?;
+        assert_eq!(args.listing.as_deref(), Some("a.lst"));
+        assert!(parse(&["a.s", "-o", "x", "-L"]).is_err());
         Ok(())
     }
 

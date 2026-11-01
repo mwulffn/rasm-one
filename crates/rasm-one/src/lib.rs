@@ -26,6 +26,7 @@ mod types;
 pub use error::{Diagnostic, FileError, OutputError, Related, Severity};
 pub use output::bin::write_bin;
 pub use output::hunk::{write_hunk_exe, write_hunk_object};
+pub use output::listing::write_listing;
 pub use source::{FileId, FileProvider, MemoryProvider, Span};
 pub use types::{Cpu, CpuSet, MemKind, SectionKind, Size};
 
@@ -528,6 +529,13 @@ mod tests {
     fn test_local_label_symbol_keeps_its_written_name() {
         let assembly = run("a: nop\n.l: nop\n");
         assert_eq!(assembly.symbols[1].name, ".l");
+    }
+
+    #[test]
+    fn test_symbols_leave_out_internal_counters() {
+        let assembly = run("m macro\n endm\n m\n rept 1\n endr\nx rs.w 1\nl: nop\n");
+        let names: Vec<_> = assembly.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["x", "l"]);
     }
 
     #[test]

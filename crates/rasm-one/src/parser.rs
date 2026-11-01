@@ -154,6 +154,11 @@ const NARG: &str = "NARG";
 /// Name of the symbol holding the iteration number during a `rept`.
 const REPTN: &str = "REPTN";
 
+/// True for symbols the assembler maintains itself, which aren't exported.
+pub(crate) fn is_internal_symbol(name: &str) -> bool {
+    matches!(name, NARG | REPTN | RS_COUNTER)
+}
+
 fn is_local_label(name: &str) -> bool {
     name.starts_with('.') || name.ends_with('$')
 }
