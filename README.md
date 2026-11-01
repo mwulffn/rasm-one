@@ -43,7 +43,7 @@ correct thing instead; see `docs/vasm-bugs.md`.
 Give the command line several sources to get one executable: `rasm-one a.s b.s -o prog`. In the
 library, pass their assemblies to `link`, then `write_hunk_exe`. The linker doesn't read hunk
 object files or libraries yet, and it can't make raw binaries. It is compared with vlink by what a
-loader would put in memory, using `RASM_VLINK`.
+loader would put in memory, using `RASM_VLINK` from `scripts/fetch-vlink.sh`.
 
 ## Testing
 

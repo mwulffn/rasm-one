@@ -44,7 +44,8 @@
 ## Testing
 - vasm is the reference: rasm-one's output must match it byte for byte, except where vasm has a bug. Never copy a bug: do the correct thing, add a test, and add it to `docs/vasm-bugs.md`. Differential tests live in `crates/rasm-one/tests/vasm_*.rs` and `sweep_cpus.rs`, using the `rasm-oracle` crate
 - Get vasm with `export RASM_VASM=$(scripts/fetch-vasm.sh)`. Never commit vasm or its sources (licence)
-- Without `RASM_VASM`, differential tests skip locally and fail in CI. A green local run without it proves little
+- The linker is compared with vlink by what a loader would put in memory. Get it with `export RASM_VLINK=$(scripts/fetch-vlink.sh)`. Never commit it either
+- Without `RASM_VASM` or `RASM_VLINK`, differential tests skip locally and fail in CI. A green local run without it proves little
 - The oracle runs vasm with `-no-opt`. Optimisations are added one rule at a time, each matched to its vasm flag (#20)
 - New instructions or addressing modes go in the sweep, not as hand-picked cases
 - Feed sources through `MemoryProvider`, not files on disk

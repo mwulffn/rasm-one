@@ -1,7 +1,8 @@
 //! Links with rasm-one and vlink, then compares what a loader would put in memory.
 //!
 //! vlink makes other choices in the file, such as its relocation hunks, so the bytes of the
-//! files differ. Without `RASM_VLINK`, the path of a vlink binary, the comparisons skip.
+//! files differ. `RASM_VLINK` comes from `scripts/fetch-vlink.sh`. Without it this skips
+//! locally and fails in CI.
 
 use std::error::Error;
 use std::fs;
@@ -245,7 +246,11 @@ const REFUSED: &[&[&str]] = &[
 fn tool() -> Option<String> {
     let tool = std::env::var("RASM_VLINK").ok();
     if tool.is_none() {
-        eprintln!("skipping: RASM_VLINK not set");
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "RASM_VLINK is not set but CI requires it"
+        );
+        eprintln!("skipping: RASM_VLINK not set (see scripts/fetch-vlink.sh)");
     }
     tool
 }
