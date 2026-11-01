@@ -60,6 +60,7 @@ pub(crate) fn build(program: Program) -> Built {
             let start = data.len() as u32;
             let mut ctx = EmitContext {
                 section: index,
+                span: atom.span,
                 instruction_start: 0,
                 lookup: &lookup,
                 name_of: &name_of,

@@ -60,6 +60,8 @@ fn extension_len(mode: &Mode, size: Size) -> u32 {
 /// Everything an encoder needs from the surrounding assembly.
 pub(crate) struct EmitContext<'a> {
     pub section: usize,
+    /// Source of the atom being emitted.
+    pub span: Span,
     /// Start of the current instruction, which is what `*` means in operands.
     pub instruction_start: i64,
     pub lookup: &'a dyn Fn(SymId) -> Option<Value>,
@@ -129,6 +131,7 @@ impl EmitContext<'_> {
                 size: bytes as u8,
                 target,
                 kind: RelocKind::Absolute,
+                span: self.span,
             });
         }
         self.put(value.offset as u32, bytes);

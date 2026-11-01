@@ -3,9 +3,9 @@
 use std::fs;
 
 use anyhow::{bail, Context, Result};
-use rasm_one::{assemble, write_bin, FileError, FileProvider, Options, Severity};
+use rasm_one::{assemble, write_bin, write_hunk_exe, FileError, FileProvider, Options, Severity};
 
-const USAGE: &str = "usage: rasm-one <source> -o <output>";
+const USAGE: &str = "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fbin]";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -19,17 +19,29 @@ impl FileProvider for NativeProvider {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Format {
+    HunkExe,
+    Bin,
+}
+
 struct Args {
     source: String,
     output: String,
+    format: Format,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let (mut source, mut output) = (None, None);
+    let mut format = Format::HunkExe;
     let mut args = args;
     while let Some(arg) = args.next() {
         if arg == "-o" {
             output = Some(args.next().context("-o needs a file name")?);
+        } else if arg == "-Fhunkexe" {
+            format = Format::HunkExe;
+        } else if arg == "-Fbin" {
+            format = Format::Bin;
         } else if arg.starts_with('-') {
             bail!("unknown option {arg}\n{USAGE}");
         } else if source.replace(arg).is_some() {
@@ -37,7 +49,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
         }
     }
     match (source, output) {
-        (Some(source), Some(output)) => Ok(Args { source, output }),
+        (Some(source), Some(output)) => Ok(Args {
+            source,
+            output,
+            format,
+        }),
         _ => bail!("{USAGE}"),
     }
 }
@@ -56,7 +72,10 @@ fn main() -> Result<()> {
     if errors > 0 {
         bail!("{errors} error(s)");
     }
-    let bytes = write_bin(&assembly)?;
+    let bytes = match args.format {
+        Format::HunkExe => write_hunk_exe(&assembly)?,
+        Format::Bin => write_bin(&assembly)?,
+    };
     fs::write(&args.output, bytes).with_context(|| format!("writing {}", args.output))?;
     Ok(())
 }
@@ -76,6 +95,13 @@ mod tests {
             (args.source.as_str(), args.output.as_str()),
             ("a.s", "a.bin")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_args_format_defaults_to_hunk_exe() -> Result<()> {
+        assert_eq!(parse(&["a.s", "-o", "x"])?.format, Format::HunkExe);
+        assert_eq!(parse(&["a.s", "-o", "x", "-Fbin"])?.format, Format::Bin);
         Ok(())
     }
 
