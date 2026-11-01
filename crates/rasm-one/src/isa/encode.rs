@@ -255,9 +255,12 @@ impl Instruction {
             | Encoding::FpTestRegister
             | Encoding::Fmovecr
             | Encoding::FpSinCosRegisters => (2, &[]),
+            Encoding::FpControlLoad => (
+                2 + control_list_padding(self),
+                operands.get(..1).unwrap_or(&[]),
+            ),
             Encoding::FpFromEa
             | Encoding::FpTestEa
-            | Encoding::FpControlLoad
             | Encoding::FpMovemLoad
             | Encoding::FpSinCosEa
             | Encoding::FpSet => (2, operands.get(..1).unwrap_or(&[])),
@@ -488,6 +491,20 @@ fn pair(mode: &Mode) -> (u16, u16) {
         Mode::RegPair(a, b) => (u16::from(*a), u16::from(*b)),
         Mode::IndirectPair(a, b) => (u16::from(*a), u16::from(*b)),
         _ => (0, 0),
+    }
+}
+
+/// An immediate moved to several control registers has a long for each, and the
+/// value given goes in the last. Returns the bytes before that long.
+fn control_list_padding(insn: &Instruction) -> i64 {
+    match (
+        &insn.operands[0].mode,
+        insn.operands.get(1).map(|op| &op.mode),
+    ) {
+        (Mode::Immediate(_), Some(Mode::FpControlList(bits))) => {
+            (i64::from(bits.count_ones()) - 1) * 4
+        }
+        _ => 0,
     }
 }
 
@@ -822,6 +839,8 @@ pub(crate) fn encode(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
         Encoding::FpControlLoad => {
             ctx.put_word(base | mode_bits(&op(0).mode));
             ctx.put_word(0x8000 | fp_control(&op(1).mode));
+            let padding = control_list_padding(insn) as usize;
+            ctx.data.resize(ctx.data.len() + padding, 0);
             emit_extension(op(0), Size::Long, insn, ctx);
         }
         Encoding::FpControlStore => {
