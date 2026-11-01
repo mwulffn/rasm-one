@@ -610,6 +610,35 @@ fn test_assemble_quick_arithmetic_matches_vasm_o5() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+const SHORT_NEXT: Rule = Rule {
+    number: 7,
+    flag: "-opt-o7+",
+};
+
+#[test]
+fn test_assemble_short_branches_to_next_match_vasm_o7() -> Result<(), Box<dyn Error>> {
+    let sources: Vec<String> = [
+        " bra.b f\nf:",
+        " bra.s f\nf:",
+        " beq.s f\nf:",
+        " beq.b f\nf: nop",
+        " bsr.s f\nf:",
+        " bra.s *+2",
+        " bra.s f\n nop\nf:",
+        " bra.w f\nf:",
+        " bra f\nf:",
+        " dbra d0,*+2",
+        " opt o7-\n bra.s f\nf:",
+        " opt o7+\n bra.s f\nf:",
+        " xref x\n bra.s x",
+        " section a,code\n bra.s f\n section b,code\nf: nop",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    compare_rule(&sources, &SHORT_NEXT, false)
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 

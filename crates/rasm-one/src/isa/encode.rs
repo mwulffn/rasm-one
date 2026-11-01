@@ -40,6 +40,8 @@ pub(crate) struct Instruction {
     pub quick_move: Option<QuickMoves>,
     /// The `addq` or `subq` row this can become if its immediate fits.
     pub quick_row: Option<&'static InsnRow>,
+    /// True if a short branch that would have a displacement of 0 can be a no-op.
+    pub short_next_is_no_op: bool,
     /// The form of a resizable branch, which layout chooses.
     pub branch_form: Cell<BranchForm>,
 }
@@ -1921,6 +1923,8 @@ fn branch_target(target: &Operand, ctx: &mut EmitContext) -> Option<Value> {
 
 /// How far forward a branch can be for it to become short, like vasm.
 const SHRINKING_SHORT_REACH: i64 = 126;
+/// `lea (a6),a6`, which is what vasm writes for this no-op.
+const NO_OP_LEA: u16 = 0x4DD6;
 const BRA_OPCODE: u16 = 0x6000;
 const BSR_OPCODE: u16 = 0x6100;
 const JMP_LONG: u16 = 0x4EF9;
@@ -1982,6 +1986,18 @@ fn encode_branch(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     if short {
         let value = branch_target(target, ctx);
         let pc = ctx.instruction_start + 2;
+        let here = ctx.address_of(pc);
+        let distance_is_zero = value.is_some_and(|value| {
+            value == here || (value.base == Base::Absolute && value.offset == here.offset)
+        });
+        if insn.short_next_is_no_op && distance_is_zero && opcode != BSR_OPCODE {
+            ctx.diagnostics.push(Diagnostic::warning(
+                "branch-to-no-op",
+                "short branch to what follows changed to a no-op",
+                span,
+            ));
+            return ctx.put_word(NO_OP_LEA);
+        }
         ctx.put(u32::from(opcode >> 8), 1);
         // A displacement of 0 means a word follows, and on 68020 and later one of
         // -1 means a long does.

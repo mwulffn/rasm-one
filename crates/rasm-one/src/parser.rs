@@ -22,7 +22,7 @@ use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
 use crate::{
     Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_BRANCHES,
-    RULE_DISPLACEMENTS, RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES,
+    RULE_DISPLACEMENTS, RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES, RULE_SHORT_NEXT,
 };
 
 /// A symbol being collected.
@@ -2758,6 +2758,7 @@ impl LineParser<'_, '_, '_> {
             drops_zero_displacement: self.parser.optimisations.rule(RULE_DISPLACEMENTS),
             shortens_absolutes: self.parser.optimisations.rule(RULE_ABSOLUTES),
             quick_move,
+            short_next_is_no_op: self.parser.optimisations.rule(RULE_SHORT_NEXT),
             quick_row,
             branch_form: Cell::new(BranchForm::Word),
             size: size.or(row.default_size),
