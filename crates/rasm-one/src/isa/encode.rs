@@ -38,6 +38,8 @@ pub(crate) struct Instruction {
     pub shortens_absolutes: bool,
     /// What `move.l #x,Dn` can become, if this is one and optimisation applies.
     pub quick_move: Option<QuickMoves>,
+    /// The `addq` or `subq` row this can become if its immediate fits.
+    pub quick_row: Option<&'static InsnRow>,
     /// The form of a resizable branch, which layout chooses.
     pub branch_form: Cell<BranchForm>,
 }
@@ -528,8 +530,28 @@ impl Instruction {
         }
     }
 
+    /// This as another instruction, if its values now allow one.
+    fn rewritten(&self, sizer: &Sizer) -> Option<Instruction> {
+        let row = self.quick_row?;
+        let Mode::Immediate(expr) = &self.operands.first()?.mode else {
+            return None;
+        };
+        let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup).ok()?;
+        let DispKind::Number(number) = plain_disp_kind(value, self.fixed_addresses) else {
+            return None;
+        };
+        (1..=8).contains(&number).then(|| Instruction {
+            row,
+            quick_row: None,
+            ..self.clone()
+        })
+    }
+
     /// Length in bytes, with symbols as they are known now.
     pub fn len(&self, sizer: &Sizer) -> i64 {
+        if let Some(rewritten) = self.rewritten(sizer) {
+            return rewritten.len(sizer);
+        }
         match self.quick_move_form(sizer) {
             Some(QuickMoveForm::Moveq(_)) => return 2,
             Some(_) => return 4,
@@ -824,6 +846,9 @@ pub(crate) fn encode(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
 
 fn encode_fields(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     ctx.instruction_start = ctx.offset();
+    if let Some(rewritten) = insn.rewritten(&sizer_for(ctx)) {
+        return encode_fields(&rewritten, span, ctx);
+    }
     let resolved = with_growth_resolved(insn, &sizer_for(ctx));
     let insn = resolved.as_ref().unwrap_or(insn);
     let size = insn.size.unwrap_or(Size::Word);

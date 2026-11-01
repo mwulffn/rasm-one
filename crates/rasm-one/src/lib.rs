@@ -170,7 +170,7 @@ pub struct Options {
 /// Which optimisations apply, numbered like vasm's `-opt-oN` and `opt oN`.
 ///
 /// Only some of vasm's rules exist yet, so this is not yet what vasm does by default.
-/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`.
+/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`; 5, `addq` and `subq`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Optimisations {
@@ -180,8 +180,11 @@ pub struct Optimisations {
 }
 
 impl Optimisations {
-    const IMPLEMENTED: u32 =
-        1 << RULE_BRANCHES | 1 << RULE_DISPLACEMENTS | 1 << RULE_ABSOLUTES | 1 << RULE_QUICK_MOVES;
+    const IMPLEMENTED: u32 = 1 << RULE_BRANCHES
+        | 1 << RULE_DISPLACEMENTS
+        | 1 << RULE_ABSOLUTES
+        | 1 << RULE_QUICK_MOVES
+        | 1 << RULE_QUICK_ARITHMETIC;
 
     /// Every rule that exists, which can be changed with `opt`.
     pub fn all() -> Self {
@@ -232,6 +235,8 @@ pub(crate) const RULE_DISPLACEMENTS: u32 = 2;
 pub(crate) const RULE_ABSOLUTES: u32 = 3;
 /// Rule 4: `move.l #x,Dn` becomes `moveq`, with `add.w` or `swap` if that helps.
 pub(crate) const RULE_QUICK_MOVES: u32 = 4;
+/// Rule 5: adding or subtracting 1 to 8 uses `addq` or `subq`.
+pub(crate) const RULE_QUICK_ARITHMETIC: u32 = 5;
 
 impl Options {
     /// Options for assembling `main` for a 68000.
