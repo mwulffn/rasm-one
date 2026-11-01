@@ -3098,7 +3098,9 @@ impl LineParser<'_, '_, '_> {
     /// Reads a floating-point literal, on an FPU instruction only.
     fn float_literal_if_fpu(&mut self) -> Option<String> {
         if self.special == SpecialWords::Fpu {
-            self.lexer.float_literal()
+            self.lexer
+                .float_expression()
+                .or_else(|| self.lexer.float_literal())
         } else {
             None
         }
@@ -3580,7 +3582,11 @@ impl LineParser<'_, '_, '_> {
             size,
             Size::Single | Size::Double | Size::Extended | Size::Packed
         ) {
-            if let Some(text) = self.lexer.float_literal() {
+            let literal = self
+                .lexer
+                .float_expression()
+                .or_else(|| self.lexer.float_literal());
+            if let Some(text) = literal {
                 return Ok(DataItem::Float(FloatLiteral { text }, self.span(start)));
             }
             let (expr, is_raw) = self.parse_expr_tracking_raw()?;

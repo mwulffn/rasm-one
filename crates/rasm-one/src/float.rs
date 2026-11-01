@@ -398,6 +398,127 @@ pub(crate) fn reciprocal_of_power_of_two(bytes: &[u8]) -> Option<i64> {
     single_bits(negative, mantissa, -exponent)
 }
 
+/// Arithmetic on literals, such as `2.0+1`, as a literal, with how many bytes it took. Gives
+/// `None` for anything else, including a lone literal, which needn't lose any precision.
+/// Like vasm's, this is done in double precision.
+pub(crate) fn float_expression(source: &[u8]) -> Option<(String, usize)> {
+    let mut parser = FloatExpression {
+        source,
+        at: 0,
+        saw_float: false,
+        saw_operation: false,
+    };
+    let value = parser.sum(0)?;
+    let ends = matches!(
+        source.get(parser.at),
+        None | Some(b',' | b' ' | b'\t' | b'\r' | b'\n' | b';' | b'{')
+    );
+    if !ends || !parser.saw_float || !parser.saw_operation || !value.is_finite() {
+        return None;
+    }
+    // Enough digits to give back the double exactly at any size.
+    Some((format!("{value:.60e}"), parser.at))
+}
+
+struct FloatExpression<'a> {
+    source: &'a [u8],
+    at: usize,
+    saw_float: bool,
+    saw_operation: bool,
+}
+
+/// Far more than real sources use, and it keeps the recursion shallow.
+const MAX_FLOAT_DEPTH: u32 = 32;
+
+impl FloatExpression<'_> {
+    fn eat(&mut self, byte: u8) -> bool {
+        let found = self.source.get(self.at) == Some(&byte);
+        if found {
+            self.at += 1;
+        }
+        found
+    }
+
+    fn sum(&mut self, depth: u32) -> Option<f64> {
+        let mut value = self.product(depth)?;
+        loop {
+            if self.eat(b'+') {
+                value += self.product(depth)?;
+            } else if self.eat(b'-') {
+                value -= self.product(depth)?;
+            } else {
+                return Some(value);
+            }
+            self.saw_operation = true;
+        }
+    }
+
+    fn product(&mut self, depth: u32) -> Option<f64> {
+        let mut value = self.factor(depth)?;
+        loop {
+            if self.eat(b'*') {
+                value *= self.factor(depth)?;
+            } else if self.eat(b'/') {
+                let divisor = self.factor(depth)?;
+                if divisor == 0.0 {
+                    return None;
+                }
+                value /= divisor;
+            } else {
+                return Some(value);
+            }
+            self.saw_operation = true;
+        }
+    }
+
+    fn factor(&mut self, depth: u32) -> Option<f64> {
+        if depth > MAX_FLOAT_DEPTH {
+            return None;
+        }
+        if self.eat(b'-') {
+            return self.factor(depth + 1).map(|value| -value);
+        }
+        if self.eat(b'(') {
+            self.saw_operation = true;
+            let value = self.sum(depth + 1)?;
+            return self.eat(b')').then_some(value);
+        }
+        self.number()
+    }
+
+    fn number(&mut self) -> Option<f64> {
+        let start = self.at;
+        let digits = |parser: &mut Self| {
+            let first = parser.at;
+            while parser.source.get(parser.at).is_some_and(u8::is_ascii_digit) {
+                parser.at += 1;
+            }
+            parser.at > first
+        };
+        if !digits(self) {
+            return None;
+        }
+        if self.eat(b'.') {
+            self.saw_float = true;
+            digits(self);
+        }
+        if matches!(self.source.get(self.at), Some(b'e' | b'E')) {
+            self.saw_float = true;
+            self.at += 1;
+            if !self.eat(b'-') {
+                self.eat(b'+');
+            }
+            if !digits(self) {
+                return None;
+            }
+        }
+        std::str::from_utf8(&self.source[start..self.at])
+            .ok()?
+            .parse()
+            .ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

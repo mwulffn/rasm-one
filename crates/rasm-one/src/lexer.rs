@@ -109,6 +109,14 @@ impl<'a> Lexer<'a> {
 
     /// Reads a floating-point literal such as `1.5`, `2e3` or `-1.5e-3`, if one
     /// is next. Plain integers are left for the expression parser.
+    pub fn float_expression(&mut self) -> Option<String> {
+        self.skip_blanks();
+        let (text, length) = crate::float::float_expression(self.rest())?;
+        self.set_pos(self.pos() + length);
+        Some(text)
+    }
+
+    /// Reads a floating-point literal, if there is one here.
     pub fn float_literal(&mut self) -> Option<String> {
         let rest = self.rest();
         let sign = usize::from(matches!(rest.first(), Some(b'-' | b'+')));

@@ -380,6 +380,26 @@ fn test_link_size_limit_is_the_smallest_and_allows_an_exact_fit() {
     assert!(link(&both).has_errors());
 }
 
+/// A relocation's size is a public field, so it can hold anything.
+#[test]
+fn test_link_refuses_a_relocation_of_an_impossible_size() {
+    for size in [0, 3, 8] {
+        let mut inputs = inputs(
+            &[" xref x\n dc.l x", " xdef x\nx: nop"],
+            &Options::unoptimised("t.s"),
+        );
+        inputs[0].sections[0].relocs[0].size = size;
+        let linked = link(&inputs);
+        assert!(
+            linked
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "link-relocation"),
+            "{size}"
+        );
+    }
+}
+
 #[test]
 fn test_link_first_definition_is_named_for_every_duplicate() {
     let program = [" xdef a\na: nop", " xdef a\na: nop", " xdef a\na: nop"];

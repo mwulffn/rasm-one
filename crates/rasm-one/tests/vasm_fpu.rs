@@ -19,6 +19,23 @@ fn ours(source: &str, cpu: Cpu, fpu: FpuChoice) -> Assembly {
 }
 
 const ON_68040: &[&str] = &[
+    // Arithmetic on float literals.
+    " fmove.x #2.0+1,fp0",
+    " fmove.d #2.0+1,fp0",
+    " fmove.s #1+2.0,fp0",
+    " fmove.x #1.5*2,fp0",
+    " fmove.x #3.0/2,fp0",
+    " fmove.x #2.5-1.5,fp0",
+    " fmove.x #(1.5),fp0",
+    " fmove.x #-(1.5+1),fp0",
+    " fmove.x #1.1+0,fp0",
+    " fadd.d #0.1+0.2,fp1",
+    " dc.d 2.0+1",
+    " dc.s 1.5*2",
+    " dc.x 3.0/2",
+    " dc.d -(1.5)",
+    " dc.d 1.5+1,2.5*2",
+    " fmove.x #2+1,fp0",
     // fmove and its sizes.
     " fmove fp0,fp1",
     " fmove.x fp0,fp1",
