@@ -7,15 +7,16 @@ use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
+use crate::float::FloatLiteral;
 use crate::isa::encode::Instruction;
-use crate::isa::table::{rows_for, InsnRow, CONTROL_REGISTERS, CPU_020_UP};
+use crate::isa::table::{rows_for, Coprocessor, InsnRow, CONTROL_REGISTERS, CPU_020_UP};
 use crate::isa::{
     BitFieldArg, FullBase, FullDisp, FullMode, IndexReg, Indirection, Mode, Operand, Width,
 };
 use crate::lexer::{LexError, Lexer, Punct, Tok};
 use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
-use crate::{Expansion, ExpansionKind};
+use crate::{Expansion, ExpansionKind, FpuChoice};
 
 /// A symbol being collected.
 #[derive(Debug, Clone)]
@@ -143,6 +144,7 @@ fn is_directive(name: &str) -> bool {
             | "endc"
             | "endif"
     ) || name == "machine"
+        || name == "fpu"
         || name.starts_with("mc680")
         || is_if(name)
         || section_shortcut(name).is_some()
@@ -340,8 +342,24 @@ fn needs_020(mode: &Mode) -> bool {
     match mode {
         Mode::Full(_) => true,
         Mode::Index(_, _, index) | Mode::PcIndex(_, index) => index.scale != 0,
-        Mode::BitField { ea, .. } => needs_020(ea),
+        Mode::BitField { ea, .. } | Mode::PackedStore { ea, .. } => needs_020(ea),
         _ => false,
+    }
+}
+
+fn fp_register(name: &str) -> Option<u8> {
+    match name.as_bytes() {
+        [b'f', b'p', n @ b'0'..=b'7'] => Some(n - b'0'),
+        _ => None,
+    }
+}
+
+fn fp_control_bits(name: &str) -> Option<u16> {
+    match name {
+        "fpcr" => Some(0x1000),
+        "fpsr" => Some(0x0800),
+        "fpiar" => Some(0x0400),
+        _ => None,
     }
 }
 
@@ -349,6 +367,11 @@ fn special_words(mnemonic: &str) -> SpecialWords {
     match mnemonic {
         "movec" => SpecialWords::ControlRegisters,
         "cinvl" | "cinvp" | "cinva" | "cpushl" | "cpushp" | "cpusha" => SpecialWords::CacheNames,
+        _ if rows_for(mnemonic)
+            .is_some_and(|rows| rows.iter().any(|row| row.coprocessor == Coprocessor::Fpu)) =>
+        {
+            SpecialWords::Fpu
+        }
         _ => SpecialWords::None,
     }
 }
@@ -479,6 +502,7 @@ const RS_COUNTER: &str = "__RS";
 /// Parses whole files into a [`Program`].
 pub(crate) struct Parser<'f> {
     cpu: Cpu,
+    fpu: FpuChoice,
     fixed_addresses: bool,
     provider: &'f dyn FileProvider,
     /// Directories to search for files, from options and `incdir`.
@@ -522,6 +546,7 @@ impl<'f> Parser<'f> {
     pub fn new(options: &crate::Options, provider: &'f dyn FileProvider) -> Self {
         Self {
             cpu: options.cpu,
+            fpu: options.fpu,
             fixed_addresses: options.fixed_addresses,
             provider,
             include_dirs: options.include_dirs.clone(),
@@ -978,6 +1003,15 @@ impl<'f> Parser<'f> {
         }
     }
 
+    /// True if FPU instructions can be used now.
+    fn has_fpu(&self) -> bool {
+        match self.fpu {
+            FpuChoice::BuiltIn => matches!(self.cpu, Cpu::M68040 | Cpu::M68060),
+            FpuChoice::Coprocessor => true,
+            FpuChoice::None => false,
+        }
+    }
+
     /// Looks up a register by name, including names defined by `equr`.
     fn reg(&self, name: &str) -> Option<Reg> {
         self.register_aliases
@@ -1151,6 +1185,7 @@ enum SpecialWords {
     None,
     ControlRegisters,
     CacheNames,
+    Fpu,
 }
 
 struct LineParser<'p, 'a, 'f> {
@@ -1553,6 +1588,11 @@ impl LineParser<'_, '_, '_> {
             Some(Size::Long) => "l",
             Some(Size::Short) => "s",
             Some(Size::Word) | None => "w",
+            Some(Size::Single) => "s",
+            Some(Size::Double) => "d",
+            Some(Size::Extended) => "x",
+            Some(Size::Packed) => "p",
+            Some(Size::Quad) => "q",
         };
         self.parser.pending_work = Some(PendingWork::CallMacro {
             name: name.to_string(),
@@ -1859,6 +1899,16 @@ impl LineParser<'_, '_, '_> {
         let size = self.parse_size_suffix()?;
         let span = self.span(start);
         let lower = name.to_ascii_lowercase();
+        let is_fpu = rows_for(&lower)
+            .is_some_and(|rows| rows.iter().any(|row| row.coprocessor == Coprocessor::Fpu));
+        let size = match size {
+            Some(Size::Short)
+                if is_fpu || matches!(lower.as_str(), "dc" | "ds" | "blk" | "dcb") =>
+            {
+                Some(Size::Single)
+            }
+            other => other,
+        };
 
         if let Some(rows) = rows_for(&lower) {
             self.lexer.skip_blanks();
@@ -2040,7 +2090,33 @@ impl LineParser<'_, '_, '_> {
                 let word = self.lexer.word().to_vec();
                 let text = String::from_utf8_lossy(&word).to_ascii_lowercase();
                 let number = text.strip_prefix("mc").unwrap_or(&text);
+                if matches!(number, "68881" | "68882") {
+                    self.parser.fpu = FpuChoice::Coprocessor;
+                    return Ok(());
+                }
                 self.set_cpu(number, span)
+            }
+            "mc68881" | "mc68882" => {
+                self.no_size(size, span)?;
+                self.parser.fpu = FpuChoice::Coprocessor;
+                Ok(())
+            }
+            "fpu" => {
+                self.no_size(size, span)?;
+                let id = self.parse_constant()?;
+                self.expect_end()?;
+                self.parser.fpu = match id {
+                    0 => FpuChoice::None,
+                    1 => FpuChoice::Coprocessor,
+                    _ => {
+                        return Err(Diagnostic::error(
+                            "unsupported-fpu",
+                            "only coprocessor ID 1 is supported",
+                            span,
+                        ));
+                    }
+                };
+                Ok(())
             }
             directive if directive.starts_with("mc680") => {
                 self.no_size(size, span)?;
@@ -2229,7 +2305,11 @@ impl LineParser<'_, '_, '_> {
                 span,
             ));
         }
-        let Some(row) = matching.find(|row| row.cpus.contains(self.parser.cpu)) else {
+        let has_fpu = self.parser.has_fpu();
+        let cpu = self.parser.cpu;
+        let Some(row) = matching
+            .find(|row| row.cpus.contains(cpu) && (row.coprocessor != Coprocessor::Fpu || has_fpu))
+        else {
             return Err(Diagnostic::error(
                 "unsupported-cpu",
                 format!("{mnemonic} is not available on the selected CPU"),
@@ -2272,9 +2352,16 @@ impl LineParser<'_, '_, '_> {
 
     fn parse_ea(&mut self) -> Result<Mode, Diagnostic> {
         if self.eat(Punct::Hash)? {
+            if let Some(text) = self.float_literal_if_fpu() {
+                return Ok(Mode::Float(FloatLiteral { text }));
+            }
             return Ok(Mode::Immediate(self.parse_expr()?));
         }
-        if let Some(mode) = self.try_special_word()? {
+        if self.special == SpecialWords::Fpu {
+            if let Some(mode) = self.try_fp_operand()? {
+                return Ok(mode);
+            }
+        } else if let Some(mode) = self.try_special_word()? {
             return Ok(mode);
         }
         if let Tok::Ident(name) = self.peek()? {
@@ -2318,6 +2405,77 @@ impl LineParser<'_, '_, '_> {
                 self.lexer.pos(),
             )),
         }
+    }
+
+    /// Reads a floating-point literal, on an FPU instruction only.
+    fn float_literal_if_fpu(&mut self) -> Option<String> {
+        if self.special == SpecialWords::Fpu {
+            self.lexer.float_literal()
+        } else {
+            None
+        }
+    }
+
+    /// Recognises floating-point registers and lists.
+    fn try_fp_operand(&mut self) -> Result<Option<Mode>, Diagnostic> {
+        let Tok::Ident(name) = self.peek()? else {
+            return Ok(None);
+        };
+        let lower = name.to_ascii_lowercase();
+        if let Some(bits) = fp_control_bits(&lower) {
+            self.advance()?;
+            return self.parse_fp_control_list(bits).map(Some);
+        }
+        let Some(first) = fp_register(&lower) else {
+            return Ok(None);
+        };
+        self.advance()?;
+        if self.eat(Punct::Colon)? {
+            let second = self.parse_fp_register()?;
+            return Ok(Some(Mode::FpPair(first, second)));
+        }
+        if !self.peek_is(Punct::Minus)? && !self.peek_is(Punct::Slash)? {
+            return Ok(Some(Mode::FpReg(first)));
+        }
+        let mut mask = 0u8;
+        let mut low = first;
+        loop {
+            let mut high = low;
+            if self.eat(Punct::Minus)? {
+                high = self.parse_fp_register()?;
+            }
+            for n in low.min(high)..=low.max(high) {
+                mask |= 1 << n;
+            }
+            if !self.eat(Punct::Slash)? {
+                return Ok(Some(Mode::FpList(mask)));
+            }
+            low = self.parse_fp_register()?;
+        }
+    }
+
+    fn parse_fp_register(&mut self) -> Result<u8, Diagnostic> {
+        let start = self.lexer.pos();
+        let word = self.eat_ident()?.map(|name| name.to_ascii_lowercase());
+        word.as_deref()
+            .and_then(fp_register)
+            .ok_or_else(|| self.error_at("syntax", "floating-point register expected", start))
+    }
+
+    fn parse_fp_control_list(&mut self, first: u16) -> Result<Mode, Diagnostic> {
+        if !self.peek_is(Punct::Slash)? {
+            return Ok(Mode::FpControl(first));
+        }
+        let mut bits = first;
+        while self.eat(Punct::Slash)? {
+            let start = self.lexer.pos();
+            let word = self.eat_ident()?.map(|name| name.to_ascii_lowercase());
+            bits |= word
+                .as_deref()
+                .and_then(fp_control_bits)
+                .ok_or_else(|| self.error_at("syntax", "FP control register expected", start))?;
+        }
+        Ok(Mode::FpControlList(bits))
     }
 
     /// Recognises a control register or cache name where the mnemonic takes one.
@@ -2441,10 +2599,24 @@ impl LineParser<'_, '_, '_> {
         Ok(None)
     }
 
-    /// Parses `{offset:width}` after an operand.
+    /// Parses `{offset:width}` after an operand, or `{#k}` or `{Dn}`.
     fn parse_bit_field(&mut self, ea: Mode) -> Result<Mode, Diagnostic> {
         self.expect(Punct::LBrace, "{")?;
+        if self.eat(Punct::Hash)? {
+            let factor = BitFieldArg::Value(self.parse_expr()?);
+            self.expect(Punct::RBrace, "}")?;
+            return Ok(Mode::PackedStore {
+                ea: Box::new(ea),
+                factor,
+            });
+        }
         let offset = self.parse_bit_field_arg()?;
+        if matches!(offset, BitFieldArg::Reg(_)) && self.eat(Punct::RBrace)? {
+            return Ok(Mode::PackedStore {
+                ea: Box::new(ea),
+                factor: offset,
+            });
+        }
         self.expect(Punct::Colon, ":")?;
         let width = self.parse_bit_field_arg()?;
         self.expect(Punct::RBrace, "}")?;
@@ -2715,6 +2887,14 @@ impl LineParser<'_, '_, '_> {
 
     fn parse_data_item(&mut self, size: Size) -> Result<DataItem, Diagnostic> {
         let start = self.lexer.pos();
+        if matches!(
+            size,
+            Size::Single | Size::Double | Size::Extended | Size::Packed
+        ) {
+            if let Some(text) = self.lexer.float_literal() {
+                return Ok(DataItem::Float(FloatLiteral { text }, self.span(start)));
+            }
+        }
         if size == Size::Byte {
             if let Tok::Str(bytes) = self.peek()? {
                 let saved = self.lexer.pos();

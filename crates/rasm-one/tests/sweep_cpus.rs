@@ -7,16 +7,45 @@
 use std::collections::HashSet;
 use std::error::Error;
 
-use rasm_one::{assemble, Assembly, Cpu, MemoryProvider, Options};
+use rasm_one::{assemble, Assembly, Cpu, FpuChoice, MemoryProvider, Options};
 use rasm_oracle::{Format, Vasm};
 
-const CPUS: &[(&str, Cpu)] = &[
-    ("68000", Cpu::M68000),
-    ("68010", Cpu::M68010),
-    ("68020", Cpu::M68020),
-    ("68030", Cpu::M68030),
-    ("68040", Cpu::M68040),
-    ("68060", Cpu::M68060),
+/// A machine to sweep: its name for vasm, and whether it has a coprocessor FPU.
+struct Machine {
+    name: &'static str,
+    cpu: Cpu,
+    fpu: FpuChoice,
+    vasm_args: &'static [&'static str],
+}
+
+const fn machine(name: &'static str, cpu: Cpu) -> Machine {
+    Machine {
+        name,
+        cpu,
+        fpu: FpuChoice::BuiltIn,
+        vasm_args: &[],
+    }
+}
+
+const MACHINES: &[Machine] = &[
+    machine("68000", Cpu::M68000),
+    machine("68010", Cpu::M68010),
+    machine("68020", Cpu::M68020),
+    machine("68030", Cpu::M68030),
+    machine("68040", Cpu::M68040),
+    machine("68060", Cpu::M68060),
+    Machine {
+        name: "68020",
+        cpu: Cpu::M68020,
+        fpu: FpuChoice::Coprocessor,
+        vasm_args: &["-m68881"],
+    },
+    Machine {
+        name: "68030",
+        cpu: Cpu::M68030,
+        fpu: FpuChoice::Coprocessor,
+        vasm_args: &["-m68882"],
+    },
 ];
 
 const MNEMONICS: &[&str] = &[
@@ -37,7 +66,35 @@ const MNEMONICS: &[&str] = &[
     "trappl", "trapt", "trapv", "trapvc", "trapvs", "tst", "unlk", "unpk",
 ];
 
+/// A sample of the FPU's mnemonics. The condition codes are tested separately.
+const FPU_MNEMONICS: &[&str] = &[
+    "fabs", "facos", "fadd", "fasin", "fatan", "fatanh", "fbeq", "fbngl", "fbst", "fcmp", "fcos",
+    "fcosh", "fdabs", "fdadd", "fdbeq", "fdbngl", "fddiv", "fdiv", "fdmove", "fdmul", "fdneg",
+    "fdsqrt", "fdsub", "fetox", "fetoxm1", "fgetexp", "fgetman", "fint", "fintrz", "flog10",
+    "flog2", "flogn", "flognp1", "fmod", "fmove", "fmovecr", "fmovem", "fmul", "fneg", "fnop",
+    "frem", "frestore", "fsabs", "fsadd", "fsave", "fscale", "fsdiv", "fseq", "fsgldiv", "fsglmul",
+    "fsin", "fsincos", "fsinh", "fsmove", "fsmul", "fsneg", "fsngl", "fsqrt", "fssqrt", "fssub",
+    "fsub", "ftan", "ftanh", "ftentox", "ftrapeq", "ftrapngl", "ftst", "ftwotox",
+];
+
 const SIZES: &[&str] = &["", ".b", ".w", ".l", ".s"];
+const FPU_SIZES: &[&str] = &[".d", ".x", ".p"];
+
+/// Operands only FPU instructions know. Anywhere else they would be symbols.
+const FPU_OPERANDS: &[&str] = &[
+    "fp1",
+    "fp2:fp3",
+    "fp0-fp3",
+    "fp0/fp2-fp4",
+    "fpcr",
+    "fpsr",
+    "fpiar",
+    "fpcr/fpsr",
+    "fpcr/fpsr/fpiar",
+    "#1.5",
+    "(a3){#3}",
+    "(a3){d1}",
+];
 
 /// One sample per operand class. Addresses stay near `*` to fit any branch.
 const OPERANDS: &[&str] = &[
@@ -123,7 +180,7 @@ const CONTROL_REGISTERS: &[&str] = &[
 /// Cache names, which are only special to `cinv` and `cpush`.
 const CACHES: &[&str] = &["nc", "dc", "ic", "bc"];
 
-const RARE_PARTNERS: &[&str] = &["d4", "a5", "(a6)", "(a1)+", "#2", "$100"];
+const RARE_PARTNERS: &[&str] = &["d4", "a5", "(a6)", "(a1)+", "-(a2)", "#2", "$100", "fp5"];
 
 /// Whole operand lists for forms with three operands.
 const THREE_OPERANDS: &[&str] = &[
@@ -154,8 +211,8 @@ fn stricter_than_vasm(line: &str) -> bool {
     let movea_to_non_address = line.starts_with(" movea") && !line.ends_with(",a5");
     // vasm allows an address as a `movem` mask in raw binaries, where addresses
     // are constants, but not in hunk output. We require a constant everywhere.
-    let address_as_mask =
-        line.starts_with(" movem") && (line.contains(" *+8,") || line.ends_with(",*+8"));
+    let is_movem = line.starts_with(" movem") || line.starts_with(" fmovem");
+    let address_as_mask = is_movem && (line.contains(" *+8,") || line.ends_with(",*+8"));
     // vasm ignores whatever follows `trapcc`, and any size on it, as if it took
     // no operands. Only the plain form and `.w #` or `.l #` are valid.
     let (head, operands) = line
@@ -163,19 +220,31 @@ fn stricter_than_vasm(line: &str) -> bool {
         .split_once(' ')
         .unwrap_or((line.trim_start(), ""));
     let (mnemonic, suffix) = head.split_once('.').unwrap_or((head, ""));
-    let is_trapcc = mnemonic.starts_with("trap") && !matches!(mnemonic, "trap" | "trapv");
+    let is_trapcc = (mnemonic.starts_with("trap") && !matches!(mnemonic, "trap" | "trapv"))
+        || mnemonic.starts_with("ftrap");
     let valid_trapcc = match suffix {
         "" => operands.is_empty() || operands == "#1",
         "w" | "l" => operands == "#1",
         _ => false,
     };
     let trapcc_with_junk = is_trapcc && !valid_trapcc;
-    movea_to_non_address || address_as_mask || trapcc_with_junk
+    // vasm stores the bits of a float as a long here, listed in docs/vasm-bugs.md.
+    let float_as_long = head.ends_with(".l") && operands.starts_with("#1.5");
+    // The PRM allows an immediate for only one control register.
+    let immediate_to_list =
+        head.starts_with("fmovem") && operands.starts_with('#') && operands.contains("/fps");
+    movea_to_non_address
+        || address_as_mask
+        || trapcc_with_junk
+        || float_as_long
+        || immediate_to_list
 }
 
 fn lines_for(mnemonic: &str) -> Vec<String> {
     let mut lines = Vec::new();
-    for size in SIZES {
+    let is_fpu = FPU_MNEMONICS.contains(&mnemonic);
+    let extra_sizes: &[&str] = if is_fpu { FPU_SIZES } else { &[] };
+    for size in SIZES.iter().chain(extra_sizes) {
         let head = format!(" {mnemonic}{size}");
         lines.push(head.clone());
         for a in OPERANDS {
@@ -187,6 +256,7 @@ fn lines_for(mnemonic: &str) -> Vec<String> {
         let words: &[&str] = match mnemonic {
             "movec" => CONTROL_REGISTERS,
             "cinva" | "cinvl" | "cinvp" | "cpusha" | "cpushl" | "cpushp" => CACHES,
+            _ if is_fpu => FPU_OPERANDS,
             _ => &[],
         };
         for rare in RARE_OPERANDS.iter().chain(words) {
@@ -235,7 +305,8 @@ fn message_line(message: &str) -> Option<usize> {
 /// Asks vasm which lines it rejects. It stops at a fatal error, and only reports
 /// some errors, such as values out of range, if there were no earlier ones. So
 /// it is run on what remains until it has nothing more to say.
-fn vasm_verdict(vasm: &Vasm, lines: &[String], cpu: &str) -> Result<VasmVerdict, String> {
+fn vasm_verdict(vasm: &Vasm, lines: &[String], machine: &Machine) -> Result<VasmVerdict, String> {
+    let cpu = machine.name;
     let mut verdict = VasmVerdict::default();
     loop {
         let remaining: Vec<usize> = (0..lines.len())
@@ -247,7 +318,7 @@ fn vasm_verdict(vasm: &Vasm, lines: &[String], cpu: &str) -> Result<VasmVerdict,
             .collect::<Vec<_>>()
             .concat();
         let out = vasm
-            .assemble(&source, cpu, Format::Bin)
+            .assemble_with_args(&source, cpu, Format::Bin, machine.vasm_args)
             .map_err(|error| error.to_string())?;
         let mut found_errors = false;
         for message in out.stderr.lines() {
@@ -287,11 +358,12 @@ fn undefined_symbol(message: &str) -> Option<&str> {
     rest.split('>').next()
 }
 
-fn assemble_source(source: &str, cpu: Cpu) -> Assembly {
+fn assemble_source(source: &str, machine: &Machine) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
     let mut options = Options::new("t.s");
-    options.cpu = cpu;
+    options.cpu = machine.cpu;
+    options.fpu = machine.fpu;
     options.fixed_addresses = true;
     assemble(&options, &files)
 }
@@ -330,17 +402,18 @@ fn summarise(lines: &[String]) -> String {
 }
 
 /// What one CPU's sweep found, as text; empty if it matched.
-fn sweep_cpu(vasm: &Vasm, name: &str, cpu: Cpu) -> Result<String, String> {
+fn sweep_machine(vasm: &Vasm, machine: &Machine) -> Result<String, String> {
+    let name = format!("{} {:?}", machine.name, machine.vasm_args);
     let mut wrongly_accepted = Vec::new();
     let mut wrongly_rejected = Vec::new();
     let mut accepted = Vec::new();
     let mut total = 0;
-    for mnemonic in MNEMONICS {
+    for mnemonic in MNEMONICS.iter().chain(FPU_MNEMONICS) {
         let lines = lines_for(mnemonic);
         total += lines.len();
-        let verdict = vasm_verdict(vasm, &lines, name)?;
+        let verdict = vasm_verdict(vasm, &lines, machine)?;
         for (index, line) in lines.into_iter().enumerate() {
-            let we_accept = !assemble_source(&format!("{line}\n"), cpu).has_errors();
+            let we_accept = !assemble_source(&format!("{line}\n"), machine).has_errors();
             match (we_accept, verdict.rejected.contains(&index)) {
                 (true, true) if vasm_wrongly_rejects(&line) => {}
                 (true, true) => wrongly_accepted.push(line),
@@ -373,9 +446,9 @@ fn sweep_cpu(vasm: &Vasm, name: &str, cpu: Cpu) -> Result<String, String> {
         .collect::<Vec<_>>()
         .concat();
     let theirs = vasm
-        .assemble(&source, name, Format::Bin)
+        .assemble_with_args(&source, machine.name, Format::Bin, machine.vasm_args)
         .map_err(|error| error.to_string())?;
-    let assembly = assemble_source(&source, cpu);
+    let assembly = assemble_source(&source, machine);
     let empty = Vec::new();
     let bytes = assembly.sections.first().map_or(&empty, |s| &s.data);
     if let Some(offset) = first_difference(bytes, &theirs.bytes) {
@@ -397,11 +470,11 @@ fn test_assemble_sweep_matches_vasm_on_every_cpu() -> Result<(), Box<dyn Error>>
         return Ok(());
     };
     let reports: Vec<Result<String, String>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = CPUS
+        let handles: Vec<_> = MACHINES
             .iter()
-            .map(|(name, cpu)| {
+            .map(|machine| {
                 let vasm = &vasm;
-                scope.spawn(move || sweep_cpu(vasm, name, *cpu))
+                scope.spawn(move || sweep_machine(vasm, machine))
             })
             .collect();
         handles

@@ -5,6 +5,7 @@ use std::cell::Cell;
 use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::Diagnostic;
 use crate::expr::{eval, Base, Value};
+use crate::float::float_bytes;
 use crate::isa::encode::{encode, EmitContext, Sizer};
 use crate::parser::{add_expansion_chain, is_internal_symbol, Program, SectionEntry};
 use crate::types::{SectionKind, Size};
@@ -223,7 +224,7 @@ fn atom_len(
             .iter()
             .map(|item| match item {
                 DataItem::Bytes(bytes) => bytes.len() as i64,
-                DataItem::Expr(..) => i64::from(size.bytes()),
+                DataItem::Expr(..) | DataItem::Float(..) => i64::from(size.bytes()),
             })
             .sum(),
         AtomKind::Space { size, count, .. } => match eval(count, here, &lookup) {
@@ -334,13 +335,47 @@ fn emit_data_item(item: &DataItem, size: Size, ctx: &mut EmitContext) {
             return;
         }
         DataItem::Expr(expr, span) => (expr, *span),
+        DataItem::Float(literal, span) => {
+            emit_float(&literal.text, size, *span, ctx);
+            return;
+        }
     };
     let pc = ctx.address_of(ctx.data.len() as i64);
     let bytes = size.bytes();
     let Some(value) = ctx.evaluate(expr, pc, span) else {
-        ctx.put_zero(bytes);
+        ctx.data.resize(ctx.data.len() + bytes as usize, 0);
         return;
     };
+    match size {
+        Size::Single | Size::Double | Size::Extended | Size::Packed => {
+            // An integer in floating-point data becomes that number.
+            if value.base != Base::Absolute {
+                ctx.diagnostics.push(Diagnostic::error(
+                    "not-absolute",
+                    "floating-point data must be a constant",
+                    span,
+                ));
+                ctx.data.resize(ctx.data.len() + bytes as usize, 0);
+                return;
+            }
+            emit_float(&value.offset.to_string(), size, span, ctx);
+            return;
+        }
+        Size::Quad => {
+            if value.base != Base::Absolute {
+                ctx.diagnostics.push(Diagnostic::error(
+                    "not-absolute",
+                    "64-bit data must be a constant",
+                    span,
+                ));
+                ctx.data.resize(ctx.data.len() + 8, 0);
+                return;
+            }
+            ctx.data.extend_from_slice(&value.offset.to_be_bytes());
+            return;
+        }
+        _ => {}
+    }
     match size {
         Size::Byte | Size::Short if !(-0x80..=0xFF).contains(&value.offset) => {
             out_of_range(span, ctx)
@@ -356,6 +391,20 @@ fn emit_data_item(item: &DataItem, size: Size, ctx: &mut EmitContext) {
         _ => {}
     }
     ctx.put_value(value, bytes);
+}
+
+fn emit_float(text: &str, size: Size, span: crate::Span, ctx: &mut EmitContext) {
+    match float_bytes(text, size) {
+        Some(bytes) => ctx.data.extend_from_slice(&bytes),
+        None => {
+            ctx.diagnostics.push(Diagnostic::error(
+                "bad-float",
+                "floating-point value out of range",
+                span,
+            ));
+            ctx.data.resize(ctx.data.len() + size.bytes() as usize, 0);
+        }
+    }
 }
 
 fn out_of_range(span: crate::Span, ctx: &mut EmitContext) {
@@ -399,11 +448,20 @@ fn emit_space(
         },
         None => 0,
     };
-    let width = size.bytes() as usize;
-    let pattern = (fill_value as u32).to_be_bytes();
-    let pattern = &pattern[4 - width..];
+    let pattern = space_pattern(size, fill_value);
     ctx.data.reserve(total as usize);
     for _ in 0..value.offset {
-        ctx.data.extend_from_slice(pattern);
+        ctx.data.extend_from_slice(&pattern);
     }
+}
+
+/// The bytes a `blk` or `dcb` repeats. In floating-point sizes the fill value is
+/// a number like any other.
+fn space_pattern(size: Size, fill: i64) -> Vec<u8> {
+    if let Some(bytes) = float_bytes(&fill.to_string(), size) {
+        return bytes;
+    }
+    let width = size.bytes() as usize;
+    let all = fill.to_be_bytes();
+    all[8usize.saturating_sub(width)..].to_vec()
 }

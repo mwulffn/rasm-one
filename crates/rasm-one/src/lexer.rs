@@ -107,6 +107,41 @@ impl<'a> Lexer<'a> {
         &self.src[start..self.pos]
     }
 
+    /// Reads a floating-point literal such as `1.5`, `2e3` or `-1.5e-3`, if one
+    /// is next. Plain integers are left for the expression parser.
+    pub fn float_literal(&mut self) -> Option<String> {
+        let rest = self.rest();
+        let sign = usize::from(matches!(rest.first(), Some(b'-' | b'+')));
+        let digits_in = |from: usize| {
+            rest.get(from..).map_or(0, |bytes| {
+                bytes.iter().take_while(|c| c.is_ascii_digit()).count()
+            })
+        };
+        let whole = digits_in(sign);
+        if whole == 0 {
+            return None;
+        }
+        let mut end = sign + whole;
+        let mut is_float = false;
+        if rest.get(end) == Some(&b'.') && digits_in(end + 1) > 0 {
+            end += 1 + digits_in(end + 1);
+            is_float = true;
+        }
+        if matches!(rest.get(end), Some(b'e' | b'E')) {
+            let exponent_sign = usize::from(matches!(rest.get(end + 1), Some(b'-' | b'+')));
+            let exponent_digits = digits_in(end + 1 + exponent_sign);
+            if exponent_digits > 0 {
+                end += 1 + exponent_sign + exponent_digits;
+                is_float = true;
+            }
+        }
+        if !is_float || rest.get(end).is_some_and(|&c| is_ident_cont(c)) {
+            return None;
+        }
+        self.pos += end;
+        Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+    }
+
     /// Everything left on the line.
     pub fn rest(&self) -> &'a [u8] {
         self.src.get(self.pos..).unwrap_or(&[])
@@ -290,6 +325,17 @@ mod tests {
         assert_eq!(Lexer::new(b"l$").next_tok()?, Tok::Ident("l$"));
         assert_eq!(Lexer::new(b"12$").next_tok()?, Tok::Ident("12$"));
         Ok(())
+    }
+
+    #[test]
+    fn test_float_literal_needs_a_point_or_exponent() {
+        let read = |text: &'static [u8]| Lexer::new(text).float_literal();
+        assert_eq!(read(b"1.5,fp0").as_deref(), Some("1.5"));
+        assert_eq!(read(b"-1.5e-3").as_deref(), Some("-1.5e-3"));
+        assert_eq!(read(b"2e3").as_deref(), Some("2e3"));
+        assert_eq!(read(b"12"), None);
+        assert_eq!(read(b"1.w"), None);
+        assert_eq!(read(b"label"), None);
     }
 
     #[test]

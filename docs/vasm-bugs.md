@@ -78,3 +78,42 @@ wrong. The correct result is `3030 0163 0004 0000 1234`.
 
 **rasm-one:** puts the relocation at offset 6.
 `test_write_hunk_exe_outer_displacement_reloc_follows_word_base`.
+
+## 7. Floating-point values stored with the wrong meaning
+
+Seen on `-m68040`, in all of these vasm writes the bits of one format where the operand
+means another, without any message.
+
+| Source | vasm writes | Problem |
+|---|---|---|
+| `fmove.l #1.5,fp0` | `f23c 4000 3fc0 0000` | The single-precision bits of 1.5, loaded as the integer 1069547520 |
+| `dc.l 1.5` | `3fc00000` | The same, in data |
+| `dc.s label` | `00000004` | A label's address as raw bits, not as a number converted to float |
+| `dcb.s 1,1` and `blk.s 1,1` | `00000001` | The integer's bits, whereas `dc.s 1` correctly gives `3f800000` |
+| `dcb.s 1,1.5` | `00000001` | As above, and the `.5` is dropped too |
+| `dc.s 1e50` | `7f800000` | Infinity, with no out-of-range message |
+
+**rasm-one:** `fmove.l #1.5` and `dc.l 1.5`, `dc.s label`, and `dc.s 1e50` are errors, and
+`dcb.s 1,1` gives `3f800000`. `tests/vasm_fpu.rs`.
+
+## 8. Extended precision depends on the host (limitation, not a logic bug)
+
+**Source:** `dc.x 0.1`.
+
+**Behaviour:** on an ARM Mac, where `long double` is 64 bits, vasm gives
+`3ffb0000ccccccccccccd000`, a double-precision value widened to 80 bits. The correctly rounded
+value is `3ffb0000cccccccccccccccd`. Results for values that a double can't represent
+exactly therefore differ between hosts.
+
+**rasm-one:** converts exactly on every host, so its comparison tests only use values that a
+double can represent. `test_float_bytes_extended_needs_full_precision`.
+
+## 9. Immediate loaded into several FP control registers
+
+**Source:** `fmovem.l #2,fpcr/fpsr`.
+
+**Bug:** the PRM allows an immediate source for `fmovem` "only if a single floating-point control
+register is selected". vasm accepts a list and writes the value with zero padding,
+`f23c 9800 0000 0000 0000 0002`.
+
+**rasm-one:** reports an error. `tests/vasm_fpu.rs`.

@@ -1,6 +1,7 @@
 //! Atoms: the units a section is built from before layout.
 
 use crate::expr::{Expr, SymId};
+use crate::float::FloatLiteral;
 use crate::isa::encode::Instruction;
 use crate::source::Span;
 use crate::types::Size;
@@ -11,6 +12,8 @@ pub(crate) enum DataItem {
     /// A string in a `dc.b`, stored byte by byte.
     Bytes(Vec<u8>),
     Expr(Expr, Span),
+    /// A floating-point literal in a `dc.s`, `.d`, `.x` or `.p`.
+    Float(FloatLiteral, Span),
 }
 
 #[derive(Debug, Clone)]

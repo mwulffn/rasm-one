@@ -12,7 +12,7 @@ mod report;
 
 use rasm_one::{
     assemble, write_bin, write_hunk_exe, write_hunk_exe_with, write_hunk_object, write_listing,
-    Cpu, HunkExeOptions, MemoryProvider, Options,
+    Cpu, FpuChoice, HunkExeOptions, MemoryProvider, Options,
 };
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -23,6 +23,7 @@ pub struct Project {
     files: MemoryProvider,
     include_dirs: Vec<String>,
     cpu: Option<Cpu>,
+    has_coprocessor: bool,
 }
 
 #[wasm_bindgen]
@@ -49,6 +50,11 @@ impl Project {
         self.cpu.is_some()
     }
 
+    /// Says that a 68881 or 68882 is available, alongside a 68020 or 68030.
+    pub fn set_coprocessor(&mut self, present: bool) {
+        self.has_coprocessor = present;
+    }
+
     /// Assembles `main` into `format`: `"hunkexe"`, `"hunkexe-kick1"` (which also
     /// loads on Kickstart 1.x), `"hunk"` or `"bin"`.
     pub fn assemble(&self, main: &str, format: &str) -> AssemblyResult {
@@ -57,6 +63,9 @@ impl Project {
         options.fixed_addresses = format == "bin";
         if let Some(cpu) = self.cpu {
             options.cpu = cpu;
+        }
+        if self.has_coprocessor {
+            options.fpu = FpuChoice::Coprocessor;
         }
         let assembly = assemble(&options, &self.files);
         let output = match format {

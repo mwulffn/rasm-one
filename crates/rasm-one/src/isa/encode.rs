@@ -7,6 +7,7 @@
 
 use crate::error::Diagnostic;
 use crate::expr::{eval, Base, EvalError, Expr, SymId, Value};
+use crate::float::float_bytes;
 use crate::isa::table::{Encoding, InsnRow};
 use crate::isa::{
     BitFieldArg, FullBase, FullDisp, FullMode, IndexReg, Indirection, Mode, Operand, Width,
@@ -215,8 +216,8 @@ fn plan_extension(
         | Mode::PcDispWord(_)
         | Mode::PcIndex(..) => ExtensionPlan::Fixed(2),
         Mode::AbsLong(_) => ExtensionPlan::Fixed(4),
-        Mode::Immediate(_) if size == Size::Long => ExtensionPlan::Fixed(4),
-        Mode::Immediate(_) => ExtensionPlan::Fixed(2),
+        Mode::Immediate(_) | Mode::Float(_) => ExtensionPlan::Fixed(i64::from(size.bytes().max(2))),
+        Mode::PackedStore { ea, .. } => plan_extension(ea, size, pc, insn, sizer),
         _ => ExtensionPlan::Fixed(0),
     }
 }
@@ -247,6 +248,23 @@ impl Instruction {
             Encoding::MovecFrom | Encoding::MovecTo | Encoding::Move16Registers => (2, &[]),
             Encoding::MovepLoad | Encoding::MovepStore | Encoding::PackUnpack => (2, &[]),
             Encoding::Lpstop => (4, &[]),
+            Encoding::FpRegisters
+            | Encoding::FpSingleRegister
+            | Encoding::FpTestRegister
+            | Encoding::Fmovecr
+            | Encoding::FpSinCosRegisters => (2, &[]),
+            Encoding::FpFromEa
+            | Encoding::FpTestEa
+            | Encoding::FpControlLoad
+            | Encoding::FpMovemLoad
+            | Encoding::FpSinCosEa
+            | Encoding::FpSet => (2, operands.get(..1).unwrap_or(&[])),
+            Encoding::FpStore
+            | Encoding::FpStorePacked
+            | Encoding::FpControlStore
+            | Encoding::FpMovemStore => (2, operands.get(1..).unwrap_or(&[])),
+            Encoding::FpTrap => (2, &[]),
+            Encoding::FpTrapImmediate => (2, operands),
             Encoding::Bkpt | Encoding::Stop | Encoding::CacheOp => (
                 if self.row.encoding == Encoding::Stop {
                     2
@@ -269,8 +287,9 @@ impl Instruction {
                     _ => 4,
                 };
             }
-            Encoding::BranchLong => return 6,
-            Encoding::DecrementBranch => return 4,
+            Encoding::BranchLong | Encoding::FpBranchLong => return 6,
+            Encoding::DecrementBranch | Encoding::FpBranch => return 4,
+            Encoding::FpDecrementBranch => return 6,
             _ => {}
         }
         let (lead, operands) = self.extension_layout();
@@ -407,8 +426,51 @@ fn sign_extend_32(v: i64) -> i64 {
 fn size_bits(size: Size) -> u16 {
     match size {
         Size::Byte | Size::Short => 0,
-        Size::Word => 1 << 6,
         Size::Long => 2 << 6,
+        _ => 1 << 6,
+    }
+}
+
+/// The source format field of an FPU command word.
+fn fp_format(size: Size) -> u16 {
+    match size {
+        Size::Long | Size::Quad => 0,
+        Size::Single | Size::Short => 1,
+        Size::Extended => 2,
+        Size::Packed => 3,
+        Size::Word => 4,
+        Size::Double => 5,
+        Size::Byte => 6,
+    }
+}
+
+fn fp_reg(mode: &Mode) -> u16 {
+    match mode {
+        Mode::FpReg(n) => u16::from(*n),
+        _ => 0,
+    }
+}
+
+/// An FP register list in the bit order `fmovem` wants: reversed unless the
+/// memory operand is predecrement.
+fn fp_list(mode: &Mode, predecrement: bool) -> u16 {
+    let mask = match mode {
+        Mode::FpReg(n) => 1u8 << n,
+        Mode::FpList(mask) => *mask,
+        _ => 0,
+    };
+    u16::from(if predecrement {
+        mask
+    } else {
+        mask.reverse_bits()
+    })
+}
+
+/// The control register bits of an operand.
+fn fp_control(mode: &Mode) -> u16 {
+    match mode {
+        Mode::FpControl(bits) | Mode::FpControlList(bits) => *bits,
+        _ => 0,
     }
 }
 
@@ -417,6 +479,14 @@ fn pair(mode: &Mode) -> (u16, u16) {
     match mode {
         Mode::RegPair(a, b) => (u16::from(*a), u16::from(*b)),
         Mode::IndirectPair(a, b) => (u16::from(*a), u16::from(*b)),
+        _ => (0, 0),
+    }
+}
+
+/// The registers of an `fpc:fps` operand.
+fn fp_pair(mode: &Mode) -> (u16, u16) {
+    match mode {
+        Mode::FpPair(cosine, sine) => (u16::from(*cosine), u16::from(*sine)),
         _ => (0, 0),
     }
 }
@@ -445,7 +515,7 @@ pub(crate) fn encode(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
             let size_code: u16 = match size {
                 Size::Byte | Size::Short => 1,
                 Size::Long => 2,
-                Size::Word => 3,
+                _ => 3,
             };
             let (dst_mode, dst_reg) = mode_reg(&op(1).mode);
             ctx.put_word(size_code << 12 | dst_reg << 9 | dst_mode << 6 | mode_bits(&op(0).mode));
@@ -560,8 +630,8 @@ pub(crate) fn encode(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
         Encoding::Chk2 => {
             let size_field: u16 = match size {
                 Size::Byte | Size::Short => 0,
-                Size::Word => 1,
                 Size::Long => 2,
+                _ => 1,
             };
             ctx.put_word(base | size_field << 9 | mode_bits(&op(0).mode));
             ctx.put_word(full_reg(&op(1).mode) << 12 | insn.row.extension);
@@ -570,8 +640,8 @@ pub(crate) fn encode(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
         Encoding::Cas => {
             let size_field: u16 = match size {
                 Size::Byte | Size::Short => 1,
-                Size::Word => 2,
                 Size::Long => 3,
+                _ => 2,
             };
             ctx.put_word(base | size_field << 9 | mode_bits(&op(2).mode));
             ctx.put_word(reg(1) << 6 | reg(0));
@@ -662,6 +732,140 @@ pub(crate) fn encode(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
                 .get(1)
                 .map_or(0, |operand| mode_reg(&operand.mode).1);
             ctx.put_word(base | cache << 6 | register);
+        }
+        Encoding::FpRegisters => {
+            ctx.put_word(base);
+            let (source, destination) = (fp_reg(&op(0).mode), fp_reg(&op(1).mode));
+            ctx.put_word(source << 10 | destination << 7 | insn.row.extension);
+        }
+        Encoding::FpSingleRegister => {
+            ctx.put_word(base);
+            let register = fp_reg(&op(0).mode);
+            ctx.put_word(register << 10 | register << 7 | insn.row.extension);
+        }
+        Encoding::FpTestRegister => {
+            ctx.put_word(base);
+            ctx.put_word(fp_reg(&op(0).mode) << 10 | insn.row.extension);
+        }
+        Encoding::FpFromEa => {
+            ctx.put_word(base | mode_bits(&op(0).mode));
+            let destination = fp_reg(&op(1).mode);
+            ctx.put_word(0x4000 | fp_format(size) << 10 | destination << 7 | insn.row.extension);
+            emit_extension(op(0), size, insn, ctx);
+        }
+        Encoding::FpTestEa => {
+            ctx.put_word(base | mode_bits(&op(0).mode));
+            ctx.put_word(0x4000 | fp_format(size) << 10 | insn.row.extension);
+            emit_extension(op(0), size, insn, ctx);
+        }
+        Encoding::FpStore => {
+            ctx.put_word(base | mode_bits(&op(1).mode));
+            ctx.put_word(0x6000 | fp_format(size) << 10 | fp_reg(&op(0).mode) << 7);
+            emit_extension(op(1), size, insn, ctx);
+        }
+        Encoding::FpStorePacked => {
+            ctx.put_word(base | mode_bits(&op(1).mode));
+            let factor = match &op(1).mode {
+                Mode::PackedStore { factor, .. } => factor,
+                _ => return,
+            };
+            let (format, low) = match factor {
+                BitFieldArg::Reg(n) => (7, u16::from(*n) << 4),
+                BitFieldArg::Value(expr) => {
+                    let star = ctx.star();
+                    let value = ctx.evaluate(expr, star, op(1).span);
+                    let number = value
+                        .filter(|v| v.base == Base::Absolute)
+                        .map_or(0, |v| v.offset);
+                    if !(-64..=63).contains(&number) {
+                        ctx.error("out-of-range", "k-factor out of range", op(1).span);
+                    }
+                    (3, number as u16 & 0x7F)
+                }
+            };
+            ctx.put_word(0x6000 | format << 10 | fp_reg(&op(0).mode) << 7 | low);
+            emit_extension(op(1), size, insn, ctx);
+        }
+        Encoding::FpControlLoad => {
+            ctx.put_word(base | mode_bits(&op(0).mode));
+            ctx.put_word(0x8000 | fp_control(&op(1).mode));
+            emit_extension(op(0), Size::Long, insn, ctx);
+        }
+        Encoding::FpControlStore => {
+            ctx.put_word(base | mode_bits(&op(1).mode));
+            ctx.put_word(0xA000 | fp_control(&op(0).mode));
+            emit_extension(op(1), Size::Long, insn, ctx);
+        }
+        Encoding::FpMovemStore => {
+            ctx.put_word(base | mode_bits(&op(1).mode));
+            let predecrement = matches!(op(1).mode, Mode::PreDec(_));
+            let mode_field: u16 = if predecrement { 0 } else { 2 };
+            let word = match &op(0).mode {
+                Mode::DataReg(n) => (mode_field + 1) << 11 | u16::from(*n) << 4,
+                Mode::Immediate(_) => {
+                    mode_field << 11 | (opcode_constant(op(0), 0, 255, false, ctx) as u16)
+                }
+                mode => mode_field << 11 | fp_list(mode, predecrement),
+            };
+            ctx.put_word(0xE000 | word);
+            emit_extension(op(1), size, insn, ctx);
+        }
+        Encoding::FpMovemLoad => {
+            ctx.put_word(base | mode_bits(&op(0).mode));
+            let word = match &op(1).mode {
+                Mode::DataReg(n) => 3 << 11 | u16::from(*n) << 4,
+                Mode::Immediate(_) => 2 << 11 | (opcode_constant(op(1), 0, 255, false, ctx) as u16),
+                mode => 2 << 11 | fp_list(mode, false),
+            };
+            ctx.put_word(0xC000 | word);
+            emit_extension(op(0), size, insn, ctx);
+        }
+        Encoding::Fmovecr => {
+            ctx.put_word(base);
+            let offset = opcode_constant(op(0), 0, 0x7F, false, ctx) as u16;
+            ctx.put_word(0x5C00 | fp_reg(&op(1).mode) << 7 | offset);
+        }
+        Encoding::FpSinCosRegisters => {
+            ctx.put_word(base);
+            let (cosine, sine) = fp_pair(&op(1).mode);
+            ctx.put_word(fp_reg(&op(0).mode) << 10 | sine << 7 | 0x30 | cosine);
+        }
+        Encoding::FpSinCosEa => {
+            ctx.put_word(base | mode_bits(&op(0).mode));
+            let (cosine, sine) = fp_pair(&op(1).mode);
+            ctx.put_word(0x4000 | fp_format(size) << 10 | sine << 7 | 0x30 | cosine);
+            emit_extension(op(0), size, insn, ctx);
+        }
+        Encoding::FpBranch => {
+            ctx.put_word(base);
+            emit_branch_word(op(0), span, ctx);
+        }
+        Encoding::FpBranchLong => {
+            ctx.put_word(base);
+            let value = branch_target(op(0), ctx);
+            let pc = ctx.instruction_start + 2;
+            emit_pc_field(value, pc, 4, BRANCH_RANGE, span, ctx);
+        }
+        Encoding::FpDecrementBranch => {
+            ctx.put_word(base | reg(0));
+            ctx.put_word(insn.row.extension);
+            let value = branch_target(op(1), ctx);
+            let pc = ctx.instruction_start + 4;
+            emit_pc_field(value, pc, 2, BRANCH_RANGE, span, ctx);
+        }
+        Encoding::FpSet => {
+            ctx.put_word(base | mode_bits(&op(0).mode));
+            ctx.put_word(insn.row.extension);
+            emit_extension(op(0), size, insn, ctx);
+        }
+        Encoding::FpTrap => {
+            ctx.put_word(base);
+            ctx.put_word(insn.row.extension);
+        }
+        Encoding::FpTrapImmediate => {
+            ctx.put_word(base);
+            ctx.put_word(insn.row.extension);
+            emit_extension(op(0), size, insn, ctx);
         }
         Encoding::Lpstop => {
             ctx.put_word(base);
@@ -793,7 +997,7 @@ fn mode_reg(mode: &Mode) -> (u16, u16) {
             FullBase::None => (6, 0),
             FullBase::Pc | FullBase::SuppressedPc => (7, 3),
         },
-        Mode::BitField { ea, .. } => mode_reg(ea),
+        Mode::BitField { ea, .. } | Mode::PackedStore { ea, .. } => mode_reg(ea),
         // Not effective addresses, so never placed in an EA field.
         Mode::Sr
         | Mode::Ccr
@@ -802,7 +1006,13 @@ fn mode_reg(mode: &Mode) -> (u16, u16) {
         | Mode::RegPair(..)
         | Mode::IndirectPair(..)
         | Mode::ControlReg(_)
-        | Mode::Cache(_) => (0, 0),
+        | Mode::Cache(_)
+        | Mode::FpReg(_)
+        | Mode::FpPair(..)
+        | Mode::FpList(_)
+        | Mode::FpControl(_)
+        | Mode::FpControlList(_) => (0, 0),
+        Mode::Float(_) => (7, 4),
     }
 }
 
@@ -884,6 +1094,25 @@ fn emit_extension(op: &Operand, size: Size, insn: &Instruction, ctx: &mut EmitCo
             );
         }
         Mode::Immediate(expr) => emit_immediate(expr, size, op.span, ctx),
+        Mode::Float(literal) => match float_bytes(&literal.text, size) {
+            Some(bytes) => ctx.data.extend_from_slice(&bytes),
+            None => {
+                ctx.error(
+                    "bad-float",
+                    "floating-point value out of range or wrong size",
+                    op.span,
+                );
+                ctx.data
+                    .resize(ctx.data.len() + size.bytes().max(2) as usize, 0);
+            }
+        },
+        Mode::PackedStore { ea, .. } => {
+            let inner = Operand {
+                mode: (**ea).clone(),
+                span: op.span,
+            };
+            emit_extension(&inner, size, insn, ctx);
+        }
         _ => {}
     }
 }
@@ -918,6 +1147,12 @@ fn resolve_growth(mode: &Mode, plan: ExtensionPlan) -> Option<Mode> {
         )),
         Mode::PcDisp(expr) => Some(grown_mode(expr, FullBase::Pc, None, plan.base)),
         Mode::PcIndex(expr, index) => Some(grown_mode(expr, FullBase::Pc, Some(*index), plan.base)),
+        Mode::PackedStore { ea, factor } => {
+            resolve_growth(ea, ExtensionPlan::Full(plan)).map(|ea| Mode::PackedStore {
+                ea: Box::new(ea),
+                factor: factor.clone(),
+            })
+        }
         Mode::BitField { ea, offset, width } => {
             resolve_growth(ea, ExtensionPlan::Full(plan)).map(|ea| Mode::BitField {
                 ea: Box::new(ea),
@@ -1137,15 +1372,36 @@ fn emit_pc_field(
 
 fn emit_immediate(expr: &Expr, size: Size, span: Span, ctx: &mut EmitContext) {
     let pc = ctx.star();
-    let width = if size == Size::Long { 4 } else { 2 };
+    let width = size.bytes().max(2);
     let Some(value) = ctx.evaluate(expr, pc, span) else {
         ctx.put_zero(width);
         return;
     };
+    if matches!(
+        size,
+        Size::Single | Size::Double | Size::Extended | Size::Packed
+    ) {
+        // An integer given to a floating-point operand becomes that number.
+        let bytes = (value.base == Base::Absolute)
+            .then(|| float_bytes(&value.offset.to_string(), size))
+            .flatten();
+        match bytes {
+            Some(bytes) => ctx.data.extend_from_slice(&bytes),
+            None => {
+                ctx.error(
+                    "bad-float",
+                    "floating-point immediate must be a constant",
+                    span,
+                );
+                ctx.data.resize(ctx.data.len() + size.bytes() as usize, 0);
+            }
+        }
+        return;
+    }
     let (min, max) = match size {
         Size::Byte | Size::Short => (-0x80, 0xFF),
         Size::Word => (-0x8000, 0xFFFF),
-        Size::Long => (-0x8000_0000, 0xFFFF_FFFF),
+        _ => (-0x8000_0000, 0xFFFF_FFFF),
     };
     if !(min..=max).contains(&value.offset) {
         ctx.error("out-of-range", "immediate operand out of range", span);
