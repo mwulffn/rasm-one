@@ -1,6 +1,7 @@
 //! Parses source lines into atoms and symbols.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::FileError;
@@ -106,7 +107,18 @@ fn is_directive(name: &str) -> bool {
             | "include"
             | "incbin"
             | "incdir"
-    ) || section_shortcut(name).is_some()
+            | "macro"
+            | "endm"
+            | "mexit"
+            | "rept"
+            | "endr"
+            | "else"
+            | "elif"
+            | "elseif"
+            | "endc"
+            | "endif"
+    ) || is_if(name)
+        || section_shortcut(name).is_some()
 }
 
 /// Maps `code`, `data_c` and so on to a section name, kind and memory type.
@@ -123,6 +135,211 @@ fn section_shortcut(name: &str) -> Option<(&'static str, SectionKind, MemKind)> 
         "bss_f" => ("BSS_F", SectionKind::Bss, MemKind::Fast),
         _ => return None,
     })
+}
+
+/// Macro calls nested deeper than this are an error. Calls recurse in the
+/// parser, so this also protects the stack, which is small under WASM.
+const MAX_MACRO_DEPTH: usize = 200;
+
+/// Name of the symbol holding the argument count during a macro.
+const NARG: &str = "NARG";
+
+/// Name of the symbol holding the iteration number during a `rept`.
+const REPTN: &str = "REPTN";
+
+fn is_local_label(name: &str) -> bool {
+    name.starts_with('.') || name.ends_with('$')
+}
+
+fn is_if(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "ifne"
+            | "ifeq"
+            | "ifgt"
+            | "ifge"
+            | "iflt"
+            | "ifle"
+            | "ifd"
+            | "ifnd"
+            | "ifc"
+            | "ifnc"
+            | "ifb"
+            | "ifnb"
+    )
+}
+
+/// A source line to parse.
+#[derive(Debug, Clone, Copy)]
+struct SrcLine<'a> {
+    number: u32,
+    text: &'a [u8],
+}
+
+/// A macro body: line numbers and text from where it was defined.
+#[derive(Debug)]
+struct MacroDef {
+    file: FileId,
+    lines: Vec<(u32, Vec<u8>)>,
+}
+
+/// A conditional block that is open.
+#[derive(Debug, Clone, Copy)]
+struct Conditional {
+    span: Span,
+    /// False if the whole block is inside an inactive one.
+    parent_active: bool,
+    /// True once a branch has been chosen.
+    taken: bool,
+    active: bool,
+    seen_else: bool,
+}
+
+/// Work for the line loop to do once a line has been parsed. Doing it there,
+/// rather than while parsing the line, keeps the stack small when expansions
+/// nest, since WASM stacks are small and line parsing has large frames.
+#[derive(Debug)]
+enum PendingWork {
+    /// A macro definition, whose body follows.
+    DefineMacro {
+        name: String,
+        span: Span,
+    },
+    /// A `rept`, whose body follows.
+    Repeat {
+        count: i64,
+        span: Span,
+    },
+    CallMacro {
+        name: String,
+        size: &'static str,
+        args: Vec<Vec<u8>>,
+        span: Span,
+    },
+    Include {
+        path: String,
+        span: Span,
+    },
+}
+
+/// Finds the first word that could be a directive, skipping any label. Returns
+/// it in lower case with the position after it.
+fn directive_word(text: &[u8]) -> Option<(String, usize)> {
+    let mut pos = 0;
+    let is_word = |c: &u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'$');
+    if !matches!(text.first(), Some(b' ' | b'\t')) {
+        while text.get(pos).is_some_and(is_word) {
+            pos += 1;
+        }
+        while text.get(pos) == Some(&b':') {
+            pos += 1;
+        }
+    } else {
+        // An indented label needs a colon, so look past one if it is there.
+        let start = text
+            .iter()
+            .take_while(|c| matches!(c, b' ' | b'\t'))
+            .count();
+        let end = start + text[start..].iter().take_while(|c| is_word(c)).count();
+        if text.get(end) == Some(&b':') {
+            pos = end;
+            while text.get(pos) == Some(&b':') {
+                pos += 1;
+            }
+        }
+    }
+    while matches!(text.get(pos), Some(b' ' | b'\t')) {
+        pos += 1;
+    }
+    let start = pos;
+    while text
+        .get(pos)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+    {
+        pos += 1;
+    }
+    if start == pos {
+        return None;
+    }
+    let word = String::from_utf8_lossy(&text[start..pos]).to_ascii_lowercase();
+    Some((word, pos))
+}
+
+/// Finds the line ending a block, as an index into `lines`. Only `rept` nests.
+fn find_block_end(lines: &[SrcLine], opener: Option<&str>, closer: &str) -> Option<usize> {
+    let mut depth = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let Some((word, _)) = directive_word(line.text) else {
+            continue;
+        };
+        if Some(word.as_str()) == opener {
+            depth += 1;
+        } else if word == closer {
+            if depth == 0 {
+                return Some(index);
+            }
+            depth -= 1;
+        }
+    }
+    None
+}
+
+/// Splits macro call arguments. Commas inside quotes, parentheses or `<>` don't
+/// separate, and `<>` around an argument is removed. A blank outside all of
+/// those ends the list, except straight after a comma.
+fn split_macro_args(text: &[u8]) -> Vec<Vec<u8>> {
+    let mut args = Vec::new();
+    let mut pos = 0;
+    while matches!(text.get(pos), Some(b' ' | b'\t')) {
+        pos += 1;
+    }
+    if matches!(text.get(pos), None | Some(b';')) {
+        return args;
+    }
+    loop {
+        let mut arg = Vec::new();
+        if text.get(pos) == Some(&b'<') {
+            let inner = pos + 1;
+            let length = text[inner..].iter().position(|&c| c == b'>');
+            if let Some(length) = length {
+                arg.extend_from_slice(&text[inner..inner + length]);
+                pos = inner + length + 1;
+            }
+        }
+        let mut quote = None;
+        let mut depth = 0;
+        while let Some(&c) = text.get(pos) {
+            match quote {
+                Some(open) if c == open => quote = None,
+                Some(_) => {}
+                None => match c {
+                    b'"' | b'\'' => quote = Some(c),
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    b',' if depth <= 0 => break,
+                    b' ' | b'\t' | b';' if depth <= 0 => break,
+                    _ => {}
+                },
+            }
+            arg.push(c);
+            pos += 1;
+        }
+        args.push(arg);
+        if text.get(pos) != Some(&b',') {
+            return args;
+        }
+        pos += 1;
+        while matches!(text.get(pos), Some(b' ' | b'\t')) {
+            pos += 1;
+        }
+    }
+}
+
+/// Values that macro parameters expand to.
+struct MacroCall<'a> {
+    size: &'a str,
+    args: &'a [Vec<u8>],
+    id: u32,
 }
 
 /// Name of the symbol holding the `rs` counter.
@@ -151,6 +368,20 @@ pub(crate) struct Parser<'f> {
     rs_counter: i64,
     /// Set by `end`.
     ended: bool,
+    /// Set by `mexit` until the macro has been left.
+    macro_exit: bool,
+    macros: HashMap<String, Rc<MacroDef>>,
+    /// Number for the next macro call, for `\\@`.
+    macro_calls: u32,
+    macro_depth: usize,
+    /// Argument count of the macro being expanded.
+    narg: Option<i64>,
+    /// Iteration of the `rept` being expanded.
+    reptn: Option<i64>,
+    conditionals: Vec<Conditional>,
+    pending_work: Option<PendingWork>,
+    /// The last global label, which local labels belong to.
+    label_scope: String,
 }
 
 impl<'f> Parser<'f> {
@@ -170,6 +401,15 @@ impl<'f> Parser<'f> {
             constants: HashMap::new(),
             rs_counter: 0,
             ended: false,
+            macro_exit: false,
+            macros: HashMap::new(),
+            macro_calls: 1,
+            macro_depth: 0,
+            narg: None,
+            reptn: None,
+            conditionals: Vec::new(),
+            pending_work: None,
+            label_scope: String::new(),
         }
     }
 
@@ -182,6 +422,15 @@ impl<'f> Parser<'f> {
         let source = self.provider.read(path, None)?;
         let file = self.file_id(path);
         self.parse_file(file, &source);
+        if !self.ended {
+            for conditional in std::mem::take(&mut self.conditionals) {
+                self.program.diagnostics.push(Diagnostic::error(
+                    "unterminated-block",
+                    "conditional block has no endc",
+                    conditional.span,
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -253,29 +502,341 @@ impl<'f> Parser<'f> {
 
     fn parse_file(&mut self, file: FileId, source: &[u8]) {
         self.file_stack.push(file);
-        for (index, raw) in source.split(|&b| b == b'\n').enumerate() {
-            if self.ended {
+        let lines: Vec<SrcLine> = source
+            .split(|&b| b == b'\n')
+            .enumerate()
+            .map(|(index, raw)| SrcLine {
+                number: index as u32 + 1,
+                text: raw.strip_suffix(b"\r").unwrap_or(raw),
+            })
+            .collect();
+        self.parse_lines(file, &lines);
+        self.file_stack.pop();
+    }
+
+    fn parse_lines(&mut self, file: FileId, lines: &[SrcLine]) {
+        let mut next = 0;
+        while let Some(line) = lines.get(next) {
+            if self.ended || self.macro_exit {
                 break;
             }
-            let text = raw.strip_suffix(b"\r").unwrap_or(raw);
-            let line = LineParser {
-                parser: self,
-                lexer: Lexer::new(text),
-                file,
-                line: index as u32 + 1,
+            next += 1;
+            let result = if self.is_skipping() {
+                self.parse_skipped_line(file, *line)
+            } else {
+                LineParser {
+                    parser: self,
+                    lexer: Lexer::new(line.text),
+                    file,
+                    line: line.number,
+                }
+                .parse()
             };
-            if let Err(diagnostic) = line.parse() {
+            if let Err(diagnostic) = result {
                 self.program.diagnostics.push(diagnostic);
             }
-            // Lines of a nested file have already had their whole chain added.
-            add_expansion_chain(
-                &mut self.program.diagnostics[self.chained_diagnostics..],
-                self.current_expansion,
-                &self.program.expansions,
-            );
-            self.chained_diagnostics = self.program.diagnostics.len();
+            self.chain_new_diagnostics();
+            if let Some(work) = self.pending_work.take() {
+                next += self.run_pending(work, file, &lines[next..]);
+                self.chain_new_diagnostics();
+            }
         }
-        self.file_stack.pop();
+    }
+
+    fn chain_new_diagnostics(&mut self) {
+        // Lines of a nested expansion have already had their whole chain added.
+        add_expansion_chain(
+            &mut self.program.diagnostics[self.chained_diagnostics..],
+            self.current_expansion,
+            &self.program.expansions,
+        );
+        self.chained_diagnostics = self.program.diagnostics.len();
+    }
+
+    /// Does work left by the last line. Returns how many following lines were
+    /// used as its body.
+    fn run_pending(&mut self, work: PendingWork, file: FileId, lines: &[SrcLine]) -> usize {
+        let (opener, closer, span) = match &work {
+            PendingWork::DefineMacro { span, .. } => (None, "endm", *span),
+            PendingWork::Repeat { span, .. } => (Some("rept"), "endr", *span),
+            PendingWork::CallMacro {
+                name,
+                size,
+                args,
+                span,
+            } => {
+                let call = MacroCall {
+                    size,
+                    args,
+                    id: self.macro_calls,
+                };
+                self.macro_calls += 1;
+                let result = match self.macros.get(name).cloned() {
+                    Some(definition) => self.expand_macro(&definition, &call, *span),
+                    None => Ok(()),
+                };
+                self.report(result);
+                return 0;
+            }
+            PendingWork::Include { path, span } => {
+                let result = self.include(path, *span);
+                self.report(result);
+                return 0;
+            }
+        };
+        let Some(end) = find_block_end(lines, opener, closer) else {
+            self.program.diagnostics.push(Diagnostic::error(
+                "unterminated-block",
+                format!("block has no {closer}"),
+                span,
+            ));
+            return lines.len();
+        };
+        let body = &lines[..end];
+        match work {
+            PendingWork::DefineMacro { name, .. } => {
+                let lines = body
+                    .iter()
+                    .map(|line| (line.number, line.text.to_vec()))
+                    .collect();
+                let definition = Rc::new(MacroDef { file, lines });
+                self.macros.insert(name, definition);
+            }
+            PendingWork::Repeat { count, span } => self.run_repeat(count, span, file, body),
+            PendingWork::CallMacro { .. } | PendingWork::Include { .. } => {}
+        }
+        end + 1
+    }
+
+    fn report(&mut self, result: Result<(), Diagnostic>) {
+        if let Err(diagnostic) = result {
+            self.program.diagnostics.push(diagnostic);
+        }
+    }
+
+    fn run_repeat(&mut self, count: i64, site: Span, file: FileId, body: &[SrcLine]) {
+        let outer_reptn = self.reptn;
+        for iteration in 0..count {
+            if self.ended || self.macro_exit {
+                break;
+            }
+            self.reptn = Some(iteration);
+            self.set_special_symbol(REPTN, iteration, site);
+            self.run_expansion(ExpansionKind::Repeat, site, file, body);
+        }
+        self.reptn = outer_reptn;
+        if let Some(value) = outer_reptn {
+            self.set_special_symbol(REPTN, value, site);
+        }
+    }
+
+    /// Gives a symbol maintained by the assembler a new value.
+    fn set_special_symbol(&mut self, name: &str, value: i64, span: Span) {
+        let id = self.symbol(name);
+        let entry = &mut self.program.symbols[id as usize];
+        entry.defined_at = Some(span);
+        entry.redefinable = true;
+        self.constants.insert(id, value);
+        self.push_atom(AtomKind::Equate(id, Expr::Num(value)), span);
+    }
+
+    fn run_expansion(&mut self, kind: ExpansionKind, site: Span, file: FileId, lines: &[SrcLine]) {
+        self.program.expansions.push(Expansion {
+            kind,
+            site,
+            parent: self.current_expansion,
+        });
+        let outer = self.current_expansion;
+        self.current_expansion = Some(self.program.expansions.len() as u32 - 1);
+        self.parse_lines(file, lines);
+        self.current_expansion = outer;
+    }
+
+    fn expand_macro(
+        &mut self,
+        definition: &MacroDef,
+        call: &MacroCall,
+        site: Span,
+    ) -> Result<(), Diagnostic> {
+        if self.macro_depth >= MAX_MACRO_DEPTH {
+            return Err(Diagnostic::error(
+                "macro-depth",
+                format!("macro calls nested more than {MAX_MACRO_DEPTH} levels deep"),
+                site,
+            ));
+        }
+        let text: Vec<(u32, Vec<u8>)> = definition
+            .lines
+            .iter()
+            .map(|(number, line)| (*number, self.substitute(line, call)))
+            .collect();
+        let lines: Vec<SrcLine> = text
+            .iter()
+            .map(|(number, text)| SrcLine {
+                number: *number,
+                text,
+            })
+            .collect();
+
+        let outer_narg = self.narg;
+        let narg = call.args.len() as i64;
+        self.narg = Some(narg);
+        self.set_special_symbol(NARG, narg, site);
+        let conditional_depth = self.conditionals.len();
+        self.macro_depth += 1;
+        self.run_expansion(ExpansionKind::Macro, site, definition.file, &lines);
+        self.macro_depth -= 1;
+        // Leaving with `mexit` also leaves any conditionals it was inside.
+        if self.macro_exit {
+            self.conditionals.truncate(conditional_depth);
+            self.macro_exit = false;
+        }
+        self.narg = outer_narg;
+        if let Some(value) = outer_narg {
+            self.set_special_symbol(NARG, value, site);
+        }
+        Ok(())
+    }
+
+    /// Replaces macro parameters in a line. Other backslashes stay, so they
+    /// are harmless in comments and an error anywhere else.
+    fn substitute(&self, line: &[u8], call: &MacroCall) -> Vec<u8> {
+        let mut out = Vec::with_capacity(line.len());
+        let mut pos = 0;
+        while let Some(&c) = line.get(pos) {
+            pos += 1;
+            if c != b'\\' {
+                out.push(c);
+                continue;
+            }
+            match line.get(pos) {
+                Some(d) if d.is_ascii_digit() => {
+                    let digits = line[pos..]
+                        .iter()
+                        .take_while(|c| c.is_ascii_digit())
+                        .count();
+                    let text = String::from_utf8_lossy(&line[pos..pos + digits]);
+                    pos += digits;
+                    match text.parse::<usize>() {
+                        Ok(0) => out.extend_from_slice(call.size.as_bytes()),
+                        Ok(n) => {
+                            if let Some(arg) = call.args.get(n - 1) {
+                                out.extend_from_slice(arg);
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                Some(b'@') => {
+                    pos += 1;
+                    out.extend_from_slice(format!("_{:06}", call.id).as_bytes());
+                }
+                Some(b'#') => {
+                    pos += 1;
+                    out.extend_from_slice(call.args.len().to_string().as_bytes());
+                }
+                Some(b'<') => {
+                    let rest = &line[pos + 1..];
+                    let value = rest.iter().position(|&c| c == b'>').and_then(|end| {
+                        let name = String::from_utf8_lossy(&rest[..end]);
+                        let id = self.symbol_ids.get(self.symbol_key(&name).as_str())?;
+                        Some((end, *self.constants.get(id)?))
+                    });
+                    match value {
+                        Some((end, value)) => {
+                            pos += end + 2;
+                            out.extend_from_slice(value.to_string().as_bytes());
+                        }
+                        None => out.push(c),
+                    }
+                }
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    fn is_skipping(&self) -> bool {
+        self.conditionals.last().is_some_and(|c| !c.active)
+    }
+
+    /// Handles a line in an inactive block: only block structure matters.
+    fn parse_skipped_line(&mut self, file: FileId, line: SrcLine) -> Result<(), Diagnostic> {
+        let Some((word, end)) = directive_word(line.text) else {
+            return Ok(());
+        };
+        if is_if(&word) {
+            let span = Span {
+                file,
+                line: line.number,
+                col: 1,
+                len: 1,
+            };
+            self.conditionals.push(Conditional {
+                span,
+                parent_active: false,
+                taken: true,
+                active: false,
+                seen_else: false,
+            });
+            return Ok(());
+        }
+        match word.as_str() {
+            "endc" | "endif" => {
+                self.conditionals.pop();
+                Ok(())
+            }
+            "else" => {
+                if let Some(top) = self.conditionals.last_mut() {
+                    if top.seen_else && top.parent_active {
+                        return Err(Diagnostic::error(
+                            "syntax",
+                            "second else in a block",
+                            Span {
+                                file,
+                                line: line.number,
+                                col: 1,
+                                len: 1,
+                            },
+                        ));
+                    }
+                    top.seen_else = true;
+                    if top.parent_active && !top.taken {
+                        top.taken = true;
+                        top.active = true;
+                    }
+                }
+                Ok(())
+            }
+            "elif" | "elseif" => {
+                let eligible = self
+                    .conditionals
+                    .last()
+                    .is_some_and(|top| top.parent_active && !top.taken);
+                if !eligible {
+                    return Ok(());
+                }
+                let mut lexer = Lexer::new(line.text);
+                lexer.set_pos(end);
+                lexer.skip_blanks();
+                let mut parser = LineParser {
+                    parser: self,
+                    lexer,
+                    file,
+                    line: line.number,
+                };
+                let value = parser.parse_constant()?;
+                parser.expect_end()?;
+                if let Some(top) = self.conditionals.last_mut() {
+                    if value != 0 {
+                        top.taken = true;
+                        top.active = true;
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Looks up a register by name, including names defined by `equr`.
@@ -286,8 +847,18 @@ impl<'f> Parser<'f> {
             .or_else(|| parse_reg(name))
     }
 
+    /// The key a symbol is stored under: local labels are per global label.
+    fn symbol_key(&self, name: &str) -> String {
+        if is_local_label(name) {
+            format!("{}\0{name}", self.label_scope)
+        } else {
+            name.to_string()
+        }
+    }
+
     fn symbol(&mut self, name: &str) -> SymId {
-        if let Some(&id) = self.symbol_ids.get(name) {
+        let key = self.symbol_key(name);
+        if let Some(&id) = self.symbol_ids.get(&key) {
             return id;
         }
         let id = self.program.symbols.len() as SymId;
@@ -296,7 +867,7 @@ impl<'f> Parser<'f> {
             defined_at: None,
             redefinable: false,
         });
-        self.symbol_ids.insert(name.to_string(), id);
+        self.symbol_ids.insert(key, id);
         id
     }
 
@@ -520,18 +1091,24 @@ impl LineParser<'_, '_, '_> {
         }
         // An indented word is a label only if a colon follows it.
         let start = self.lexer.pos();
-        if let Tok::Ident(_) = self.peek()? {
-            let saved = self.lexer.pos();
-            if let Some(name) = self.eat_ident()? {
-                if self.peek_is(Punct::Colon)? {
-                    self.eat_colons()?;
-                    let span = self.span(start);
-                    return self.parse_statement(Some((name, span)));
-                }
+        if let Some(name) = self.eat_label_name()? {
+            if self.peek_is(Punct::Colon)? {
+                self.eat_colons()?;
+                let span = self.span(start);
+                return self.parse_statement(Some((name, span)));
             }
-            self.lexer.set_pos(saved);
         }
+        self.lexer.set_pos(start);
         self.parse_statement(None)
+    }
+
+    /// Reads a label name, which may be a `.local` one.
+    fn eat_label_name(&mut self) -> Result<Option<String>, Diagnostic> {
+        if self.peek_is(Punct::Dot)? {
+            self.advance()?;
+            return Ok(self.eat_ident()?.map(|name| format!(".{name}")));
+        }
+        self.eat_ident()
     }
 
     fn eat_colons(&mut self) -> Result<(), Diagnostic> {
@@ -541,15 +1118,8 @@ impl LineParser<'_, '_, '_> {
     }
 
     fn parse_after_column_zero(&mut self) -> Result<(), Diagnostic> {
-        if self.peek_is(Punct::Dot)? {
-            return Err(self.error_at(
-                "unsupported",
-                "local labels are not supported yet",
-                self.lexer.pos(),
-            ));
-        }
         let start = self.lexer.pos();
-        let Some(name) = self.eat_ident()? else {
+        let Some(name) = self.eat_label_name()? else {
             return Err(self.error_at("syntax", "label expected", start));
         };
         let span = self.span(start);
@@ -573,6 +1143,9 @@ impl LineParser<'_, '_, '_> {
     }
 
     fn define_label(&mut self, name: &str, span: Span) -> Result<(), Diagnostic> {
+        if !is_local_label(name) {
+            self.parser.label_scope = name.to_string();
+        }
         let id = self.claim_symbol(name, span, false)?;
         self.parser.push_atom(AtomKind::Label(id), span);
         Ok(())
@@ -709,6 +1282,148 @@ impl LineParser<'_, '_, '_> {
             offset,
             nops,
         })
+    }
+
+    fn parse_macro_definition(
+        &mut self,
+        label: Option<(String, Span)>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        if self.parser.macro_depth > 0 {
+            return Err(Diagnostic::error(
+                "nested-macro",
+                "a macro cannot be defined inside a macro",
+                span,
+            ));
+        }
+        let name = match label {
+            Some((name, _)) => name,
+            None => self
+                .eat_ident()?
+                .ok_or_else(|| Diagnostic::error("syntax", "macro name expected", span))?,
+        };
+        let lower = name.to_ascii_lowercase();
+        if rows_for(&lower).is_some() || is_directive(&lower) {
+            self.parser.program.diagnostics.push(Diagnostic::warning(
+                "macro-is-mnemonic",
+                format!("{name} is a mnemonic or directive, which takes priority over the macro"),
+                span,
+            ));
+        } else if self.parser.macros.contains_key(&name) {
+            self.parser.program.diagnostics.push(Diagnostic::warning(
+                "macro-redefined",
+                format!("macro {name} redefined"),
+                span,
+            ));
+        }
+        self.parser.pending_work = Some(PendingWork::DefineMacro { name, span });
+        Ok(())
+    }
+
+    fn parse_macro_call(
+        &mut self,
+        name: &str,
+        size: Option<Size>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        // Without a suffix, \\0 expands to the default size.
+        let size = match size {
+            Some(Size::Byte) => "b",
+            Some(Size::Long) => "l",
+            Some(Size::Short) => "s",
+            Some(Size::Word) | None => "w",
+        };
+        self.parser.pending_work = Some(PendingWork::CallMacro {
+            name: name.to_string(),
+            size,
+            args: split_macro_args(self.lexer.rest()),
+            span,
+        });
+        Ok(())
+    }
+
+    fn parse_if(&mut self, word: &str, span: Span) -> Result<(), Diagnostic> {
+        let condition = match word {
+            "ifd" | "ifnd" => {
+                let start = self.lexer.pos();
+                let Some(name) = self.eat_label_name()? else {
+                    return Err(self.error_at("syntax", "symbol expected", start));
+                };
+                self.expect_end()?;
+                let id = self.parser.symbol(&name);
+                let defined = self.parser.program.symbols[id as usize]
+                    .defined_at
+                    .is_some();
+                defined == (word == "ifd")
+            }
+            "ifc" | "ifnc" => {
+                let first = self.parse_compare_operand()?;
+                self.expect(Punct::Comma, ",")?;
+                let second = self.parse_compare_operand()?;
+                self.expect_end()?;
+                (first == second) == (word == "ifc")
+            }
+            "ifb" | "ifnb" => (self.peek()? == Tok::End) == (word == "ifb"),
+            _ => {
+                let value = self.parse_constant()?;
+                self.expect_end()?;
+                match word {
+                    "ifeq" => value == 0,
+                    "ifgt" => value > 0,
+                    "ifge" => value >= 0,
+                    "iflt" => value < 0,
+                    "ifle" => value <= 0,
+                    _ => value != 0,
+                }
+            }
+        };
+        self.parser.conditionals.push(Conditional {
+            span,
+            parent_active: true,
+            taken: condition,
+            active: condition,
+            seen_else: false,
+        });
+        Ok(())
+    }
+
+    /// Reads a string, or bare text up to a comma or blank.
+    fn parse_compare_operand(&mut self) -> Result<Vec<u8>, Diagnostic> {
+        if let Tok::Str(bytes) = self.peek()? {
+            self.advance()?;
+            return Ok(bytes);
+        }
+        let rest = self.lexer.rest();
+        let length = rest
+            .iter()
+            .position(|c| matches!(c, b',' | b' ' | b'\t' | b';'))
+            .unwrap_or(rest.len());
+        self.lexer.set_pos(self.lexer.pos() + length);
+        Ok(rest[..length].to_vec())
+    }
+
+    /// Handles `else`, `elif` and `endc` on a line in an active block.
+    fn parse_block_change(&mut self, word: &str, span: Span) -> Result<(), Diagnostic> {
+        let Some(top) = self.parser.conditionals.last_mut() else {
+            return Err(Diagnostic::error(
+                "unexpected-end",
+                format!("{word} without if"),
+                span,
+            ));
+        };
+        match word {
+            "endc" | "endif" => {
+                self.parser.conditionals.pop();
+            }
+            "else" if top.seen_else => {
+                return Err(Diagnostic::error("syntax", "second else in a block", span));
+            }
+            _ => {
+                top.active = false;
+                top.seen_else = word == "else";
+            }
+        }
+        Ok(())
     }
 
     /// Reads a file name, quoted or not.
@@ -905,6 +1620,10 @@ impl LineParser<'_, '_, '_> {
                 return self.parse_equr(label, span);
             }
             "rs" => return self.parse_rs(label, size, span),
+            "macro" => {
+                self.no_size(size, span)?;
+                return self.parse_macro_definition(label, span);
+            }
             _ => {}
         }
         // These move the location first, so a label takes the new location.
@@ -927,12 +1646,50 @@ impl LineParser<'_, '_, '_> {
             _ => {}
         }
         self.define_optional_label(label)?;
+        if is_if(&lower) {
+            self.no_size(size, span)?;
+            return self.parse_if(&lower, span);
+        }
         match lower.as_str() {
+            "else" | "elif" | "elseif" | "endc" | "endif" => {
+                self.no_size(size, span)?;
+                return self.parse_block_change(&lower, span);
+            }
+            "rept" => {
+                self.no_size(size, span)?;
+                let count = self.parse_constant()?;
+                self.expect_end()?;
+                self.parser.pending_work = Some(PendingWork::Repeat { count, span });
+                return Ok(());
+            }
+            "endr" | "endm" => {
+                return Err(Diagnostic::error(
+                    "unexpected-end",
+                    format!("{lower} without a block to end"),
+                    span,
+                ));
+            }
+            "mexit" => {
+                // As in vasm, a `rept` inside the macro can't be left this way.
+                let innermost = self.parser.current_expansion;
+                let entry =
+                    innermost.and_then(|id| self.parser.program.expansions.get(id as usize));
+                if entry.map(|entry| entry.kind) != Some(ExpansionKind::Macro) {
+                    return Err(Diagnostic::error(
+                        "unexpected-end",
+                        "mexit outside a macro",
+                        span,
+                    ));
+                }
+                self.parser.macro_exit = true;
+                return Ok(());
+            }
             "include" => {
                 self.no_size(size, span)?;
                 let path = self.parse_path(span)?;
                 self.expect_end()?;
-                return self.parser.include(&path, span);
+                self.parser.pending_work = Some(PendingWork::Include { path, span });
+                return Ok(());
             }
             "incbin" => {
                 self.no_size(size, span)?;
@@ -984,6 +1741,7 @@ impl LineParser<'_, '_, '_> {
                 self.parser.ended = true;
                 Ok(())
             }
+            _ if self.parser.macros.contains_key(&name) => self.parse_macro_call(&name, size, span),
             _ => Err(Diagnostic::error(
                 "unknown-mnemonic",
                 format!("unknown mnemonic {name}"),
@@ -1484,6 +2242,13 @@ impl LineParser<'_, '_, '_> {
                 self.advance()?;
                 Ok(Expr::Pc)
             }
+            Tok::Punct(Punct::Dot) => {
+                let Some(name) = self.eat_label_name()? else {
+                    return Err(self.error_at("syntax", "local label expected", start));
+                };
+                let span = self.span(start);
+                Ok(Expr::Sym(self.parser.symbol(&name), span))
+            }
             Tok::Punct(Punct::Percent) => {
                 self.advance()?;
                 match self.lexer.number(2).map_err(|e| self.lex_error(e))? {
@@ -1567,6 +2332,26 @@ mod tests {
         assert_eq!(normalize_path("../d.bin"), "../d.bin");
         assert_eq!(normalize_path("../../d.bin"), "../../d.bin");
         assert_eq!(normalize_path("/abs/../d.bin"), "/d.bin");
+    }
+
+    #[test]
+    fn test_directive_word_skips_labels() {
+        let word = |text: &[u8]| directive_word(text).map(|(word, _)| word);
+        assert_eq!(word(b" ENDC ;x").as_deref(), Some("endc"));
+        assert_eq!(word(b"lab: endm").as_deref(), Some("endm"));
+        assert_eq!(word(b"lab endm").as_deref(), Some("endm"));
+        assert_eq!(word(b" lab: endm").as_deref(), Some("endm"));
+        assert_eq!(word(b"endm"), None);
+        assert_eq!(word(b""), None);
+    }
+
+    #[test]
+    fn test_split_macro_args_protects_nested_commas() {
+        let args = split_macro_args(b" 1, (a0,d1.w),<2,3>,'x,y' comment");
+        let expected: [&[u8]; 4] = [b"1", b"(a0,d1.w)", b"2,3", b"'x,y'"];
+        assert_eq!(args, expected);
+        assert!(split_macro_args(b" ;c").is_empty());
+        assert_eq!(split_macro_args(b",5").len(), 2);
     }
 
     #[test]

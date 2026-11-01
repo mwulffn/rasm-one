@@ -28,6 +28,7 @@ pub fn write_hunk_exe(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     if assembly.sections.iter().any(|s| s.origin.is_some()) {
         return Err(OutputError::FixedAddress);
     }
+    // Any symbol keeps a section, even a local label that won't be listed.
     let has_symbol = |index: usize| assembly.symbols.iter().any(|s| s.section == Some(index));
     // Maps a section index to its hunk number.
     let mut hunk_numbers = vec![None; assembly.sections.len()];
@@ -186,7 +187,7 @@ fn write_symbols(assembly: &Assembly, section: usize, out: &mut Writer) {
     let mut symbols = assembly
         .symbols
         .iter()
-        .filter(|symbol| symbol.section == Some(section))
+        .filter(|symbol| !symbol.local && symbol.section == Some(section))
         .peekable();
     if symbols.peek().is_none() {
         return;

@@ -123,6 +123,7 @@ impl<'a> Lexer<'a> {
             return Ok(self.ident());
         }
         match c {
+            b'0'..=b'9' if self.is_numeric_local_label() => Ok(self.ident()),
             b'0'..=b'9' => self.number(10),
             b'$' => {
                 self.pos += 1;
@@ -165,9 +166,20 @@ impl<'a> Lexer<'a> {
         Ok(Tok::Num(value))
     }
 
+    /// True at digits ending in `$`, such as the local label `1$`.
+    fn is_numeric_local_label(&self) -> bool {
+        let rest = self.rest();
+        let digits = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+        rest.get(digits) == Some(&b'$')
+    }
+
     fn ident(&mut self) -> Tok<'a> {
         let start = self.pos;
         while self.src.get(self.pos).is_some_and(|&c| is_ident_cont(c)) {
+            self.pos += 1;
+        }
+        // A final `$` makes it a local label.
+        if self.src.get(self.pos) == Some(&b'$') {
             self.pos += 1;
         }
         // Identifier bytes are all ASCII, so this cannot fail.
@@ -262,6 +274,13 @@ mod tests {
         assert_eq!(Lexer::new(b"$fF").next_tok()?, Tok::Num(255));
         assert_eq!(Lexer::new(b"@17").next_tok()?, Tok::Num(15));
         assert_eq!(Lexer::new(b"10").next_tok()?, Tok::Num(10));
+        Ok(())
+    }
+
+    #[test]
+    fn test_next_tok_local_labels_are_identifiers() -> Result<(), LexError> {
+        assert_eq!(Lexer::new(b"l$").next_tok()?, Tok::Ident("l$"));
+        assert_eq!(Lexer::new(b"12$").next_tok()?, Tok::Ident("12$"));
         Ok(())
     }
 
