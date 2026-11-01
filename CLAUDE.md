@@ -20,7 +20,7 @@
 - Applications/binaries: use `anyhow` — propagate with `?`, add context with `.context()`
 - Never use `.unwrap()` or `.expect()` in library code
 - `.expect()` is acceptable in binary main() for setup failures (file not found, etc.)
-- Never use `.unwrap()` in tests — use `?` with `#[tokio::test]` or return `Result<(), Box<dyn Error>>`
+- Never use `.unwrap()` in tests — return `Result<(), Box<dyn Error>>` and use `?`
 - Propagate errors with `?` unless there is a documented reason to handle locally
 
 ## Clippy Policy
@@ -42,13 +42,15 @@
 - Do not add a crate to solve a problem that can be solved with std in under 20 lines
 
 ## Testing
-- vasm is the byte-for-byte reference, except where vasm has a bug. Never copy a bug: do the correct thing, add a test, and add it to `docs/vasm-bugs.md`
-- Unit tests: `#[cfg(test)]` module at the bottom of each file
-- Integration tests: `tests/` directory
-- Test naming: `test_<function_name>_<scenario>` pattern
-- Use `cargo test -- --nocapture` when debugging output
-- Mock external dependencies using trait objects, not concrete types
-- Aim for 80%+ coverage on library crates; focus on edge cases not happy paths
+- vasm is the reference: rasm-one's output must match it byte for byte, except where vasm has a bug. Never copy a bug: do the correct thing, add a test, and add it to `docs/vasm-bugs.md`. Differential tests live in `crates/rasm-one/tests/vasm_*.rs` and `sweep_cpus.rs`, using the `rasm-oracle` crate
+- Get vasm with `export RASM_VASM=$(scripts/fetch-vasm.sh)`. Never commit vasm or its sources (licence)
+- Without `RASM_VASM`, differential tests skip locally and fail in CI. A green local run without it proves little
+- The oracle runs vasm with `-no-opt`. Optimisations are added one rule at a time, each matched to its vasm flag (#20)
+- New instructions or addressing modes go in the sweep, not as hand-picked cases
+- Feed sources through `MemoryProvider`, not files on disk
+- Performance budget: `cargo test --release -p rasm-one --test perf_budget`. It skips in debug builds
+- Unit tests: `#[cfg(test)]` module at the bottom of each file; integration tests in `tests/`
+- Test naming: `test_<function_name>_<scenario>`
 
 ## Memory Safety and Unsafe
 - No `unsafe` blocks without a `// SAFETY:` comment explaining the invariants upheld
