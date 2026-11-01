@@ -363,6 +363,112 @@ fn test_assemble_coprocessor_displacements_match_vasm_o2() -> Result<(), Box<dyn
     compare_rule(&sources, &DISPLACEMENTS, true)
 }
 
+const ABSOLUTES: Rule = Rule {
+    number: 3,
+    flag: "-opt-o3+",
+};
+
+const ABSOLUTE_CASES: &[&str] = &[
+    " move.w 4,d0",
+    " move.l 4,a6",
+    " move.w 4.l,d0",
+    " move.w (4).l,d0",
+    " move.w 4.w,d0",
+    " move.w $7fff,d0",
+    " move.w $8000,d0",
+    " move.w $ffff,d0",
+    " move.w $ffff8000,d0",
+    " move.w $ffff7fff,d0",
+    " move.w -4,d0",
+    " move.w z,d0\nz equ 4",
+    " move.w z,d0\nz equ 100000",
+    "z equ 4\n move.w z,d0",
+    " jmp 4",
+    " jsr 4",
+    " lea 4,a0",
+    " pea 4",
+    " move.w d0,4",
+    " move.w 4,6",
+    " move.w 4,$10000",
+    " move.w $10000,6",
+    " clr.l 4",
+    " movem.l 4,d0/d1",
+    " movem.l d0/d1,4",
+    " movem.l 4,d0",
+    " btst #1,4",
+    " addq.w #1,4",
+    " xref x\n move.w x,d0",
+    " xref x\n jmp x",
+    " section a,code\n jmp f\n section b,code\nf: nop",
+    " section a,code\nf: move.w f,d0",
+    " opt p+\n move.w 4,d0",
+    " opt p+\n jmp 4",
+    " opt o3-\n move.w 4,d0",
+    " opt o3+\n move.w 4,d0",
+    " opt o3-\n move.w 4,d0\n opt o3+\n move.w 4,d0",
+    " bfextu 4{1:2},d0",
+    " bfextu $10000{1:2},d0",
+    " move16 (a0)+,4",
+    " move16 4,(a1)",
+    " dbra d0,*",
+    " bra.w *",
+    " movem.l 4,a0",
+];
+
+#[test]
+fn test_assemble_absolutes_match_vasm_o3() -> Result<(), Box<dyn Error>> {
+    let sources: Vec<String> = ABSOLUTE_CASES.iter().map(|s| s.to_string()).collect();
+    compare_rule(&sources, &ABSOLUTES, false)
+}
+
+/// In a raw binary a label is a final address.
+#[test]
+fn test_assemble_absolute_labels_match_vasm_o3_in_binary() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    for source in [
+        "f: jmp f",
+        " jmp f\nf:",
+        " move.w f,d0\nf:",
+        " jmp f\n ds.b 32762\nf:",
+        " jmp f\n ds.b 32764\nf:",
+        " jmp f\n ds.b 32766\nf:",
+        " jmp f\n jmp g\n ds.b 32758\nf: nop\ng:",
+        " jmp g\n jmp f\n ds.b 32758\nf: nop\ng:",
+        " jmp f\n jmp f\n ds.b 32760\nf:",
+        " org $100\n move.w 4,d0",
+        " org $100\nf: move.w f,d0",
+        " org $100000\nf: move.w f,d0",
+    ] {
+        for cpu in CPUS {
+            let found = compare(&vasm, source, cpu, Format::Bin, &ABSOLUTES, false)?;
+            assert_eq!(found, None);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_assemble_coprocessor_absolutes_match_vasm_o3() -> Result<(), Box<dyn Error>> {
+    let sources: Vec<String> = [
+        " fmove.s 4,fp0",
+        " fmove.s fp0,4",
+        " fmove.p fp0,4{#1}",
+        " fmovem.x fp0,4",
+        " fmovem.l 4,fpcr",
+        " fsave 4",
+        " pmove tc,4",
+        " pflush #1,#1,4",
+        " fbeq *",
+        " fdbeq d0,*",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    compare_rule(&sources, &ABSOLUTES, true)
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 
