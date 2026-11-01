@@ -1,5 +1,6 @@
 //! Parses source lines into atoms and symbols.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -8,9 +9,10 @@ use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
 use crate::float::FloatLiteral;
-use crate::isa::encode::Instruction;
+use crate::isa::encode::{BranchForm, Instruction};
 use crate::isa::table::{
-    rows_for, Coprocessor, InsnRow, MmuRegisterHome, CONTROL_REGISTERS, CPU_020_UP, MMU_REGISTERS,
+    rows_for, Coprocessor, Encoding, InsnRow, MmuRegisterHome, CONTROL_REGISTERS, CPU_020_UP,
+    MMU_REGISTERS,
 };
 use crate::isa::{
     BitFieldArg, FullBase, FullDisp, FullMode, IndexReg, Indirection, Mode, Operand, Width,
@@ -18,7 +20,7 @@ use crate::isa::{
 use crate::lexer::{LexError, Lexer, Punct, Tok};
 use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
-use crate::{Expansion, ExpansionKind, FpuChoice};
+use crate::{Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_BRANCHES};
 
 /// A symbol being collected.
 #[derive(Debug, Clone)]
@@ -589,6 +591,7 @@ pub(crate) struct Parser<'f> {
     cpu: Cpu,
     fpu: FpuChoice,
     mmu_68851: bool,
+    optimisations: Optimisations,
     fixed_addresses: bool,
     provider: &'f dyn FileProvider,
     /// Directories to search for files, from options and `incdir`.
@@ -638,6 +641,7 @@ impl<'f> Parser<'f> {
             cpu: options.cpu,
             fpu: options.fpu,
             mmu_68851: options.mmu_68851,
+            optimisations: options.optimisations,
             fixed_addresses: options.fixed_addresses,
             provider,
             include_dirs: options.include_dirs.clone(),
@@ -2056,6 +2060,9 @@ impl LineParser<'_, '_, '_> {
                 },
             ),
         };
+        if self.apply_optimisation_option(name, switch) {
+            return Ok(());
+        }
         let settings = &mut self.parser.program.hunk_settings;
         match (name, switch) {
             ("p", Some(on)) => {
@@ -2084,6 +2091,7 @@ impl LineParser<'_, '_, '_> {
         let valid = match name.as_bytes() {
             [letter] => letter.is_ascii_lowercase(),
             [b'o', second] => second.is_ascii_alphanumeric(),
+            [b'o', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
             _ => false,
         };
         if !valid {
@@ -2099,6 +2107,24 @@ impl LineParser<'_, '_, '_> {
             span,
         ));
         Ok(())
+    }
+
+    /// Handles `o` and `oN`, if optimisation is on and the rules they name exist.
+    /// Returns false if they don't apply.
+    fn apply_optimisation_option(&mut self, name: &str, switch: Option<bool>) -> bool {
+        let on = switch.unwrap_or(true);
+        let optimisations = &mut self.parser.optimisations;
+        if !optimisations.enabled {
+            return false;
+        }
+        if name == "o" {
+            optimisations.set_all_rules(on);
+            return true;
+        }
+        match name.strip_prefix('o').map(str::parse) {
+            Some(Ok(rule)) => optimisations.set_rule(rule, on),
+            _ => false,
+        }
     }
 
     /// Changes the target CPU from here on.
@@ -2694,6 +2720,10 @@ impl LineParser<'_, '_, '_> {
         }
         Ok(Instruction {
             row,
+            resizable_branch: size.is_none()
+                && matches!(row.encoding, Encoding::Branch | Encoding::FpBranch)
+                && self.parser.optimisations.rule(RULE_BRANCHES),
+            branch_form: Cell::new(BranchForm::Word),
             size: size.or(row.default_size),
             operands,
             wide,

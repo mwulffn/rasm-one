@@ -15,6 +15,10 @@ use crate::{Expansion, LineEntry, Reloc, Section, Symbol};
 /// sources that can never settle, or that would take unreasonably long to.
 const MAX_PASSES: usize = 1000;
 
+/// A branch can be too long for one size and too short for another, depending on
+/// which size it has. After this many passes branches only grow, so they settle.
+const SHRINKING_PASSES: usize = 200;
+
 /// Largest permitted `ds`/`blk` size in bytes.
 const MAX_SPACE: i64 = 0x7FFF_FFFF;
 
@@ -59,16 +63,32 @@ pub(crate) fn build(program: Program) -> Built {
             }))
         })
         .collect();
+    let defined = vec![Cell::new(usize::MAX); values.len()];
+    let mut label_sections = vec![None; values.len()];
+    for atom in &program.atoms {
+        if let AtomKind::Label(id) = atom.kind {
+            label_sections[id as usize] = Some(atom.section);
+        }
+    }
     let mut settled = false;
-    for _ in 0..MAX_PASSES {
+    for pass in 0..MAX_PASSES {
         let before = values.clone();
+        let form_changed = Cell::new(false);
         layout_pass(
             &program.sections,
             &program.atoms,
             &values,
             program.fixed_addresses,
+            Some(BranchChoice {
+                grow_only: pass >= SHRINKING_PASSES,
+                changed: &form_changed,
+                pass,
+                defined: &defined,
+                label_sections: &label_sections,
+            }),
         );
-        settled = before == values;
+        // Resizing starts in the second pass.
+        settled = pass > 0 && before == values && !form_changed.get();
         if settled {
             break;
         }
@@ -89,6 +109,7 @@ pub(crate) fn build(program: Program) -> Built {
         &program.atoms,
         &values,
         program.fixed_addresses,
+        None,
     );
     let too_large = total > program.max_output_bytes;
     if too_large {
@@ -210,6 +231,18 @@ fn address(section: usize, entry: &SectionEntry, offset: i64) -> Value {
     }
 }
 
+/// How a layout pass may change the forms of branches.
+#[derive(Clone, Copy)]
+struct BranchChoice<'a> {
+    grow_only: bool,
+    changed: &'a Cell<bool>,
+    /// Which pass this is, and the last pass each symbol was defined in.
+    pass: usize,
+    defined: &'a [Cell<usize>],
+    /// The section each symbol is a label in, if it is one.
+    label_sections: &'a [Option<usize>],
+}
+
 /// Walks the source once, assigning symbols. Forward references that are not
 /// known yet count as zero when sizing.
 ///
@@ -219,22 +252,68 @@ fn layout_pass(
     atoms: &[Atom],
     values: &SymbolValues,
     fixed_addresses: bool,
+    branch_choice: Option<BranchChoice>,
 ) -> i64 {
     let mut offsets = vec![0i64; sections.len()];
+    let mut shifts = vec![0i64; sections.len()];
     for atom in atoms {
         let section = atom.section;
         let entry = &sections[section];
         let offset = offsets[section];
         let here = address(section, entry, offset);
         match &atom.kind {
-            AtomKind::Label(id) => values[*id as usize].set(Some(here)),
+            AtomKind::Label(id) => {
+                values[*id as usize].set(Some(here));
+                if let Some(choice) = branch_choice {
+                    choice.defined[*id as usize].set(choice.pass);
+                }
+            }
             AtomKind::Equate(id, expr) => {
                 let lookup = |id: u32| values[id as usize].get();
                 if let Ok(value) = eval(expr, here, &lookup) {
                     values[*id as usize].set(Some(value));
                 }
+                if let Some(choice) = branch_choice {
+                    choice.defined[*id as usize].set(choice.pass);
+                }
             }
             _ => {
+                if let (AtomKind::Instruction(instruction), Some(choice)) =
+                    (&atom.kind, branch_choice)
+                {
+                    let shift = shifts[section];
+                    let moved = |id: u32| {
+                        let value = values[id as usize].get()?;
+                        let stale = choice.defined[id as usize].get() != choice.pass;
+                        let moves = value.base == Base::Section(section)
+                            || choice.label_sections[id as usize] == Some(section);
+                        Some(if stale && moves {
+                            Value {
+                                offset: value.offset + shift,
+                                ..value
+                            }
+                        } else {
+                            value
+                        })
+                    };
+                    let lookup = |id: u32| values[id as usize].get();
+                    let sizer = Sizer {
+                        section,
+                        origin: entry.origin,
+                        start: offset,
+                        fixed_addresses,
+                        lookup: &lookup,
+                    };
+                    // The first pass measures every branch at its starting size.
+                    if choice.pass > 0 {
+                        let before = instruction.len(&sizer);
+                        if instruction.choose_branch_form(&sizer, &moved, choice.grow_only) {
+                            choice.changed.set(true);
+                            // However far it shrank, like vasm this counts it as one step.
+                            shifts[section] += (instruction.len(&sizer) - before).max(-2);
+                        }
+                    }
+                }
                 let len = atom_len(atom, section, here, offset, entry, values, fixed_addresses);
                 offsets[section] = offsets[section].saturating_add(len);
             }

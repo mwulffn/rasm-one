@@ -5,6 +5,8 @@
 //! and emission. Writers always emit the full planned width, even after an error,
 //! so layout and emission can't disagree.
 
+use std::cell::Cell;
+
 use crate::error::Diagnostic;
 use crate::expr::{eval, Base, EvalError, Expr, SymId, Value};
 use crate::float::float_bytes;
@@ -28,6 +30,23 @@ pub(crate) struct Instruction {
     pub fixed_addresses: bool,
     /// True if a 68851 is present, whose function codes and masks are wider.
     pub mmu_68851: bool,
+    /// True if this is a branch without a size that optimisation may resize.
+    pub resizable_branch: bool,
+    /// The form of a resizable branch, which layout chooses.
+    pub branch_form: Cell<BranchForm>,
+}
+
+/// How a branch without a size is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchForm {
+    /// Removed, because it goes to the next instruction anyway.
+    Deleted,
+    Short,
+    Word,
+    Long,
+    /// A `jmp` or `jsr` for a 68000, where no branch reaches. A conditional branch
+    /// first skips it on the opposite condition.
+    Jump,
 }
 
 /// How to find an operand's values, for choosing extension forms.
@@ -307,8 +326,141 @@ impl Instruction {
         }
     }
 
+    /// Chooses the form of a resizable branch from the symbols as they are known
+    /// now. Forward references start out unknown, and so as words, which means a
+    /// branch only gets shorter if it fits with what surrounds it at its current
+    /// size. Once sizes may only grow, as `grow_only` asks, layout must settle.
+    ///
+    /// A symbol not reached yet in this pass may be stale by what this pass has already
+    /// moved. That alone doesn't make a branch grow, which `moved` checks by giving symbols
+    /// the values they should have by the end of the pass.
+    ///
+    /// Returns true if the form changed.
+    pub fn choose_branch_form(
+        &self,
+        sizer: &Sizer,
+        moved: &dyn Fn(SymId) -> Option<Value>,
+        grow_only: bool,
+    ) -> bool {
+        if !self.resizable_branch {
+            return false;
+        }
+        let current = self.branch_form.get();
+        let far = |form| matches!(form, BranchForm::Jump | BranchForm::Long);
+        let conditional = self.is_conditional_branch();
+        // A conditional branch judged out of reach stays that way, like vasm.
+        if conditional && far(current) {
+            return false;
+        }
+        let Some(distance) = self.branch_distance(sizer) else {
+            return false;
+        };
+        let bytes = self.form_bytes(current);
+        let mut form = self.form_for(distance, current, grow_only);
+        let moved_sizer = Sizer {
+            section: sizer.section,
+            origin: sizer.origin,
+            start: sizer.start,
+            fixed_addresses: sizer.fixed_addresses,
+            lookup: moved,
+        };
+        let moved_form = self
+            .branch_distance(&moved_sizer)
+            .map(|distance| self.form_for(distance, current, grow_only));
+        if matches!(current, BranchForm::Short | BranchForm::Deleted)
+            && moved_form == Some(BranchForm::Deleted)
+        {
+            form = BranchForm::Deleted;
+        } else if self.form_bytes(form) > bytes
+            && !(conditional && form == BranchForm::Jump)
+            && moved_form.is_some_and(|form| self.form_bytes(form) <= bytes)
+        {
+            return false;
+        }
+        if form == current || (grow_only && self.form_bytes(form) < bytes) {
+            return false;
+        }
+        self.branch_form.set(form);
+        true
+    }
+
+    /// The distance from the PC of this branch to its target, if already known.
+    fn branch_distance(&self, sizer: &Sizer) -> Option<i64> {
+        let Mode::AbsLong(expr) = &self.operands.first()?.mode else {
+            return None;
+        };
+        let value = eval(expr, sizer.address_of(sizer.start), sizer.lookup).ok()?;
+        match value.base {
+            Base::Absolute if !sizer.has_final_addresses() => None,
+            Base::External(_) => None,
+            Base::Section(section) if section != sizer.section => None,
+            _ => match pc_disp_kind(value, sizer.start + 2, sizer) {
+                DispKind::Number(distance) => Some(distance),
+                _ => None,
+            },
+        }
+    }
+
+    fn form_for(&self, distance: i64, current: BranchForm, grow_only: bool) -> BranchForm {
+        if self.row.encoding == Encoding::FpBranch {
+            return if fits_word(distance) {
+                BranchForm::Word
+            } else {
+                BranchForm::Long
+            };
+        }
+        let past_end = distance + 2 - self.form_bytes(current);
+        // Its own length no longer counts towards a target after it, if it shrinks.
+        let shrink_to_short = (self.form_bytes(current) - 2).max(0);
+        let short_distance = if past_end > 0 {
+            distance - shrink_to_short
+        } else {
+            distance
+        };
+        let is_subroutine = self.row.opcode == BSR_OPCODE;
+        // A short displacement of 0 means a word follows, and on 68020 and later one
+        // of -1 means a long does.
+        // A subroutine call to what follows would become a displacement of 0.
+        let call_to_next = is_subroutine && past_end == 0;
+        let short_is_free =
+            !call_to_next && short_distance != 0 && !(short_distance == -1 && self.wide);
+        let reaches_deleted = !grow_only || current == BranchForm::Deleted;
+        if past_end == 0 && !is_subroutine && reaches_deleted {
+            BranchForm::Deleted
+        } else if fits_byte(short_distance)
+            && short_is_free
+            && (shrink_to_short <= 0 || short_distance <= SHRINKING_SHORT_REACH)
+        {
+            BranchForm::Short
+        } else if fits_word(distance) {
+            BranchForm::Word
+        } else if self.wide {
+            BranchForm::Long
+        } else {
+            BranchForm::Jump
+        }
+    }
+
+    fn form_bytes(&self, form: BranchForm) -> i64 {
+        match form {
+            BranchForm::Deleted => 0,
+            BranchForm::Short => 2,
+            BranchForm::Word => 4,
+            BranchForm::Long => 6,
+            BranchForm::Jump if self.is_conditional_branch() => 8,
+            BranchForm::Jump => 6,
+        }
+    }
+
+    fn is_conditional_branch(&self) -> bool {
+        !matches!(self.row.opcode, BRA_OPCODE | BSR_OPCODE)
+    }
+
     /// Length in bytes, with symbols as they are known now.
     pub fn len(&self, sizer: &Sizer) -> i64 {
+        if self.resizable_branch {
+            return self.form_bytes(self.branch_form.get());
+        }
         let size = self.size.unwrap_or(Size::Word);
         match self.row.encoding {
             Encoding::Branch => {
@@ -706,9 +858,7 @@ fn encode_fields(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
         }
         Encoding::BranchLong => {
             ctx.put_word(base);
-            let value = branch_target(op(0), ctx);
-            let pc = ctx.instruction_start + 2;
-            emit_pc_field(value, pc, 4, BRANCH_RANGE, span, ctx);
+            emit_long_branch(op(0), span, ctx);
         }
         Encoding::MulDivLong => {
             ctx.put_word(base | mode_bits(&op(0).mode));
@@ -931,15 +1081,17 @@ fn encode_fields(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
             ctx.put_word(0x4000 | fp_format(size) << 10 | sine << 7 | 0x30 | cosine);
             emit_extension(op(0), size, insn, ctx);
         }
+        Encoding::FpBranch if insn.branch_form.get() == BranchForm::Long => {
+            ctx.put_word(base | FP_BRANCH_LONG);
+            emit_long_branch(op(0), span, ctx);
+        }
         Encoding::FpBranch => {
             ctx.put_word(base);
             emit_branch_word(op(0), span, ctx);
         }
         Encoding::FpBranchLong => {
             ctx.put_word(base);
-            let value = branch_target(op(0), ctx);
-            let pc = ctx.instruction_start + 2;
-            emit_pc_field(value, pc, 4, BRANCH_RANGE, span, ctx);
+            emit_long_branch(op(0), span, ctx);
         }
         Encoding::FpDecrementBranch => {
             ctx.put_word(base | reg(0));
@@ -1620,6 +1772,15 @@ fn branch_target(target: &Operand, ctx: &mut EmitContext) -> Option<Value> {
     Some(value)
 }
 
+/// How far forward a branch can be for it to become short, like vasm.
+const SHRINKING_SHORT_REACH: i64 = 126;
+const BRA_OPCODE: u16 = 0x6000;
+const BSR_OPCODE: u16 = 0x6100;
+const JMP_LONG: u16 = 0x4EF9;
+const JSR_LONG: u16 = 0x4EB9;
+/// The bit that gives an `FBcc` or `PBcc` a long displacement.
+const FP_BRANCH_LONG: u16 = 0x0040;
+
 const BRANCH_RANGE: &str = "branch destination out of range";
 
 fn emit_branch_word(target: &Operand, span: Span, ctx: &mut EmitContext) {
@@ -1628,10 +1789,50 @@ fn emit_branch_word(target: &Operand, span: Span, ctx: &mut EmitContext) {
     emit_pc_field(value, pc, 2, BRANCH_RANGE, span, ctx);
 }
 
+fn emit_long_branch(target: &Operand, span: Span, ctx: &mut EmitContext) {
+    let value = branch_target(target, ctx);
+    let pc = ctx.instruction_start + 2;
+    emit_pc_field(value, pc, 4, BRANCH_RANGE, span, ctx);
+}
+
+/// Writes a `jmp` or `jsr` to a branch's target, which a loader may relocate.
+fn emit_branch_as_jump(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
+    let opcode = insn.row.opcode;
+    ctx.diagnostics.push(Diagnostic::warning(
+        "branch-to-jump",
+        "branch out of range changed to a jump",
+        span,
+    ));
+    if insn.is_conditional_branch() {
+        // Skips the jump, which is 6 bytes, on the opposite condition.
+        ctx.put_word((opcode ^ 0x0100) | 6);
+    }
+    ctx.put_word(if opcode == BSR_OPCODE {
+        JSR_LONG
+    } else {
+        JMP_LONG
+    });
+    let target = &insn.operands[0];
+    match branch_target(target, ctx) {
+        Some(value) => ctx.put_value(value, 4),
+        None => ctx.put_zero(4),
+    }
+}
+
 fn encode_branch(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     let target = &insn.operands[0];
     let opcode = insn.row.opcode;
-    if matches!(insn.size, Some(Size::Short | Size::Byte)) {
+    let short = match insn.branch_form.get() {
+        BranchForm::Deleted => return,
+        BranchForm::Jump => return emit_branch_as_jump(insn, span, ctx),
+        BranchForm::Long => {
+            ctx.put_word(opcode | 0x00FF);
+            return emit_long_branch(target, span, ctx);
+        }
+        BranchForm::Short => true,
+        BranchForm::Word => matches!(insn.size, Some(Size::Short | Size::Byte)),
+    };
+    if short {
         let value = branch_target(target, ctx);
         let pc = ctx.instruction_start + 2;
         ctx.put(u32::from(opcode >> 8), 1);

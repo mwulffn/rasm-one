@@ -147,3 +147,12 @@ still fails with `undefined symbol <foo>`.
 
 **rasm-one:** symbols stay case-sensitive, as they are in vasm, but it warns
 `option-ignored` so the source's author knows.
+
+## 13. An unsized branch one byte ahead is rejected on 68020 and later
+
+**Source:** `bra *+1` with `-m68020 -opt-o1+`.
+
+**Bug:** vasm picks the short form, whose displacement of -1 means a long displacement on these
+CPUs, and reports `branch destination out of range`. `bra.w *+1` assembles to `6000 ffff`.
+
+**rasm-one:** writes the word form. `test_assemble_branch_to_odd_next_byte_uses_word_on_68020`.
