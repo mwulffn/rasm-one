@@ -31,9 +31,8 @@ For the library API, including diagnostics, symbols and the line table, run
 ## Status
 
 Integer instructions for the 68000 to 68060, the FPU and the MMU are complete and
-compared with vasm. The command line optimises the way vasm does by default, and
-`-no-opt` turns that off. `Options::new` in the library starts with it off, and
-`Optimisations::all()` turns it on. Rules can be chosen with `-opt-o-` and `-opt-oN+`, or `opt` in
+compared with vasm. rasm-one optimises the way vasm does by default. `-no-opt` or `Options::unoptimised` turns
+that off. Rules can be chosen with `-opt-o-` and `-opt-oN+`, or `opt` in
 the source: 1 to 5, 7 to 12, `g` and `f`. vasm's optional rules, which are off by default, aren't
 here yet. Output is compared byte for byte with vasm in both modes, apart from rare layouts in
 [#56](https://github.com/mwulffn/rasm-one/issues/56). Where vasm has a bug, rasm-one does the

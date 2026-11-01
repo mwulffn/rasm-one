@@ -2,7 +2,7 @@
 
 use std::error::Error;
 
-use rasm_one::{assemble, write_bin, write_hunk_exe, Assembly, MemoryProvider, Options};
+use rasm_one::{assemble, write_bin, write_hunk_exe, Assembly, MemoryProvider, Options, Target};
 use rasm_oracle::{Format, Vasm};
 
 const M: &str = "m macro\n dc.b \\1\n endm\n";
@@ -198,10 +198,18 @@ const HUNK_ACCEPTED: &[&str] = &[
     " rept 2\n dc.b REPTN\n endr\nl: nop",
 ];
 
+fn ours_bin(source: &str) -> Assembly {
+    let mut files = MemoryProvider::new();
+    files.insert("t.s", source);
+    let mut options = Options::unoptimised("t.s");
+    options.target = Target::RawBinary;
+    assemble(&options, &files)
+}
+
 fn ours(source: &str) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    assemble(&Options::new("t.s"), &files)
+    assemble(&Options::unoptimised("t.s"), &files)
 }
 
 #[test]
@@ -233,7 +241,7 @@ fn test_macros_accepted_sources_match_vasm_bytes() -> Result<(), Box<dyn Error>>
             failures.push(format!("vasm rejected {source:?}: {}", theirs.stderr));
             continue;
         }
-        let assembly = ours(&source);
+        let assembly = ours_bin(&source);
         match write_bin(&assembly) {
             Ok(bytes) if bytes == theirs.bytes => {}
             Ok(bytes) => failures.push(format!(

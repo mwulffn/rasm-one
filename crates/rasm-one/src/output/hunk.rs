@@ -2,7 +2,7 @@
 
 use crate::error::OutputError;
 use crate::types::{MemKind, SectionKind};
-use crate::{Assembly, Reloc, RelocKind, RelocTarget, Section, Symbol};
+use crate::{Assembly, Reloc, RelocKind, RelocTarget, Section, Symbol, Target};
 
 const HUNK_UNIT: u32 = 0x3E7;
 const HUNK_NAME: u32 = 0x3E8;
@@ -94,6 +94,9 @@ pub fn write_hunk_exe_with(
     assembly: &Assembly,
     options: HunkExeOptions,
 ) -> Result<Vec<u8>, OutputError> {
+    if assembly.target != Target::Relocatable {
+        return Err(OutputError::WrongTarget);
+    }
     check_writable(assembly)?;
     // The source can ask for the other kind of file with `opt l+`.
     if assembly.hunk_settings.linkable == Some(true) {
@@ -133,6 +136,9 @@ fn executable_bytes(assembly: &Assembly, options: HunkExeOptions) -> Result<Vec<
 
 /// Writes a linkable object file.
 pub fn write_hunk_object(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
+    if assembly.target != Target::Relocatable {
+        return Err(OutputError::WrongTarget);
+    }
     check_writable(assembly)?;
     // The source can ask for the other kind of file with `opt l-`.
     if assembly.hunk_settings.linkable == Some(false) {

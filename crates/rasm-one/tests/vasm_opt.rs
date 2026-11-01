@@ -4,30 +4,29 @@ use std::error::Error;
 
 use rasm_one::{
     assemble, write_bin, write_hunk_exe, write_hunk_object, Assembly, Cpu, FpuChoice,
-    MemoryProvider, Optimisations, Options, OutputError,
+    MemoryProvider, Optimisations, Options, OutputError, Rule, Target,
 };
 use rasm_oracle::{Format, Vasm};
 
 const CPUS: &[&str] = &["68000", "68010", "68020", "68030", "68040", "68060"];
 const FORMATS: &[Format] = &[Format::Bin, Format::HunkObject, Format::HunkExe];
 
-/// The rule's own `-opt-` flags for vasm, and what they mean for rasm-one.
-struct Rule {
-    number: u32,
+/// A rule, by its flag for vasm.
+struct RuleFlag {
     flag: &'static str,
 }
 
-const BRANCHES: Rule = Rule {
-    number: 1,
-    flag: "-opt-o1+",
-};
+const BRANCHES: RuleFlag = RuleFlag { flag: "-opt-o1+" };
 
-fn optimisations(rule: &Rule) -> Optimisations {
-    if rule.number == ALL.number {
+fn optimisations(rule: &RuleFlag) -> Optimisations {
+    if rule.flag == ALL.flag {
         return Optimisations::all();
     }
     let mut optimisations = Optimisations::none();
-    optimisations.set_rule(rule.number, true);
+    let name = rule.flag.trim_start_matches("-opt-o").trim_end_matches('+');
+    if let Some(named) = Rule::named(name) {
+        optimisations.set_rule(named, true);
+    }
     optimisations
 }
 
@@ -35,7 +34,7 @@ fn ours(
     source: &str,
     cpu: &str,
     format: Format,
-    rule: &Rule,
+    rule: &RuleFlag,
     coprocessors: bool,
 ) -> Result<Vec<u8>, OutputError> {
     let mut files = MemoryProvider::new();
@@ -47,7 +46,11 @@ fn ours(
         .and_then(Cpu::from_number)
         .unwrap_or_default();
     options.optimisations = optimisations(rule);
-    options.fixed_addresses = matches!(format, Format::Bin);
+    options.target = if matches!(format, Format::Bin) {
+        Target::RawBinary
+    } else {
+        Target::Relocatable
+    };
     if coprocessors {
         options.fpu = FpuChoice::Coprocessor;
         options.mmu_68851 = true;
@@ -70,10 +73,10 @@ fn compare(
     source: &str,
     cpu: &str,
     format: Format,
-    rule: &Rule,
+    rule: &RuleFlag,
     coprocessors: bool,
 ) -> Result<Option<String>, Box<dyn Error>> {
-    let mut args = if rule.number == ALL.number {
+    let mut args = if rule.flag == ALL.flag {
         vec![rule.flag]
     } else {
         vec!["-opt-o-", rule.flag]
@@ -105,7 +108,11 @@ fn compare_all(sources: &[String], coprocessors: bool) -> Result<(), Box<dyn Err
     compare_rule(sources, &BRANCHES, coprocessors)
 }
 
-fn compare_rule(sources: &[String], rule: &Rule, coprocessors: bool) -> Result<(), Box<dyn Error>> {
+fn compare_rule(
+    sources: &[String],
+    rule: &RuleFlag,
+    coprocessors: bool,
+) -> Result<(), Box<dyn Error>> {
     let Some(vasm) = Vasm::from_env()? else {
         return Ok(());
     };
@@ -274,10 +281,7 @@ fn test_assemble_coprocessor_branches_match_vasm_o1() -> Result<(), Box<dyn Erro
     compare_all(&sources, true)
 }
 
-const DISPLACEMENTS: Rule = Rule {
-    number: 2,
-    flag: "-opt-o2+",
-};
+const DISPLACEMENTS: RuleFlag = RuleFlag { flag: "-opt-o2+" };
 
 const DISPLACEMENT_CASES: &[&str] = &[
     " move.w 0(a0),d0",
@@ -370,10 +374,7 @@ fn test_assemble_coprocessor_displacements_match_vasm_o2() -> Result<(), Box<dyn
     compare_rule(&sources, &DISPLACEMENTS, true)
 }
 
-const ABSOLUTES: Rule = Rule {
-    number: 3,
-    flag: "-opt-o3+",
-};
+const ABSOLUTES: RuleFlag = RuleFlag { flag: "-opt-o3+" };
 
 const ABSOLUTE_CASES: &[&str] = &[
     " move.w 4,d0",
@@ -476,10 +477,7 @@ fn test_assemble_coprocessor_absolutes_match_vasm_o3() -> Result<(), Box<dyn Err
     compare_rule(&sources, &ABSOLUTES, true)
 }
 
-const QUICK_MOVES: Rule = Rule {
-    number: 4,
-    flag: "-opt-o4+",
-};
+const QUICK_MOVES: RuleFlag = RuleFlag { flag: "-opt-o4+" };
 
 #[test]
 fn test_assemble_quick_moves_match_vasm_o4() -> Result<(), Box<dyn Error>> {
@@ -574,10 +572,7 @@ fn test_assemble_quick_move_labels_match_vasm_o4_in_binary() -> Result<(), Box<d
     Ok(())
 }
 
-const QUICK_ARITHMETIC: Rule = Rule {
-    number: 5,
-    flag: "-opt-o5+",
-};
+const QUICK_ARITHMETIC: RuleFlag = RuleFlag { flag: "-opt-o5+" };
 
 #[test]
 fn test_assemble_quick_arithmetic_matches_vasm_o5() -> Result<(), Box<dyn Error>> {
@@ -617,10 +612,7 @@ fn test_assemble_quick_arithmetic_matches_vasm_o5() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-const SHORT_NEXT: Rule = Rule {
-    number: 7,
-    flag: "-opt-o7+",
-};
+const SHORT_NEXT: RuleFlag = RuleFlag { flag: "-opt-o7+" };
 
 #[test]
 fn test_assemble_short_branches_to_next_match_vasm_o7() -> Result<(), Box<dyn Error>> {
@@ -646,15 +638,9 @@ fn test_assemble_short_branches_to_next_match_vasm_o7() -> Result<(), Box<dyn Er
     compare_rule(&sources, &SHORT_NEXT, false)
 }
 
-const NULL_BASE: Rule = Rule {
-    number: 8,
-    flag: "-opt-o8+",
-};
+const NULL_BASE: RuleFlag = RuleFlag { flag: "-opt-o8+" };
 
-const NULL_OUTER: Rule = Rule {
-    number: 9,
-    flag: "-opt-o9+",
-};
+const NULL_OUTER: RuleFlag = RuleFlag { flag: "-opt-o9+" };
 
 #[test]
 fn test_assemble_null_displacements_match_vasm_o8_o9() -> Result<(), Box<dyn Error>> {
@@ -701,20 +687,11 @@ fn test_assemble_null_displacements_match_vasm_o8_o9() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-const ADD_TO_LEA: Rule = Rule {
-    number: 10,
-    flag: "-opt-o10+",
-};
+const ADD_TO_LEA: RuleFlag = RuleFlag { flag: "-opt-o10+" };
 
-const LEA_TO_QUICK: Rule = Rule {
-    number: 11,
-    flag: "-opt-o11+",
-};
+const LEA_TO_QUICK: RuleFlag = RuleFlag { flag: "-opt-o11+" };
 
-const WORD_IMMEDIATE: Rule = Rule {
-    number: 12,
-    flag: "-opt-o12+",
-};
+const WORD_IMMEDIATE: RuleFlag = RuleFlag { flag: "-opt-o12+" };
 
 const IMMEDIATES: &[&str] = &[
     "0",
@@ -737,7 +714,7 @@ const IMMEDIATES: &[&str] = &[
     "g-f",
 ];
 
-fn compare_each(rule: &Rule, sources: &[String]) -> Result<(), Box<dyn Error>> {
+fn compare_each(rule: &RuleFlag, sources: &[String]) -> Result<(), Box<dyn Error>> {
     let Some(vasm) = Vasm::from_env()? else {
         return Ok(());
     };
@@ -850,10 +827,7 @@ fn test_assemble_subtracting_8000_from_address_register_stays_correct() {
     }
 }
 
-const GENERIC: Rule = Rule {
-    number: 16,
-    flag: "-opt-og+",
-};
+const GENERIC: RuleFlag = RuleFlag { flag: "-opt-og+" };
 
 fn generic_cases() -> Vec<String> {
     let mut sources: Vec<String> = [
@@ -995,10 +969,7 @@ fn test_assemble_eor_byte_out_of_range_stays_an_error() {
 }
 
 /// All rules together, which is `-opt-o+`, against vasm with the same.
-const ALL: Rule = Rule {
-    number: u32::MAX,
-    flag: "-opt-o+",
-};
+const ALL: RuleFlag = RuleFlag { flag: "-opt-o+" };
 
 #[test]
 fn test_assemble_pc_relative_matches_vasm_all_rules() -> Result<(), Box<dyn Error>> {
@@ -1059,10 +1030,7 @@ fn test_assemble_pc_relative_matches_vasm_all_rules() -> Result<(), Box<dyn Erro
     compare_rule(&sources, &ALL, false)
 }
 
-const FLOAT: Rule = Rule {
-    number: 18,
-    flag: "-opt-of+",
-};
+const FLOAT: RuleFlag = RuleFlag { flag: "-opt-of+" };
 
 #[test]
 fn test_assemble_float_constants_match_vasm_of() -> Result<(), Box<dyn Error>> {

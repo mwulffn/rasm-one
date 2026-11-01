@@ -1,13 +1,16 @@
 //! Raw binary output, for bootblocks and trackloaded code.
 
 use crate::error::OutputError;
-use crate::{Assembly, RelocKind, RelocTarget};
+use crate::{Assembly, RelocKind, RelocTarget, Target};
 
 /// Writes a raw binary starting at the lowest address used. Sections without
 /// an `org` start at address 0 and are ignored if empty; gaps are zero-filled.
 pub fn write_bin(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     if assembly.has_errors() {
         return Err(OutputError::HasErrors);
+    }
+    if assembly.target != Target::RawBinary {
+        return Err(OutputError::WrongTarget);
     }
     for section in &assembly.sections {
         for reloc in &section.relocs {

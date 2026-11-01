@@ -5,16 +5,16 @@
 
 use std::error::Error;
 
-use rasm_one::{assemble, write_bin, Assembly, Cpu, FpuChoice, MemoryProvider, Options};
+use rasm_one::{assemble, write_bin, Assembly, Cpu, FpuChoice, MemoryProvider, Options, Target};
 use rasm_oracle::{Format, Vasm};
 
 fn ours(source: &str, cpu: Cpu, fpu: FpuChoice) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    let mut options = Options::new("t.s");
+    let mut options = Options::unoptimised("t.s");
     options.cpu = cpu;
     options.fpu = fpu;
-    options.fixed_addresses = true;
+    options.target = Target::RawBinary;
     assemble(&options, &files)
 }
 

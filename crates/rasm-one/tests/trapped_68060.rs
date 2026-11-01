@@ -7,7 +7,7 @@ use rasm_one::{assemble, Assembly, Cpu, MemoryProvider, Options, Severity};
 fn ours(source: &str, cpu: Cpu) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", format!("{source}\n"));
-    let mut options = Options::new("t.s");
+    let mut options = Options::unoptimised("t.s");
     options.cpu = cpu;
     assemble(&options, &files)
 }

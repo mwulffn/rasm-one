@@ -11,11 +11,13 @@
 //! format, and refuse if it has errors.
 //!
 //! ```
-//! use rasm_one::{assemble, write_bin, MemoryProvider, Options};
+//! use rasm_one::{assemble, write_bin, MemoryProvider, Options, Target};
 //!
 //! let mut files = MemoryProvider::new();
 //! files.insert("main.s", " nop\n");
-//! let assembly = assemble(&Options::new("main.s"), &files);
+//! let mut options = Options::new("main.s");
+//! options.target = Target::RawBinary;
+//! let assembly = assemble(&options, &files);
 //! assert_eq!(write_bin(&assembly), Ok(vec![0x4E, 0x71]));
 //! ```
 //!
@@ -100,7 +102,7 @@
 //! passed with `.` and `dir/..` already removed.
 //!
 //! ```
-//! use rasm_one::{assemble, write_bin, FileError, FileProvider, Options};
+//! use rasm_one::{assemble, write_bin, FileError, FileProvider, Options, Target};
 //!
 //! /// A provider serving one fixed include.
 //! struct Project;
@@ -115,7 +117,9 @@
 //!     }
 //! }
 //!
-//! let assembly = assemble(&Options::new("main.s"), &Project);
+//! let mut options = Options::new("main.s");
+//! options.target = Target::RawBinary;
+//! let assembly = assemble(&options, &Project);
 //! assert_eq!(write_bin(&assembly), Ok(vec![7]));
 //! ```
 
@@ -136,7 +140,7 @@ pub use output::bin::write_bin;
 pub use output::hunk::{write_hunk_exe, write_hunk_exe_with, write_hunk_object, HunkExeOptions};
 pub use output::listing::write_listing;
 pub use source::{FileId, FileProvider, MemoryProvider, Span};
-pub use types::{Cpu, CpuSet, MemKind, SectionKind, Size};
+pub use types::{Cpu, MemKind, SectionKind};
 
 /// Assembly settings. Create these with [`Options::new`], then set fields.
 #[derive(Debug, Clone)]
@@ -153,53 +157,112 @@ pub struct Options {
     pub mmu_68851: bool,
     /// Directories to search for `include` and `incbin` files.
     pub include_dirs: Vec<String>,
-    /// Set this for a raw binary, where labels are final addresses. Displacements
-    /// from labels can then use their smallest form on 68020 and later, whereas a
-    /// relocatable file needs room for a 32-bit relocation.
-    pub fixed_addresses: bool,
+    /// What the output will be, which a writer checks.
+    pub target: Target,
     /// The most bytes all sections may hold in total, so that a few characters of
     /// source can't exhaust memory. More is an error.
     pub max_output_bytes: i64,
     /// The most statements that may be generated, which macros and `rept` could
     /// otherwise multiply without bound. More is an error.
     pub max_atoms: usize,
-    /// What to optimise. Off by default, like vasm's `-no-opt`.
+    /// What to optimise. Everything by default, as in vasm.
     pub optimisations: Optimisations,
 }
 
-/// Which optimisations apply, numbered like vasm's `-opt-oN` and `opt oN`.
-///
-/// [`Optimisations::all`] is what vasm does by default. Its optional rules aren't here yet.
-/// Those implemented: 1, branches; 2, displacements of zero; 3, absolute addresses; 4, `move.l #x,Dn`; 5, `addq` and `subq`; 7, short branches to what follows; 8, base displacements of zero; 9, outer displacements of zero; 10, `lea` for address arithmetic; 11, small `lea`; 12, word immediates to address registers; 16, generic replacements, which is `og`; 18, float constants, which is `of`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// One optimisation, named like vasm's `-opt-oN` and `opt oN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+pub enum Rule {
+    /// `o1`: branches without a size take the smallest form that reaches.
+    Branches,
+    /// `o2`: `0(An)` becomes `(An)`.
+    Displacements,
+    /// `o3`: an address without a size that fits a word is written as one.
+    Absolutes,
+    /// `o4`: `move.l #x,Dn` becomes `moveq`, with `add.w` or `swap` if that helps.
+    QuickMoves,
+    /// `o5`: adding or subtracting 1 to 8 uses `addq` or `subq`.
+    QuickArithmetic,
+    /// `o7`: `bra.s` or `Bcc.s` to the next instruction becomes a no-op, not an error.
+    ShortNext,
+    /// `o8`: a base displacement of zero is left out.
+    NullBase,
+    /// `o9`: an outer displacement of zero is left out.
+    NullOuter,
+    /// `o10`: adding to or subtracting from an address register uses `lea`.
+    AddToLea,
+    /// `o11`: a small `lea` of a register to itself uses `addq` or `subq`.
+    LeaToQuick,
+    /// `o12`: `.l #x,An` becomes `.w` if the value fits.
+    WordImmediate,
+    /// `og`: safe replacements that no other rule covers.
+    Generic,
+    /// `of`: float constants use the lowest precision that holds them exactly.
+    Float,
+    /// What only `o+` switches on in vasm, with no name of its own: labels without a size
+    /// become PC-relative if near enough, and `jmp` and `jsr` become branches.
+    PcRelative,
+}
+
+impl Rule {
+    const ALL: [Rule; 14] = [
+        Rule::Branches,
+        Rule::Displacements,
+        Rule::Absolutes,
+        Rule::QuickMoves,
+        Rule::QuickArithmetic,
+        Rule::ShortNext,
+        Rule::NullBase,
+        Rule::NullOuter,
+        Rule::AddToLea,
+        Rule::LeaToQuick,
+        Rule::WordImmediate,
+        Rule::Generic,
+        Rule::Float,
+        Rule::PcRelative,
+    ];
+
+    /// The rule for what follows `o` in `opt` or `-opt-o`, such as `1` or `g`, if rasm-one
+    /// has it.
+    pub fn named(name: &str) -> Option<Rule> {
+        Some(match name {
+            "1" => Rule::Branches,
+            "2" => Rule::Displacements,
+            "3" => Rule::Absolutes,
+            "4" => Rule::QuickMoves,
+            "5" => Rule::QuickArithmetic,
+            "7" => Rule::ShortNext,
+            "8" => Rule::NullBase,
+            "9" => Rule::NullOuter,
+            "10" => Rule::AddToLea,
+            "11" => Rule::LeaToQuick,
+            "12" => Rule::WordImmediate,
+            "g" => Rule::Generic,
+            "f" => Rule::Float,
+            _ => return None,
+        })
+    }
+
+    fn bit(self) -> u32 {
+        1 << self as u32
+    }
+}
+
+/// Which optimisations apply. [`Optimisations::all`] is what vasm does by default.
+/// vasm's optional rules, which are off by default, aren't here yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Optimisations {
-    /// False makes this like vasm's `-no-opt`: no rule applies, and `opt` can't change that.
-    pub enabled: bool,
+    enabled: bool,
     rules: u32,
 }
 
 impl Optimisations {
-    const IMPLEMENTED: u32 = 1 << RULE_BRANCHES
-        | 1 << RULE_DISPLACEMENTS
-        | 1 << RULE_ABSOLUTES
-        | 1 << RULE_QUICK_MOVES
-        | 1 << RULE_QUICK_ARITHMETIC
-        | 1 << RULE_SHORT_NEXT
-        | 1 << RULE_NULL_BASE
-        | 1 << RULE_NULL_OUTER
-        | 1 << RULE_ADD_TO_LEA
-        | 1 << RULE_LEA_TO_QUICK
-        | 1 << RULE_WORD_IMMEDIATE
-        | 1 << RULE_GENERIC
-        | 1 << RULE_PC_RELATIVE
-        | 1 << RULE_FLOAT;
-
-    /// Every rule that exists, which can be changed with `opt`.
+    /// Every rule, which `opt` can change.
     pub fn all() -> Self {
+        let rules = Rule::ALL.iter().fold(0, |rules, rule| rules | rule.bit());
         Self {
             enabled: true,
-            rules: Self::IMPLEMENTED,
+            rules,
         }
     }
 
@@ -211,80 +274,59 @@ impl Optimisations {
         }
     }
 
-    /// The number of a rule, from what follows `o` in `opt` or `-opt-o`, if it has one.
-    pub fn rule_named(name: &str) -> Option<u32> {
-        match name {
-            "g" => Some(RULE_GENERIC),
-            "f" => Some(RULE_FLOAT),
-            _ => name.parse().ok(),
+    /// No rule, and `opt` can't change that, like vasm's `-no-opt`.
+    pub fn off() -> Self {
+        Self {
+            enabled: false,
+            rules: 0,
         }
     }
 
-    /// Switches a rule, returning false if it doesn't exist.
-    pub fn set_rule(&mut self, rule: u32, on: bool) -> bool {
-        let bit = 1u32.checked_shl(rule).unwrap_or(0);
-        if bit & Self::IMPLEMENTED == 0 {
-            return false;
-        }
-        self.rules = if on {
-            self.rules | bit
+    /// Switches a rule. This has no effect after [`Optimisations::off`].
+    pub fn set_rule(&mut self, rule: Rule, on: bool) {
+        if on {
+            self.rules |= rule.bit();
         } else {
-            self.rules & !bit
-        };
-        true
+            self.rules &= !rule.bit();
+        }
     }
 
-    /// Switches every rule that exists.
+    /// Switches every rule.
     pub fn set_all_rules(&mut self, on: bool) {
-        self.rules = if on { Self::IMPLEMENTED } else { 0 };
+        self.rules = if on { Self::all().rules } else { 0 };
+    }
+
+    /// False after [`Optimisations::off`].
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Whether a rule applies.
-    pub(crate) fn rule(&self, rule: u32) -> bool {
-        self.enabled && self.rules & (1 << rule) != 0
+    pub fn rule(&self, rule: Rule) -> bool {
+        self.enabled && self.rules & rule.bit() != 0
     }
 }
 
-/// Rule 1: unsized branches take the smallest form that reaches.
-pub(crate) const RULE_BRANCHES: u32 = 1;
-/// Rule 2: `0(An)` becomes `(An)`.
-pub(crate) const RULE_DISPLACEMENTS: u32 = 2;
-/// Rule 3: an address without a size that fits a word is written as one.
-pub(crate) const RULE_ABSOLUTES: u32 = 3;
-/// Rule 4: `move.l #x,Dn` becomes `moveq`, with `add.w` or `swap` if that helps.
-pub(crate) const RULE_QUICK_MOVES: u32 = 4;
-/// Rule 5: adding or subtracting 1 to 8 uses `addq` or `subq`.
-pub(crate) const RULE_QUICK_ARITHMETIC: u32 = 5;
-
-/// Rule 7: `bra.s` or `Bcc.s` to the next instruction becomes a no-op, not an error.
-pub(crate) const RULE_SHORT_NEXT: u32 = 7;
-
-/// Rule 8: a base displacement of zero is left out.
-pub(crate) const RULE_NULL_BASE: u32 = 8;
-
-/// Rule 9: an outer displacement of zero is left out.
-pub(crate) const RULE_NULL_OUTER: u32 = 9;
-
-/// Rule 10: adding to or subtracting from an address register uses `lea`.
-pub(crate) const RULE_ADD_TO_LEA: u32 = 10;
-
-/// Rule 11: a small `lea` of a register to itself uses `addq` or `subq`.
-pub(crate) const RULE_LEA_TO_QUICK: u32 = 11;
-
-/// Rule 12: `.l #x,An` becomes `.w` if the value fits.
-pub(crate) const RULE_WORD_IMMEDIATE: u32 = 12;
-
-/// Rule 16: vasm's `og`, safe replacements that no other rule covers.
-pub(crate) const RULE_GENERIC: u32 = 16;
-
-/// What only `o+` switches on: labels without a size become PC-relative if near enough,
-/// and `jmp` and `jsr` become branches. This has no name of its own in vasm.
-pub(crate) const RULE_PC_RELATIVE: u32 = 17;
-
-/// Rule 18: float constants use the lowest precision that holds them, which is `of`.
-pub(crate) const RULE_FLOAT: u32 = 18;
+/// What the output will be, which decides what labels mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Target {
+    /// A hunk executable or object, where a loader or linker fixes addresses.
+    #[default]
+    Relocatable,
+    /// A raw binary, where labels in the section the source doesn't name are final addresses.
+    RawBinary,
+}
 
 impl Options {
+    /// Options for assembling `main` for a 68000 without optimising, like vasm's `-no-opt`.
+    pub fn unoptimised(main: impl Into<String>) -> Self {
+        Self {
+            optimisations: Optimisations::off(),
+            ..Self::new(main)
+        }
+    }
+
     /// Options for assembling `main` for a 68000.
     pub fn new(main: impl Into<String>) -> Self {
         Self {
@@ -293,10 +335,10 @@ impl Options {
             fpu: FpuChoice::default(),
             mmu_68851: false,
             include_dirs: Vec::new(),
-            fixed_addresses: false,
+            target: Target::Relocatable,
             max_output_bytes: 256 * 1024 * 1024,
             max_atoms: 4_000_000,
-            optimisations: Optimisations::default(),
+            optimisations: Optimisations::all(),
         }
     }
 }
@@ -452,6 +494,8 @@ pub struct HunkSettings {
 pub struct Assembly {
     /// Names of the source files; a [`FileId`] indexes this list.
     pub files: Vec<String>,
+    /// The text of each of those files, as it was assembled.
+    pub sources: Vec<Vec<u8>>,
     /// Hunk output settings from `opt`.
     pub hunk_settings: HunkSettings,
     /// Name given by `idnt`, used for the unit of an object file.
@@ -468,7 +512,9 @@ pub struct Assembly {
     pub diagnostics: Vec<Diagnostic>,
     /// The limit from [`Options::max_output_bytes`], which also applies to a raw
     /// binary's gaps.
-    pub max_output_bytes: i64,
+    pub(crate) max_output_bytes: i64,
+    /// What this was assembled for.
+    pub target: Target,
 }
 
 impl Assembly {
@@ -531,12 +577,15 @@ pub fn assemble(options: &Options, provider: &dyn FileProvider) -> Assembly {
                 span: None,
                 related: Vec::new(),
             }],
+            target: options.target,
             ..Assembly::default()
         };
     }
     let built = layout::build(parser.finish(options.max_output_bytes));
     Assembly {
         files: built.files,
+        sources: built.sources,
+        target: options.target,
         unit_name: built.unit_name,
         hunk_settings: built.hunk_settings,
         max_output_bytes: built.max_output_bytes,
@@ -552,15 +601,55 @@ pub fn assemble(options: &Options, provider: &dyn FileProvider) -> Assembly {
 mod tests {
     use super::*;
 
+    fn run_bin(source: &str) -> Assembly {
+        let mut files = MemoryProvider::new();
+        files.insert("t.s", source);
+        let mut options = Options::unoptimised("t.s");
+        options.target = Target::RawBinary;
+        assemble(&options, &files)
+    }
+
     fn run(source: &str) -> Assembly {
         let mut files = MemoryProvider::new();
         files.insert("t.s", source);
-        assemble(&Options::new("t.s"), &files)
+        assemble(&Options::unoptimised("t.s"), &files)
+    }
+
+    #[test]
+    fn test_write_formats_refuse_the_wrong_target() {
+        let relocatable = run(" nop\n");
+        assert_eq!(write_bin(&relocatable), Err(OutputError::WrongTarget));
+        let raw = run_bin(" nop\n");
+        assert_eq!(write_hunk_exe(&raw), Err(OutputError::WrongTarget));
+        assert_eq!(write_hunk_object(&raw), Err(OutputError::WrongTarget));
+    }
+
+    #[test]
+    fn test_options_new_optimises_and_unoptimised_does_not() {
+        assert_eq!(Options::new("t.s").optimisations, Optimisations::all());
+        assert_eq!(
+            Options::unoptimised("t.s").optimisations,
+            Optimisations::off()
+        );
+    }
+
+    #[test]
+    fn test_rule_named_knows_vasm_names_only_for_rules_that_exist() {
+        assert_eq!(Rule::named("1"), Some(Rule::Branches));
+        assert_eq!(Rule::named("g"), Some(Rule::Generic));
+        assert_eq!(Rule::named("6"), None);
+        assert_eq!(Rule::named("x"), None);
+    }
+
+    #[test]
+    fn test_assembly_keeps_the_text_it_assembled() {
+        let assembly = run(" nop\n");
+        assert_eq!(assembly.sources, vec![b" nop\n".to_vec()]);
     }
 
     #[test]
     fn test_assemble_missing_main_file_is_diagnostic() {
-        let assembly = assemble(&Options::new("nope.s"), &MemoryProvider::new());
+        let assembly = assemble(&Options::unoptimised("nope.s"), &MemoryProvider::new());
         assert_eq!(assembly.diagnostics[0].code, "file-read");
         assert_eq!(assembly.diagnostics[0].span, None);
     }
@@ -646,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_write_bin_overlapping_sections_is_error() {
-        let assembly = run(" section a,code\n nop\n section b,data\n dc.w 1\n");
+        let assembly = run_bin(" section a,code\n nop\n section b,data\n dc.w 1\n");
         assert_eq!(
             write_bin(&assembly),
             Err(OutputError::Overlap("a".to_string(), "b".to_string()))
@@ -655,7 +744,7 @@ mod tests {
 
     #[test]
     fn test_write_bin_refuses_failed_assembly() {
-        assert_eq!(write_bin(&run(" bogus\n")), Err(OutputError::HasErrors));
+        assert_eq!(write_bin(&run_bin(" bogus\n")), Err(OutputError::HasErrors));
     }
 
     #[test]
@@ -705,7 +794,7 @@ mod tests {
         for (path, contents) in files {
             provider.insert(*path, *contents);
         }
-        assemble(&Options::new("t.s"), &provider)
+        assemble(&Options::unoptimised("t.s"), &provider)
     }
 
     #[test]
@@ -772,7 +861,7 @@ mod tests {
                 }
             }
         }
-        let assembly = assemble(&Options::new("t.s"), &Failing);
+        let assembly = assemble(&Options::unoptimised("t.s"), &Failing);
         assert!(assembly.diagnostics[0].message.contains("disk on fire"));
     }
 
@@ -831,7 +920,7 @@ mod tests {
 
     #[test]
     fn test_printt_reports_text_as_info_not_error() {
-        let assembly = run(" printt \"hello\"\n printv 2+3\n nop\n");
+        let assembly = run_bin(" printt \"hello\"\n printv 2+3\n nop\n");
         assert_eq!(assembly.diagnostics[0].severity, Severity::Info);
         assert_eq!(assembly.diagnostics[0].message, "hello");
         assert!(assembly.diagnostics[1].message.starts_with("5 "));
@@ -850,7 +939,7 @@ mod tests {
     fn test_assemble_zpc_displacement_is_not_pc_relative() {
         let mut files = MemoryProvider::new();
         files.insert("t.s", " move.w (4,zpc),d0\n");
-        let mut options = Options::new("t.s");
+        let mut options = Options::unoptimised("t.s");
         options.cpu = Cpu::M68020;
         let assembly = assemble(&options, &files);
         assert_eq!(
@@ -863,7 +952,7 @@ mod tests {
     fn test_encode_grown_modes_use_the_full_format_mode_bits() {
         let mut files = MemoryProvider::new();
         files.insert("t.s", " divs (100000,a6),d4\n jmp (100000,pc)\n");
-        let mut options = Options::new("t.s");
+        let mut options = Options::unoptimised("t.s");
         options.cpu = Cpu::M68020;
         let assembly = assemble(&options, &files);
         assert_eq!(
@@ -879,9 +968,13 @@ mod tests {
     fn run_on(source: &str, cpu: Cpu, fixed: bool) -> Assembly {
         let mut files = MemoryProvider::new();
         files.insert("t.s", source);
-        let mut options = Options::new("t.s");
+        let mut options = Options::unoptimised("t.s");
         options.cpu = cpu;
-        options.fixed_addresses = fixed;
+        options.target = if fixed {
+            Target::RawBinary
+        } else {
+            Target::Relocatable
+        };
         assemble(&options, &files)
     }
 
@@ -937,7 +1030,7 @@ mod tests {
         for source in sources {
             let mut files = MemoryProvider::new();
             files.insert("t.s", source);
-            let mut options = Options::new("t.s");
+            let mut options = Options::unoptimised("t.s");
             // The default limit is much higher, which would only make this slower.
             options.max_atoms = 50_000;
             options.max_output_bytes = 1024 * 1024;
@@ -957,13 +1050,13 @@ mod tests {
 
     #[test]
     fn test_write_bin_gap_beyond_limit_is_error() {
-        let assembly = run(" org 0\n nop\n org $ffffffff\n nop\n");
+        let assembly = run_bin(" org 0\n nop\n org $ffffffff\n nop\n");
         assert_eq!(write_bin(&assembly), Err(OutputError::TooLarge));
     }
 
     #[test]
     fn test_write_bin_empty_org_inside_a_section_is_overlap() {
-        let assembly = run(" org $1000\n dc.l 1,2,3,4\n org $1008\n");
+        let assembly = run_bin(" org $1000\n dc.l 1,2,3,4\n org $1008\n");
         assert!(matches!(
             write_bin(&assembly),
             Err(OutputError::Overlap(..))
@@ -1023,7 +1116,7 @@ mod tests {
 
     #[test]
     fn test_opt_warns_for_each_ignored_option() {
-        let assembly = run(" opt c-,o+\n nop\n");
+        let assembly = run_bin(" opt c-,o+\n nop\n");
         let messages: Vec<_> = assembly
             .diagnostics
             .iter()

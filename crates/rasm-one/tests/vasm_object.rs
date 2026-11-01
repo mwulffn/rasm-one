@@ -4,14 +4,14 @@ use std::error::Error;
 
 use rasm_one::{
     assemble, write_bin, write_hunk_exe, write_hunk_object, Assembly, MemoryProvider, Options,
-    OutputError,
+    OutputError, Target,
 };
 use rasm_oracle::{Format, Vasm};
 
 fn assembled(source: &str) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    assemble(&Options::new("t.s"), &files)
+    assemble(&Options::unoptimised("t.s"), &files)
 }
 
 const ACCEPTED: &[&str] = &[
@@ -239,14 +239,19 @@ fn test_write_other_formats_refuse_external_symbols() {
         )
     };
     assert!(is_external(write_hunk_exe(&assembly)));
-    assert!(is_external(write_bin(&assembly)));
+    let mut files = MemoryProvider::new();
+    files.insert("t.s", " xref x\n nop\n dc.l x\n");
+    let mut options = Options::unoptimised("t.s");
+    options.target = Target::RawBinary;
+    assert!(is_external(write_bin(&assemble(&options, &files))));
+    assert_eq!(write_bin(&assembly), Err(OutputError::WrongTarget));
 }
 
 #[test]
 fn test_write_hunk_object_unit_name_has_no_directory() -> Result<(), Box<dyn Error>> {
     let mut files = MemoryProvider::new();
     files.insert("src/n.s", " nop\n");
-    let bytes = write_hunk_object(&assemble(&Options::new("src/n.s"), &files))?;
+    let bytes = write_hunk_object(&assemble(&Options::unoptimised("src/n.s"), &files))?;
     assert_eq!(&bytes[8..12], b"n.s\0");
     Ok(())
 }

@@ -7,7 +7,9 @@
 use std::collections::HashSet;
 use std::error::Error;
 
-use rasm_one::{assemble, Assembly, Cpu, FpuChoice, MemoryProvider, Optimisations, Options};
+use rasm_one::{
+    assemble, Assembly, Cpu, FpuChoice, MemoryProvider, Optimisations, Options, Target,
+};
 use rasm_oracle::{Format, Vasm};
 
 /// A machine to sweep: its name for vasm, and whether it has a coprocessor FPU.
@@ -469,11 +471,11 @@ fn undefined_symbol(message: &str) -> Option<&str> {
 fn assemble_source(source: &str, machine: &Machine, optimised: bool) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    let mut options = Options::new("t.s");
+    let mut options = Options::unoptimised("t.s");
     options.cpu = machine.cpu;
     options.fpu = machine.fpu;
     options.mmu_68851 = machine.mmu_68851;
-    options.fixed_addresses = true;
+    options.target = Target::RawBinary;
     if optimised {
         options.optimisations = Optimisations::all();
     }

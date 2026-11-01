@@ -20,12 +20,7 @@ use crate::isa::{
 use crate::lexer::{LexError, Lexer, Punct, Tok};
 use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
-use crate::{
-    Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_ADD_TO_LEA,
-    RULE_BRANCHES, RULE_DISPLACEMENTS, RULE_FLOAT, RULE_GENERIC, RULE_LEA_TO_QUICK, RULE_NULL_BASE,
-    RULE_NULL_OUTER, RULE_PC_RELATIVE, RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES, RULE_SHORT_NEXT,
-    RULE_WORD_IMMEDIATE,
-};
+use crate::{Expansion, ExpansionKind, FpuChoice, Optimisations, Rule, Target};
 
 /// A symbol being collected.
 #[derive(Debug, Clone)]
@@ -69,6 +64,7 @@ pub(crate) struct Program {
     pub hunk_settings: crate::HunkSettings,
     /// True if labels are final addresses, as in a raw binary.
     pub fixed_addresses: bool,
+    pub sources: Vec<Vec<u8>>,
     /// The limit on the size of the output.
     pub max_output_bytes: i64,
     pub symbols: Vec<SymbolEntry>,
@@ -650,7 +646,7 @@ impl<'f> Parser<'f> {
             fpu: options.fpu,
             mmu_68851: options.mmu_68851,
             optimisations: options.optimisations,
-            fixed_addresses: options.fixed_addresses,
+            fixed_addresses: options.target == Target::RawBinary,
             implicit_section: None,
             provider,
             include_dirs: options.include_dirs.clone(),
@@ -688,10 +684,21 @@ impl<'f> Parser<'f> {
         self.program
     }
 
+    /// Keeps a file's text, so a listing shows what was really assembled.
+    fn remember_source(&mut self, file: FileId, source: &[u8]) {
+        let index = file as usize;
+        let sources = &mut self.program.sources;
+        if sources.len() <= index {
+            sources.resize(index + 1, Vec::new());
+        }
+        sources[index] = source.to_vec();
+    }
+
     /// Parses the main source file.
     pub fn parse_main(&mut self, path: &str) -> Result<(), FileError> {
         let source = self.provider.read(path, None)?;
         let file = self.file_id(path);
+        self.remember_source(file, &source);
         self.parse_file(file, &source);
         if !self.ended {
             for conditional in std::mem::take(&mut self.conditionals) {
@@ -753,6 +760,7 @@ impl<'f> Parser<'f> {
             .find_file(path, from.as_deref())
             .map_err(|error| Diagnostic::error("file-read", error.to_string(), site))?;
         let file = self.file_id(&resolved);
+        self.remember_source(file, &source);
         if self.file_stack.contains(&file) {
             return Err(Diagnostic::error(
                 "include-cycle",
@@ -2134,8 +2142,11 @@ impl LineParser<'_, '_, '_> {
             optimisations.set_all_rules(on);
             return true;
         }
-        match name.strip_prefix('o').and_then(Optimisations::rule_named) {
-            Some(rule) => optimisations.set_rule(rule, on),
+        match name.strip_prefix('o').and_then(Rule::named) {
+            Some(rule) => {
+                optimisations.set_rule(rule, on);
+                true
+            }
             None => false,
         }
     }
@@ -2731,7 +2742,7 @@ impl LineParser<'_, '_, '_> {
                 span,
             ));
         }
-        let quick_move = (self.parser.optimisations.rule(RULE_QUICK_MOVES)
+        let quick_move = (self.parser.optimisations.rule(Rule::QuickMoves)
             && row.encoding == Encoding::Move
             && size == Some(Size::Long)
             && matches!(operands.as_slice(), [first, second]
@@ -2743,7 +2754,7 @@ impl LineParser<'_, '_, '_> {
             QuickMoves::WithSecondInstruction
         });
         let rewrites = self.rewrites_for(mnemonic, size.or(row.default_size), &operands);
-        let pc_relative = self.parser.optimisations.rule(RULE_PC_RELATIVE);
+        let pc_relative = self.parser.optimisations.rule(Rule::PcRelative);
         // A `jmp` or `jsr` to a label without a size is a branch if it can be.
         let jump_branch = match (mnemonic, operands.as_slice()) {
             ("jmp", [target]) if matches!(target.mode, Mode::AbsShortable(_)) => "bra",
@@ -2797,15 +2808,15 @@ impl LineParser<'_, '_, '_> {
             resizable_branch: from_jump
                 || size.is_none()
                     && matches!(row.encoding, Encoding::Branch | Encoding::FpBranch)
-                    && self.parser.optimisations.rule(RULE_BRANCHES),
-            drops_zero_displacement: self.parser.optimisations.rule(RULE_DISPLACEMENTS),
-            shortens_absolutes: self.parser.optimisations.rule(RULE_ABSOLUTES),
+                    && self.parser.optimisations.rule(Rule::Branches),
+            drops_zero_displacement: self.parser.optimisations.rule(Rule::Displacements),
+            shortens_absolutes: self.parser.optimisations.rule(Rule::Absolutes),
             quick_move,
-            generic_rewrites: self.parser.optimisations.rule(RULE_GENERIC),
+            generic_rewrites: self.parser.optimisations.rule(Rule::Generic),
             cpu: self.parser.cpu,
-            drops_zero_base: self.parser.optimisations.rule(RULE_NULL_BASE),
-            drops_zero_outer: self.parser.optimisations.rule(RULE_NULL_OUTER),
-            short_next_is_no_op: self.parser.optimisations.rule(RULE_SHORT_NEXT),
+            drops_zero_base: self.parser.optimisations.rule(Rule::NullBase),
+            drops_zero_outer: self.parser.optimisations.rule(Rule::NullOuter),
+            short_next_is_no_op: self.parser.optimisations.rule(Rule::ShortNext),
             rewrites,
             branch_form: Cell::new(if from_jump {
                 BranchForm::Jump
@@ -2839,7 +2850,7 @@ impl LineParser<'_, '_, '_> {
                 ..
             }),
         ) = (
-            self.parser.optimisations.rule(RULE_FLOAT),
+            self.parser.optimisations.rule(Rule::Float),
             written,
             operands.first(),
         )
@@ -2911,7 +2922,7 @@ impl LineParser<'_, '_, '_> {
             subtracts: false,
         };
         if mnemonic == "lea" {
-            if rule(RULE_LEA_TO_QUICK) {
+            if rule(Rule::LeaToQuick) {
                 let quick_operands = [
                     Operand {
                         mode: Mode::Immediate(Expr::Num(1)),
@@ -2936,16 +2947,16 @@ impl LineParser<'_, '_, '_> {
         };
         if let Some((quick, subtracts)) = arithmetic {
             rewrites.subtracts = subtracts;
-            if rule(RULE_QUICK_ARITHMETIC) {
+            if rule(Rule::QuickArithmetic) {
                 rewrites.quick = matching(quick, size, operands);
             }
-            if rule(RULE_ADD_TO_LEA) && to_address && !mnemonic.ends_with('i') {
+            if rule(Rule::AddToLea) && to_address && !mnemonic.ends_with('i') {
                 rewrites.lea = rows_for("lea")?.first();
             }
         }
         let widens = matches!(mnemonic, "add" | "adda" | "sub" | "suba" | "cmp" | "cmpa")
             || matches!(mnemonic, "move" | "movea");
-        if rule(RULE_WORD_IMMEDIATE) && widens && to_address && size == Size::Long {
+        if rule(Rule::WordImmediate) && widens && to_address && size == Size::Long {
             rewrites.word = matching(mnemonic, Size::Word, operands);
         }
         Some(rewrites)
@@ -3021,7 +3032,7 @@ impl LineParser<'_, '_, '_> {
         }
         match self.parse_size_suffix()? {
             Some(Size::Word) => Ok(Mode::AbsWord(expr)),
-            None if self.parser.optimisations.rule(RULE_ABSOLUTES) => Ok(Mode::AbsShortable(expr)),
+            None if self.parser.optimisations.rule(Rule::Absolutes) => Ok(Mode::AbsShortable(expr)),
             Some(Size::Long) | None => Ok(Mode::AbsLong(expr)),
             Some(_) => Err(self.error_at(
                 "bad-size",

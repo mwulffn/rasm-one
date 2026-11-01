@@ -11,7 +11,7 @@ use rasm_oracle::{Format, Vasm};
 fn ours(source: &str) -> Result<Vec<u8>, OutputError> {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    write_hunk_exe(&assemble(&Options::new("t.s"), &files))
+    write_hunk_exe(&assemble(&Options::unoptimised("t.s"), &files))
 }
 
 const ACCEPTED: &[&str] = &[
@@ -173,7 +173,7 @@ fn test_write_hunk_exe_kickstart1_matches_vasm_kick1hunks() -> Result<(), Box<dy
         let mut files = MemoryProvider::new();
         files.insert("t.s", source.as_str());
         let options = HunkExeOptions { kickstart1: true };
-        match write_hunk_exe_with(&assemble(&Options::new("t.s"), &files), options) {
+        match write_hunk_exe_with(&assemble(&Options::unoptimised("t.s"), &files), options) {
             Ok(bytes) if bytes == theirs.bytes => {}
             Ok(bytes) => failures.push(format!(
                 "{source:?}\n  ours  {bytes:02x?}\n  vasm  {:02x?}",

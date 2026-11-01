@@ -2,14 +2,14 @@
 
 use std::error::Error;
 
-use rasm_one::{assemble, write_bin, Assembly, MemoryProvider, Options};
+use rasm_one::{assemble, write_bin, Assembly, MemoryProvider, Options, Target};
 use rasm_oracle::{Format, Vasm};
 
 fn ours(source: &str) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    let mut options = Options::new("t.s");
-    options.fixed_addresses = true;
+    let mut options = Options::unoptimised("t.s");
+    options.target = Target::RawBinary;
     assemble(&options, &files)
 }
 

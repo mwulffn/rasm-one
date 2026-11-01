@@ -2,22 +2,16 @@
 
 use std::fmt::Write;
 
-use crate::source::FileProvider;
 use crate::{Assembly, LineEntry};
 
 /// Bytes shown per listing line; the rest of a run is summarised.
 const BYTES_SHOWN: usize = 8;
 
 /// Writes a listing in address order, one section at a time, so macro and
-/// include expansions appear where their bytes are. Source text is read from
-/// `provider`; a file it can no longer read just leaves the text blank.
-pub fn write_listing(assembly: &Assembly, provider: &dyn FileProvider) -> String {
-    let contents: Vec<Vec<u8>> = assembly
-        .files
-        .iter()
-        .map(|file| provider.read(file, None).unwrap_or_default())
-        .collect();
-    let sources: Vec<Vec<&[u8]>> = contents
+/// include expansions appear where their bytes are.
+pub fn write_listing(assembly: &Assembly) -> String {
+    let sources: Vec<Vec<&[u8]>> = assembly
+        .sources
         .iter()
         .map(|source| source.split(|&b| b == b'\n').collect())
         .collect();
@@ -100,7 +94,7 @@ mod tests {
     fn listing(source: &str) -> String {
         let mut files = MemoryProvider::new();
         files.insert("t.s", source);
-        write_listing(&assemble(&Options::new("t.s"), &files), &files)
+        write_listing(&assemble(&Options::unoptimised("t.s"), &files))
     }
 
     #[test]
@@ -131,7 +125,7 @@ mod tests {
         let mut files = MemoryProvider::new();
         files.insert("t.s", "m macro\n rts\n endm\n include \"a.i\"\n m\n");
         files.insert("a.i", " nop ; included\n");
-        let text = write_listing(&assemble(&Options::new("t.s"), &files), &files);
+        let text = write_listing(&assemble(&Options::unoptimised("t.s"), &files));
         assert!(text.contains("a.i:1"), "{text}");
         assert!(text.contains("nop ; included"), "{text}");
         assert!(text.contains("t.s:2"), "{text}");

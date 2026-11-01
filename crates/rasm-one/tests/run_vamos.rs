@@ -58,7 +58,7 @@ fn test_vamos_runs_executables_in_both_relocation_formats() -> Result<(), Box<dy
     };
     let mut files = MemoryProvider::new();
     files.insert("t.s", PROGRAM);
-    let assembly = assemble(&Options::new("t.s"), &files);
+    let assembly = assemble(&Options::unoptimised("t.s"), &files);
     assert!(!assembly.has_errors(), "{:?}", assembly.diagnostics);
 
     let dir = std::env::temp_dir().join(format!("rasm-vamos-{}", std::process::id()));

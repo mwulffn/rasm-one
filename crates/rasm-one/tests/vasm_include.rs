@@ -2,7 +2,7 @@
 
 use std::error::Error;
 
-use rasm_one::{assemble, write_bin, Assembly, MemoryProvider, Options};
+use rasm_one::{assemble, write_bin, Assembly, MemoryProvider, Options, Target};
 use rasm_oracle::{Format, Vasm};
 
 const FILES: &[(&str, &[u8])] = &[
@@ -94,7 +94,9 @@ fn ours(source: &str) -> Assembly {
     for (path, contents) in FILES {
         files.insert(*path, contents.to_vec());
     }
-    assemble(&Options::new("t.s"), &files)
+    let mut options = Options::unoptimised("t.s");
+    options.target = Target::RawBinary;
+    assemble(&options, &files)
 }
 
 #[test]
@@ -155,7 +157,9 @@ fn test_include_searches_main_source_directory() {
     let mut files = MemoryProvider::new();
     files.insert("src/t.s", " include \"a.i\"\n");
     files.insert("src/a.i", " nop\n");
-    let assembly = assemble(&Options::new("src/t.s"), &files);
+    let mut options = Options::unoptimised("src/t.s");
+    options.target = Target::RawBinary;
+    let assembly = assemble(&options, &files);
     assert_eq!(write_bin(&assembly), Ok(vec![0x4E, 0x71]));
     assert_eq!(assembly.files[1], "src/a.i");
 }
@@ -165,7 +169,8 @@ fn test_include_dirs_option_searches_directory() {
     let mut files = MemoryProvider::new();
     files.insert("t.s", " include \"o.i\"\n");
     files.insert("other/o.i", " nop\n");
-    let mut options = Options::new("t.s");
+    let mut options = Options::unoptimised("t.s");
+    options.target = Target::RawBinary;
     options.include_dirs = vec!["other".to_string()];
     assert_eq!(write_bin(&assemble(&options, &files)), Ok(vec![0x4E, 0x71]));
 }

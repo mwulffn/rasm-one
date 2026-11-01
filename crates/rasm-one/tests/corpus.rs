@@ -9,7 +9,9 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rasm_one::{assemble, write_hunk_object, FileError, FileProvider, Optimisations, Options};
+use rasm_one::{
+    assemble, write_hunk_object, FileError, FileProvider, Optimisations, Options, Rule,
+};
 use rasm_oracle::Vasm;
 
 /// Fewer than this means the corpus or the test has gone wrong. Hosts differ: on a
@@ -73,8 +75,7 @@ fn asks_for_all_rules(path: &Path) -> bool {
     })
 }
 
-/// Rules that exist, which the corpus runs with.
-const RULES: &[u32] = &[1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 16, 18];
+/// Rules the corpus runs with on their own.
 const RULE_FLAGS: &[&str] = &[
     "-opt-o-",
     "-opt-o1+",
@@ -94,14 +95,17 @@ const RULE_FLAGS: &[&str] = &[
 
 #[test]
 fn test_corpus_matches_vasm() -> Result<(), Box<dyn Error>> {
-    corpus_matches(&[], Optimisations::default())
+    corpus_matches(&[], Optimisations::off())
 }
 
 #[test]
 fn test_corpus_matches_vasm_with_rules() -> Result<(), Box<dyn Error>> {
     let mut optimisations = Optimisations::none();
-    for &rule in RULES {
-        optimisations.set_rule(rule, true);
+    for name in RULE_FLAGS {
+        let name = name.trim_start_matches("-opt-o").trim_end_matches('+');
+        if let Some(rule) = Rule::named(name) {
+            optimisations.set_rule(rule, true);
+        }
     }
     corpus_matches(RULE_FLAGS, optimisations)
 }

@@ -19,7 +19,11 @@ project.add_include_dir("lib");
 const started = performance.now();
 const binary = project.assemble("src/main.s", "bin");
 const elapsed = performance.now() - started;
-assert.strictEqual(hex(binary.bytes()), "4e714e71303c12346000fffa");
+assert.strictEqual(hex(binary.bytes()), "4e714e71303c123460fa");
+
+project.set_optimise(false);
+assert.strictEqual(hex(project.assemble("src/main.s", "bin").bytes()), "4e714e71303c12346000fffa");
+project.set_optimise(true);
 
 const report = JSON.parse(binary.report_json());
 assert.strictEqual(report.outputError, null);

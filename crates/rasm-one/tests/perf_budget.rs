@@ -36,6 +36,15 @@ fn generated_source() -> Result<String, std::fmt::Error> {
 
 #[test]
 fn test_assemble_large_source_within_budget() -> Result<(), Box<dyn Error>> {
+    within_budget(&Options::unoptimised("t.s"), BUDGET)
+}
+
+#[test]
+fn test_assemble_large_source_with_optimiser_within_budget() -> Result<(), Box<dyn Error>> {
+    within_budget(&Options::new("t.s"), BUDGET)
+}
+
+fn within_budget(options: &Options, budget: Duration) -> Result<(), Box<dyn Error>> {
     if cfg!(debug_assertions) {
         eprintln!("skipping: the budget applies to optimised builds");
         return Ok(());
@@ -43,13 +52,12 @@ fn test_assemble_large_source_within_budget() -> Result<(), Box<dyn Error>> {
     let source = generated_source()?;
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    let options = Options::new("t.s");
 
     // The fastest of several runs is the least disturbed by other work.
     let mut best = Duration::MAX;
     for _ in 0..5 {
         let start = Instant::now();
-        let assembly = assemble(&options, &files);
+        let assembly = assemble(options, &files);
         assert!(!assembly.has_errors(), "{:?}", assembly.diagnostics.first());
         let bytes = write_hunk_exe(&assembly)?;
         best = best.min(start.elapsed());
@@ -57,8 +65,8 @@ fn test_assemble_large_source_within_budget() -> Result<(), Box<dyn Error>> {
     }
     eprintln!("{LINES} lines in {best:?}");
     assert!(
-        best <= BUDGET,
-        "{LINES} lines took {best:?}, budget {BUDGET:?}"
+        best <= budget,
+        "{LINES} lines took {best:?}, budget {budget:?}"
     );
     Ok(())
 }

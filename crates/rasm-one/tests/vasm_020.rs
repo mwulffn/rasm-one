@@ -4,16 +4,20 @@
 use std::error::Error;
 
 use rasm_one::{
-    assemble, write_bin, write_hunk_exe, write_hunk_object, Cpu, MemoryProvider, Options,
+    assemble, write_bin, write_hunk_exe, write_hunk_object, Cpu, MemoryProvider, Options, Target,
 };
 use rasm_oracle::{Format, Vasm};
 
 fn assembled(source: &str, cpu: Cpu, fixed_addresses: bool) -> rasm_one::Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    let mut options = Options::new("t.s");
+    let mut options = Options::unoptimised("t.s");
     options.cpu = cpu;
-    options.fixed_addresses = fixed_addresses;
+    options.target = if fixed_addresses {
+        Target::RawBinary
+    } else {
+        Target::Relocatable
+    };
     assemble(&options, &files)
 }
 

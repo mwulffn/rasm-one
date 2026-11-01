@@ -2,10 +2,10 @@
 
 use std::fs;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use rasm_one::{
     assemble, write_bin, write_hunk_exe_with, write_hunk_object, write_listing, Cpu, FileError,
-    FileProvider, FpuChoice, HunkExeOptions, Optimisations, Options, Severity,
+    FileProvider, FpuChoice, HunkExeOptions, Optimisations, Options, Rule, Severity, Target,
 };
 
 const USAGE: &str =
@@ -56,12 +56,15 @@ fn apply_optimisation_flag(
     };
     if rule.is_empty() {
         optimisations.set_all_rules(on);
-    } else {
-        let number = Optimisations::rule_named(rule)
-            .ok_or_else(|| anyhow!("unknown option {arg}\n{USAGE}"))?;
-        if !optimisations.set_rule(number, on) {
-            eprintln!("warning: optimisation rule {number} doesn't exist yet, so {arg} is ignored");
-        }
+        return Ok(());
+    }
+    let is_letter = rule.len() == 1 && rule.bytes().all(|byte| byte.is_ascii_lowercase());
+    if !is_letter && !rule.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("unknown option {arg}\n{USAGE}");
+    }
+    match Rule::named(rule) {
+        Some(rule) => optimisations.set_rule(rule, on),
+        None => eprintln!("warning: optimisation {rule} doesn't exist yet, so {arg} is ignored"),
     }
     Ok(())
 }
@@ -129,7 +132,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             fpu,
             mmu_68851,
             optimisations: if no_opt {
-                Optimisations::default()
+                Optimisations::off()
             } else {
                 optimisations
             },
@@ -146,10 +149,14 @@ fn main() -> Result<()> {
     options.fpu = args.fpu;
     options.mmu_68851 = args.mmu_68851;
     options.optimisations = args.optimisations;
-    options.fixed_addresses = args.format == Format::Bin;
+    options.target = if args.format == Format::Bin {
+        Target::RawBinary
+    } else {
+        Target::Relocatable
+    };
     let assembly = assemble(&options, &NativeProvider);
     if let Some(path) = &args.listing {
-        let text = write_listing(&assembly, &NativeProvider);
+        let text = write_listing(&assembly);
         fs::write(path, text).with_context(|| format!("writing {path}"))?;
     }
     for diagnostic in &assembly.diagnostics {
@@ -200,14 +207,14 @@ mod tests {
         assert_eq!(parse(&["a.s", "-o", "x"])?.format, Format::HunkExe);
         assert_eq!(parse(&["a.s", "-o", "x", "-Fbin"])?.format, Format::Bin);
         let on = parse(&["a.s", "-o", "x", "-opt-o-", "-opt-o1+"])?.optimisations;
-        assert!(on.enabled);
+        assert!(on.enabled());
         assert_eq!(
             parse(&["a.s", "-o", "x"])?.optimisations,
             Optimisations::all()
         );
         let off = parse(&["-opt-o1+", "a.s", "-o", "x", "-no-opt"])?.optimisations;
-        assert!(!off.enabled);
-        assert!(parse(&["a.s", "-o", "x", "-opt-ox+"]).is_err());
+        assert!(!off.enabled());
+        assert!(parse(&["a.s", "-o", "x", "-opt-oxy+"]).is_err());
         Ok(())
     }
 

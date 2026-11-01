@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use rasm_one::{
     assemble, write_bin, write_hunk_exe, write_hunk_exe_with, write_hunk_object, write_listing,
-    Assembly, Cpu, FpuChoice, HunkExeOptions, MemoryProvider, Options,
+    Assembly, Cpu, FpuChoice, HunkExeOptions, MemoryProvider, Optimisations, Options, Target,
 };
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -27,6 +27,7 @@ pub struct Project {
     cpu: Option<Cpu>,
     has_coprocessor: bool,
     has_68851: bool,
+    unoptimised: bool,
 }
 
 #[wasm_bindgen]
@@ -63,12 +64,24 @@ impl Project {
         self.has_68851 = present;
     }
 
+    /// Whether to optimise as vasm does by default, which is on unless this says otherwise.
+    pub fn set_optimise(&mut self, on: bool) {
+        self.unoptimised = !on;
+    }
+
     /// Assembles `main` into `format`: `"hunkexe"`, `"hunkexe-kick1"` (which also
     /// loads on Kickstart 1.x), `"hunk"` or `"bin"`.
     pub fn assemble(&self, main: &str, format: &str) -> AssemblyResult {
         let mut options = Options::new(main);
         options.include_dirs = self.include_dirs.clone();
-        options.fixed_addresses = format == "bin";
+        options.target = if format == "bin" {
+            Target::RawBinary
+        } else {
+            Target::Relocatable
+        };
+        if self.unoptimised {
+            options.optimisations = Optimisations::off();
+        }
         if let Some(cpu) = self.cpu {
             options.cpu = cpu;
         }
@@ -95,7 +108,6 @@ impl Project {
             bytes,
             report: report::to_json(&assembly, output_error.as_deref()),
             assembly,
-            files: Rc::clone(&self.files),
         }
     }
 }
@@ -106,7 +118,6 @@ pub struct AssemblyResult {
     bytes: Vec<u8>,
     report: String,
     assembly: Assembly,
-    files: Rc<MemoryProvider>,
 }
 
 #[wasm_bindgen]
@@ -123,7 +134,7 @@ impl AssemblyResult {
 
     /// A human-readable listing, made when asked for since it costs time.
     pub fn listing(&self) -> String {
-        write_listing(&self.assembly, self.files.as_ref())
+        write_listing(&self.assembly)
     }
 }
 

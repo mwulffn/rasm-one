@@ -14,13 +14,17 @@ pub struct Span {
     pub file: FileId,
     /// Line number.
     pub line: u32,
-    /// Column of the first byte.
+    /// Column of the first byte, or 1 for the whole line if macro parameters changed its
+    /// text, so that no column in the source matches.
     pub col: u32,
     /// Length in bytes.
     pub len: u32,
 }
 
 /// The only route by which the library reads files.
+///
+/// This is synchronous, because assembling is. In a browser, give it files that are already
+/// in memory, or run it in a worker with synchronous file access.
 pub trait FileProvider {
     /// Returns the contents of `path`. `including_file` is the file that
     /// asked for it, or `None` for the main source.

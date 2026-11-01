@@ -19,6 +19,9 @@ pub enum FileError {
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OutputError {
+    /// The assembly was made for a different kind of output, in [`crate::Options::target`].
+    #[error("this was assembled for a different kind of output")]
+    WrongTarget,
     /// Assembly reported errors, so no output can be written.
     #[error("assembly has errors")]
     HasErrors,
