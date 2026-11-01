@@ -85,6 +85,21 @@ impl Vasm {
         self.assemble_with_files(source, cpu, format, &[])
     }
 
+    /// Like [`Vasm::assemble`], with extra command-line arguments.
+    pub fn assemble_with_args(
+        &self,
+        source: &str,
+        cpu: &str,
+        format: Format,
+        args: &[&str],
+    ) -> Result<Output, OracleError> {
+        let dir = unique_temp_dir()?;
+        let result = self.run_in(&dir, source, cpu, format, args);
+        // Best effort: a leftover temp dir must not fail the test.
+        let _ = fs::remove_dir_all(&dir);
+        result
+    }
+
     /// Like [`Vasm::assemble`], with extra files beside the source, given as
     /// relative paths and contents.
     pub fn assemble_with_files(
@@ -95,7 +110,8 @@ impl Vasm {
         files: &[(&str, &[u8])],
     ) -> Result<Output, OracleError> {
         let dir = unique_temp_dir()?;
-        let result = write_files(&dir, files).and_then(|()| self.run_in(&dir, source, cpu, format));
+        let result =
+            write_files(&dir, files).and_then(|()| self.run_in(&dir, source, cpu, format, &[]));
         // Best effort: a leftover temp dir must not fail the test.
         let _ = fs::remove_dir_all(&dir);
         result
@@ -107,6 +123,7 @@ impl Vasm {
         source: &str,
         cpu: &str,
         format: Format,
+        args: &[&str],
     ) -> Result<Output, OracleError> {
         fs::write(dir.join(SOURCE_NAME), source)?;
         let out = Command::new(&self.path)
@@ -114,6 +131,7 @@ impl Vasm {
             .args(["-quiet", "-no-opt", "-maxerrors=0"])
             .arg(format!("-m{cpu}"))
             .arg(format.flag())
+            .args(args)
             .args(["-o", "out", SOURCE_NAME])
             .output()?;
         let bytes = match fs::read(dir.join("out")) {

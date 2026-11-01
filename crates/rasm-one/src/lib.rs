@@ -132,7 +132,7 @@ mod types;
 
 pub use error::{Diagnostic, FileError, OutputError, Related, Severity};
 pub use output::bin::write_bin;
-pub use output::hunk::{write_hunk_exe, write_hunk_object};
+pub use output::hunk::{write_hunk_exe, write_hunk_exe_with, write_hunk_object, HunkExeOptions};
 pub use output::listing::write_listing;
 pub use source::{FileId, FileProvider, MemoryProvider, Span};
 pub use types::{Cpu, CpuSet, MemKind, SectionKind, Size};

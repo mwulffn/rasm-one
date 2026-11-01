@@ -11,7 +11,8 @@
 mod report;
 
 use rasm_one::{
-    assemble, write_bin, write_hunk_exe, write_hunk_object, write_listing, MemoryProvider, Options,
+    assemble, write_bin, write_hunk_exe, write_hunk_exe_with, write_hunk_object, write_listing,
+    HunkExeOptions, MemoryProvider, Options,
 };
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -41,13 +42,18 @@ impl Project {
         self.include_dirs.push(directory.to_string());
     }
 
-    /// Assembles `main` into `format`: `"hunkexe"`, `"hunk"` or `"bin"`.
+    /// Assembles `main` into `format`: `"hunkexe"`, `"hunkexe-kick1"` (which also
+    /// loads on Kickstart 1.x), `"hunk"` or `"bin"`.
     pub fn assemble(&self, main: &str, format: &str) -> AssemblyResult {
         let mut options = Options::new(main);
         options.include_dirs = self.include_dirs.clone();
         let assembly = assemble(&options, &self.files);
         let output = match format {
             "hunkexe" => write_hunk_exe(&assembly).map_err(|error| error.to_string()),
+            "hunkexe-kick1" => {
+                let options = HunkExeOptions { kickstart1: true };
+                write_hunk_exe_with(&assembly, options).map_err(|error| error.to_string())
+            }
             "hunk" => write_hunk_object(&assembly).map_err(|error| error.to_string()),
             "bin" => write_bin(&assembly).map_err(|error| error.to_string()),
             other => Err(format!("unknown format {other}")),
