@@ -17,7 +17,11 @@ jobs:
       - run: echo "RASM_VASM=$(scripts/fetch-vasm.sh)" >> "$GITHUB_ENV"
       - run: pipx install 'amitools[vamos]==0.8.1'
       - run: echo "RASM_VAMOS=$(command -v vamos)" >> "$GITHUB_ENV"
-      - run: cargo test --workspace
+      - run: sudo apt-get update && sudo apt-get install -y lhasa
+      - run: echo "RASM_CORPUS=$(scripts/fetch-corpus.sh)" >> "$GITHUB_ENV"
+      # The sweep takes minutes unoptimised, so it runs only in the release build.
+      - run: cargo test --workspace -- --skip test_assemble_sweep
+      - run: cargo test --release -p rasm-one --test sweep_cpus
       - run: cargo test --release -p rasm-one --test perf_budget -- --nocapture
       - run: cargo build -p rasm-one -p rasm-one-wasm --target wasm32-unknown-unknown
       - run: scripts/wasm-smoke.sh

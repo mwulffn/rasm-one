@@ -551,6 +551,14 @@ fn full_reg(mode: &Mode) -> u16 {
 }
 
 pub(crate) fn encode(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
+    let first_reloc = ctx.relocs.len();
+    encode_fields(insn, span, ctx);
+    // vasm lists an instruction's relocations last field first. Only the order
+    // in the output file shows this.
+    ctx.relocs[first_reloc..].reverse();
+}
+
+fn encode_fields(insn: &Instruction, span: Span, ctx: &mut EmitContext) {
     ctx.instruction_start = ctx.offset();
     let resolved = with_growth_resolved(insn, &sizer_for(ctx));
     let insn = resolved.as_ref().unwrap_or(insn);
@@ -1330,7 +1338,6 @@ fn emit_full(full: &FullMode, plan: FullPlan, span: Span, ctx: &mut EmitContext)
             | width_code(plan.base) << 4
             | selection,
     );
-    let first_reloc = ctx.relocs.len();
     if let (Some(disp), Some(width)) = (&full.base_disp, plan.base) {
         let star = ctx.star();
         let value = ctx.evaluate(&disp.expr, star, span);
@@ -1347,16 +1354,10 @@ fn emit_full(full: &FullMode, plan: FullPlan, span: Span, ctx: &mut EmitContext)
             emit_plain_disp(value, width, span, ctx);
         }
     }
-    let before_outer = ctx.relocs.len();
     if let (Some(disp), Some(width)) = (&full.outer_disp, plan.outer) {
         let star = ctx.star();
         let value = ctx.evaluate(&disp.expr, star, span);
         emit_plain_disp(value, width, span, ctx);
-    }
-    // vasm lists the outer displacement's relocation first, which only shows in
-    // the order of an object file's external references.
-    if ctx.relocs.len() > before_outer && before_outer > first_reloc {
-        ctx.relocs[first_reloc..].rotate_right(1);
     }
 }
 

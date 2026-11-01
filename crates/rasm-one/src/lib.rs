@@ -232,7 +232,8 @@ pub struct Section {
     pub dummy: bool,
     /// Contents.
     pub data: Vec<u8>,
-    /// Relocations, in the order vasm would list them: by source position.
+    /// Relocations, in the order vasm lists them: by source position, and last
+    /// field first within an instruction.
     pub relocs: Vec<Reloc>,
 }
 
