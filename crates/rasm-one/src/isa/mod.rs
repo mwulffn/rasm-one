@@ -29,6 +29,11 @@ pub(crate) enum Mode {
     PcDisp(Expr),
     PcIndex(Expr, IndexReg),
     Immediate(Expr),
+    Sr,
+    Ccr,
+    Usp,
+    /// Bit 0 is D0 and bit 15 is A7.
+    RegList(u16),
 }
 
 impl Mode {
@@ -48,6 +53,10 @@ impl Mode {
             Mode::PcDisp(_) => EaSet::PC_DISP,
             Mode::PcIndex(..) => EaSet::PC_INDEX,
             Mode::Immediate(_) => EaSet::IMM,
+            Mode::Sr => EaSet::SR,
+            Mode::Ccr => EaSet::CCR,
+            Mode::Usp => EaSet::USP,
+            Mode::RegList(_) => EaSet::LIST,
         }
     }
 }

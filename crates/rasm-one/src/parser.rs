@@ -46,6 +46,9 @@ enum Reg {
     Data(u8),
     Addr(u8),
     Pc,
+    Sr,
+    Ccr,
+    Usp,
 }
 
 fn parse_reg(name: &str) -> Option<Reg> {
@@ -53,8 +56,12 @@ fn parse_reg(name: &str) -> Option<Reg> {
     if lower == "sp" {
         return Some(Reg::Addr(7));
     }
-    if lower == "pc" {
-        return Some(Reg::Pc);
+    match lower.as_str() {
+        "pc" => return Some(Reg::Pc),
+        "sr" => return Some(Reg::Sr),
+        "ccr" => return Some(Reg::Ccr),
+        "usp" => return Some(Reg::Usp),
+        _ => {}
     }
     match lower.as_bytes() {
         [b'd', n @ b'0'..=b'7'] => Some(Reg::Data(n - b'0')),
@@ -424,6 +431,8 @@ impl LineParser<'_, '_> {
             if rows.iter().all(|r| r.operands.is_empty()) {
                 return self.select_row(mnemonic, rows, None, Vec::new(), span);
             }
+            let operands = self.parse_operands()?;
+            return self.select_row(mnemonic, rows, None, operands, span);
         }
         if let Some(size) = size {
             if !rows.iter().any(|r| r.sizes.contains(&size)) {
@@ -511,13 +520,19 @@ impl LineParser<'_, '_> {
         }
         if let Tok::Ident(name) = self.peek()? {
             match parse_reg(name) {
-                Some(Reg::Data(n)) => {
+                Some(Reg::Data(n)) => return self.parse_after_register(n, Mode::DataReg(n)),
+                Some(Reg::Addr(n)) => return self.parse_after_register(n + 8, Mode::AddrReg(n)),
+                Some(Reg::Sr) => {
                     self.advance()?;
-                    return Ok(Mode::DataReg(n));
+                    return Ok(Mode::Sr);
                 }
-                Some(Reg::Addr(n)) => {
+                Some(Reg::Ccr) => {
                     self.advance()?;
-                    return Ok(Mode::AddrReg(n));
+                    return Ok(Mode::Ccr);
+                }
+                Some(Reg::Usp) => {
+                    self.advance()?;
+                    return Ok(Mode::Usp);
                 }
                 _ => {}
             }
@@ -540,6 +555,40 @@ impl LineParser<'_, '_> {
                 "an absolute address is .w or .l",
                 self.lexer.pos(),
             )),
+        }
+    }
+
+    /// Having peeked a register numbered 0-15, returns `single` unless a
+    /// register list follows.
+    fn parse_after_register(&mut self, first: u8, single: Mode) -> Result<Mode, Diagnostic> {
+        self.advance()?;
+        if !self.peek_is(Punct::Minus)? && !self.peek_is(Punct::Slash)? {
+            return Ok(single);
+        }
+        let mut mask: u16 = 0;
+        let mut low = first;
+        loop {
+            let mut high = low;
+            if self.eat(Punct::Minus)? {
+                high = self.parse_list_register()?;
+            }
+            // A range may run in either direction and across register kinds.
+            for n in low.min(high)..=low.max(high) {
+                mask |= 1 << n;
+            }
+            if !self.eat(Punct::Slash)? {
+                return Ok(Mode::RegList(mask));
+            }
+            low = self.parse_list_register()?;
+        }
+    }
+
+    fn parse_list_register(&mut self) -> Result<u8, Diagnostic> {
+        let start = self.lexer.pos();
+        match self.eat_ident()?.as_deref().and_then(parse_reg) {
+            Some(Reg::Data(n)) => Ok(n),
+            Some(Reg::Addr(n)) => Ok(n + 8),
+            _ => Err(self.error_at("syntax", "register expected in list", start)),
         }
     }
 
