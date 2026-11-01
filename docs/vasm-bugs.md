@@ -177,3 +177,14 @@ becomes a correct `lea`. `test_assemble_subtracting_8000_from_address_register_s
 writes `not.b d0`, with no message.
 
 **rasm-one:** stays an error. `test_assemble_eor_byte_out_of_range_stays_an_error`.
+
+## 16. Narrowing a float constant loses bits
+
+**Source:** `fmove.x #1.1,fp0` with `-opt-of+`.
+
+**Bug:** vasm writes `fmove.d`, with the nearest double. Its documentation says this happens at
+the same precision, but 1.1 isn't exact in a double, so the value changes. It also turns `1e400`
+into a double infinity and `1e-400` into `0`, both of which an extended holds as ordinary values.
+
+**rasm-one:** narrows only if the value is exact.
+`test_assemble_extended_float_stays_extended_when_it_would_lose_bits`.

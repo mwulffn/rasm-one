@@ -291,6 +291,115 @@ pub(crate) fn float_bytes(text: &str, size: Size) -> Option<Vec<u8>> {
     }
 }
 
+/// The lowest precision that holds a value exactly, as raw bits for that format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Narrowed {
+    Word(i64),
+    Single(i64),
+    Double(i64),
+}
+
+/// A finite non-zero value as a sign, a mantissa with its top bit set, and the exponent of
+/// that top bit.
+fn decode(bytes: &[u8]) -> Option<(bool, u64, i32)> {
+    let word = |range: std::ops::Range<usize>| {
+        bytes
+            .get(range)?
+            .iter()
+            .try_fold(0u64, |value, byte| Some(value << 8 | u64::from(*byte)))
+    };
+    let (sign, mantissa, exponent) = match bytes.len() {
+        4 => {
+            let bits = word(0..4)?;
+            let exponent = (bits >> 23 & 0xFF) as i32;
+            if exponent == 0 || exponent == 0xFF {
+                return None;
+            }
+            let mantissa = (bits & 0x7F_FFFF | 0x80_0000) << 40;
+            (bits >> 31 == 1, mantissa, exponent - 127)
+        }
+        8 => {
+            let bits = word(0..8)?;
+            let exponent = (bits >> 52 & 0x7FF) as i32;
+            if exponent == 0 || exponent == 0x7FF {
+                return None;
+            }
+            let mantissa = (bits & 0xF_FFFF_FFFF_FFFF | 1 << 52) << 11;
+            (bits >> 63 == 1, mantissa, exponent - 1023)
+        }
+        12 => {
+            let top = word(0..2)?;
+            let exponent = (top & 0x7FFF) as i32;
+            let mantissa = word(4..12)?;
+            if exponent == 0x7FFF || mantissa >> 63 == 0 {
+                return None;
+            }
+            (top >> 15 == 1, mantissa, exponent - 16383)
+        }
+        _ => return None,
+    };
+    Some((sign, mantissa, exponent))
+}
+
+fn single_bits(negative: bool, mantissa: u64, exponent: i32) -> Option<i64> {
+    let fits = mantissa.trailing_zeros() >= 40 && (-126..=127).contains(&exponent);
+    fits.then(|| {
+        let fraction = (mantissa << 1) >> 41;
+        let biased = (exponent + 127) as u64;
+        ((u64::from(negative) << 31) | biased << 23 | fraction) as i64
+    })
+}
+
+fn double_bits(negative: bool, mantissa: u64, exponent: i32) -> Option<i64> {
+    let fits = mantissa.trailing_zeros() >= 11 && (-1022..=1023).contains(&exponent);
+    fits.then(|| {
+        let fraction = (mantissa << 1) >> 12;
+        let biased = (exponent + 1023) as u64;
+        ((u64::from(negative) << 63) | biased << 52 | fraction) as i64
+    })
+}
+
+/// What a literal of this size can be written as instead, if anything. Unlike vasm this
+/// never loses bits: see vasm-bugs.md.
+pub(crate) fn narrowed(text: &str, size: Size) -> Option<Narrowed> {
+    if !matches!(size, Size::Single | Size::Double | Size::Extended) {
+        return None;
+    }
+    let bytes = float_bytes(text, size)?;
+    if bytes.iter().all(|byte| *byte & 0x7F == 0) && bytes[1..].iter().all(|byte| *byte == 0) {
+        return Some(Narrowed::Word(0));
+    }
+    let (negative, mantissa, exponent) = decode(&bytes)?;
+    if (0..=15).contains(&exponent) && mantissa.trailing_zeros() >= (63 - exponent) as u32 {
+        let magnitude = (mantissa >> (63 - exponent)) as i64;
+        let value = if negative { -magnitude } else { magnitude };
+        if (-0x8000..=0x7FFF).contains(&value) {
+            return Some(Narrowed::Word(value));
+        }
+    }
+    if size != Size::Single {
+        if let Some(bits) = single_bits(negative, mantissa, exponent) {
+            return Some(Narrowed::Single(bits));
+        }
+    }
+    if size == Size::Extended {
+        if let Some(bits) = double_bits(negative, mantissa, exponent) {
+            return Some(Narrowed::Double(bits));
+        }
+    }
+    None
+}
+
+/// The bits of a single that holds one over a power of two, if this literal is one.
+pub(crate) fn reciprocal_of_power_of_two(text: &str, size: Size) -> Option<i64> {
+    let bytes = float_bytes(text, size)?;
+    let (negative, mantissa, exponent) = decode(&bytes)?;
+    if mantissa != 1 << 63 {
+        return None;
+    }
+    single_bits(negative, mantissa, -exponent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

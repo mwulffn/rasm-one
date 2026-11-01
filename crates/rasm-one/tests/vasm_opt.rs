@@ -1058,6 +1058,94 @@ fn test_assemble_pc_relative_matches_vasm_all_rules() -> Result<(), Box<dyn Erro
     compare_rule(&sources, &ALL, false)
 }
 
+const FLOAT: Rule = Rule {
+    number: 18,
+    flag: "-opt-of+",
+};
+
+#[test]
+fn test_assemble_float_constants_match_vasm_of() -> Result<(), Box<dyn Error>> {
+    let values = [
+        "0",
+        "1",
+        "-1",
+        "1.0",
+        "1.5",
+        "0.5",
+        "-2.5",
+        "100",
+        "100.0",
+        "32767",
+        "32768",
+        "-32768",
+        "-32769",
+        "65535",
+        "65536",
+        "16777216",
+        "1e10",
+        "2147483648",
+        "4.0",
+        "4",
+        "3.0",
+        "-2.0",
+        "8",
+        "0.25",
+        "$10",
+        "$7fffffff",
+        "z",
+    ];
+    let mut sources = Vec::new();
+    for size in ["s", "d", "x", "b", "w", "l"] {
+        for value in values {
+            // `fmove.l #1.5` is vasm bug 7.
+            if size == "l" && (value.contains('.') || value.contains('e')) {
+                continue;
+            }
+            for form in [
+                format!(" fmove.{size} #{value},fp0"),
+                format!(" fadd.{size} #{value},fp1"),
+                format!(" fmul.{size} #{value},fp0"),
+                format!(" fcmp.{size} #{value},fp0"),
+                format!(" fdiv.{size} #{value},fp0"),
+                format!(" fsdiv.{size} #{value},fp0"),
+                format!(" fddiv.{size} #{value},fp0"),
+                format!(" fsgldiv.{size} #{value},fp0"),
+                format!(" ftst.{size} #{value}"),
+                format!(" fsmove.{size} #{value},fp0"),
+            ] {
+                sources.push(format!("{form}\nz equ 7"));
+            }
+        }
+    }
+    sources.push(" fmove #1.0,fp0".to_string());
+    sources.push(" fmove.s #1.1,fp0".to_string());
+    sources.push(" fmove.d #1.1,fp0".to_string());
+    sources.push(" fmove.d #0.1,fp0".to_string());
+    sources.push(" opt of-\n fmove.d #1.0,fp0".to_string());
+    sources.push(" opt of+\n fmove.d #1.0,fp0".to_string());
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for source in &sources {
+        failures.extend(compare(&vasm, source, "68040", Format::Bin, &FLOAT, false)?);
+    }
+    assert!(
+        failures.is_empty(),
+        "{} differences:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
+
+/// vasm goes through a double, so narrowing loses bits. See vasm-bugs.md.
+#[test]
+fn test_assemble_extended_float_stays_extended_when_it_would_lose_bits() {
+    let bytes = ours(" fmove.x #1.1,fp0", "68040", Format::Bin, &FLOAT, false);
+    assert_eq!(bytes.ok().map(|bytes| bytes.len()), Some(16));
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 

@@ -8,7 +8,7 @@ use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
-use crate::float::FloatLiteral;
+use crate::float::{self, FloatLiteral, Narrowed};
 use crate::isa::encode::{BranchForm, Instruction, QuickMoves, Rewrites};
 use crate::isa::table::{
     rows_for, Coprocessor, EaSet, Encoding, InsnRow, MmuRegisterHome, CONTROL_REGISTERS,
@@ -22,7 +22,7 @@ use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
 use crate::{
     Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_ADD_TO_LEA,
-    RULE_BRANCHES, RULE_DISPLACEMENTS, RULE_GENERIC, RULE_LEA_TO_QUICK, RULE_NULL_BASE,
+    RULE_BRANCHES, RULE_DISPLACEMENTS, RULE_FLOAT, RULE_GENERIC, RULE_LEA_TO_QUICK, RULE_NULL_BASE,
     RULE_NULL_OUTER, RULE_PC_RELATIVE, RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES, RULE_SHORT_NEXT,
     RULE_WORD_IMMEDIATE,
 };
@@ -2788,6 +2788,7 @@ impl LineParser<'_, '_, '_> {
                 }
             }
         }
+        let (row, size, operands) = self.narrow_float(mnemonic, row, size, operands);
         Ok(Instruction {
             row,
             from_jump,
@@ -2817,6 +2818,64 @@ impl LineParser<'_, '_, '_> {
                 && self.parser.current == self.parser.implicit_section,
             mmu_68851: self.parser.mmu_68851,
         })
+    }
+
+    /// Writes a float constant in the lowest precision that holds it, under its rule, and
+    /// turns a division by a power of two into a multiplication.
+    fn narrow_float(
+        &self,
+        mnemonic: &str,
+        row: &'static InsnRow,
+        size: Option<Size>,
+        mut operands: Vec<Operand>,
+    ) -> (&'static InsnRow, Option<Size>, Vec<Operand>) {
+        let written = size.or(row.default_size);
+        let (
+            true,
+            Some(written),
+            Some(Operand {
+                mode: Mode::Float(literal),
+                ..
+            }),
+        ) = (
+            self.parser.optimisations.rule(RULE_FLOAT),
+            written,
+            operands.first(),
+        )
+        else {
+            return (row, size, operands);
+        };
+        // Like vasm, `ftst` keeps what it was given.
+        if mnemonic == "ftst" {
+            return (row, size, operands);
+        }
+        let multiplication = match mnemonic {
+            "fdiv" => Some("fmul"),
+            "fsdiv" => Some("fsmul"),
+            "fddiv" => Some("fdmul"),
+            "fsgldiv" => Some("fsglmul"),
+            _ => None,
+        };
+        let same_row = |name: &str, size: Size| {
+            rows_for(name)?
+                .iter()
+                .find(|other| other.encoding == row.encoding && other.sizes.contains(&size))
+        };
+        let reciprocal = multiplication
+            .and_then(|name| same_row(name, Size::Single))
+            .zip(float::reciprocal_of_power_of_two(&literal.text, written));
+        let (new_row, new_size, bits) = if let Some((other, bits)) = reciprocal {
+            (other, Size::Single, bits)
+        } else {
+            match float::narrowed(&literal.text, written) {
+                Some(Narrowed::Word(value)) => (row, Size::Word, value),
+                Some(Narrowed::Single(bits)) => (row, Size::Single, bits),
+                Some(Narrowed::Double(bits)) => (row, Size::Double, bits),
+                None => return (row, size, operands),
+            }
+        };
+        operands[0].mode = Mode::Immediate(Expr::Num(bits));
+        (new_row, Some(new_size), operands)
     }
 
     /// What an instruction can be rewritten as, under the rules that apply.
