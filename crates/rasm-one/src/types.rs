@@ -127,7 +127,7 @@ pub enum SectionKind {
 
 /// Amiga memory requirement of a section.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemKind {
     /// No requirement.
     Any,

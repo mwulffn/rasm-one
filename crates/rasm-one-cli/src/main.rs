@@ -4,12 +4,13 @@ use std::fs;
 
 use anyhow::{bail, Context, Result};
 use rasm_one::{
-    assemble, write_bin, write_hunk_exe_with, write_hunk_object, write_listing, Cpu, FileError,
-    FileProvider, FpuChoice, HunkExeOptions, Optimisations, Options, Rule, Severity, Target,
+    assemble, link, write_bin, write_hunk_exe_with, write_hunk_object, write_listing, Cpu,
+    FileError, FileProvider, FpuChoice, HunkExeOptions, Optimisations, Options, Rule, Severity,
+    Target,
 };
 
 const USAGE: &str =
-    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...";
+    "usage: rasm-one <source>... -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -31,7 +32,7 @@ enum Format {
 }
 
 struct Args {
-    source: String,
+    sources: Vec<String>,
     output: String,
     format: Format,
     include_dirs: Vec<String>,
@@ -70,7 +71,8 @@ fn apply_optimisation_flag(
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
-    let (mut source, mut output) = (None, None);
+    let mut sources = Vec::new();
+    let mut output = None;
     let mut format = Format::HunkExe;
     let mut include_dirs = Vec::new();
     let mut listing = None;
@@ -116,34 +118,39 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             cpu = found;
         } else if arg.starts_with('-') {
             bail!("unknown option {arg}\n{USAGE}");
-        } else if source.replace(arg).is_some() {
-            bail!("more than one source file\n{USAGE}");
+        } else {
+            sources.push(arg);
         }
     }
-    match (source, output) {
-        (Some(source), Some(output)) => Ok(Args {
-            source,
-            output,
-            format,
-            include_dirs,
-            listing,
-            kickstart1,
-            cpu,
-            fpu,
-            mmu_68851,
-            optimisations: if no_opt {
-                Optimisations::off()
-            } else {
-                optimisations
-            },
-        }),
+    match output {
+        Some(output) if !sources.is_empty() => {
+            if sources.len() > 1 && format != Format::HunkExe {
+                bail!("only an executable can be made from more than one source\n{USAGE}");
+            }
+            Ok(Args {
+                sources,
+                output,
+                format,
+                include_dirs,
+                listing,
+                kickstart1,
+                cpu,
+                fpu,
+                mmu_68851,
+                optimisations: if no_opt {
+                    Optimisations::off()
+                } else {
+                    optimisations
+                },
+            })
+        }
         _ => bail!("{USAGE}"),
     }
 }
 
 fn main() -> Result<()> {
     let args = parse_args(std::env::args().skip(1))?;
-    let mut options = Options::new(args.source);
+    let mut options = Options::new("");
     options.include_dirs = args.include_dirs;
     options.cpu = args.cpu;
     options.fpu = args.fpu;
@@ -154,7 +161,19 @@ fn main() -> Result<()> {
     } else {
         Target::Relocatable
     };
-    let assembly = assemble(&options, &NativeProvider);
+    let mut assemblies: Vec<_> = args
+        .sources
+        .iter()
+        .map(|source| {
+            let mut options = options.clone();
+            options.main = source.clone();
+            assemble(&options, &NativeProvider)
+        })
+        .collect();
+    let assembly = match assemblies.len() {
+        1 => assemblies.remove(0),
+        _ => link(&assemblies),
+    };
     if let Some(path) = &args.listing {
         let text = write_listing(&assembly);
         fs::write(path, text).with_context(|| format!("writing {path}"))?;
@@ -196,7 +215,7 @@ mod tests {
     fn test_parse_args_source_and_output() -> Result<()> {
         let args = parse(&["a.s", "-o", "a.bin"])?;
         assert_eq!(
-            (args.source.as_str(), args.output.as_str()),
+            (args.sources[0].as_str(), args.output.as_str()),
             ("a.s", "a.bin")
         );
         Ok(())
@@ -215,6 +234,8 @@ mod tests {
         let off = parse(&["-opt-o1+", "a.s", "-o", "x", "-no-opt"])?.optimisations;
         assert!(!off.enabled());
         assert!(parse(&["a.s", "-o", "x", "-opt-oxy+"]).is_err());
+        assert_eq!(parse(&["a.s", "b.s", "-o", "x"])?.sources.len(), 2);
+        assert!(parse(&["a.s", "b.s", "-o", "x", "-Fhunk"]).is_err());
         Ok(())
     }
 
@@ -243,7 +264,6 @@ mod tests {
     #[test]
     fn test_parse_args_rejects_bad_input() {
         assert!(parse(&["a.s"]).is_err());
-        assert!(parse(&["a.s", "b.s", "-o", "x"]).is_err());
         assert!(parse(&["-x", "a.s", "-o", "x"]).is_err());
     }
 }

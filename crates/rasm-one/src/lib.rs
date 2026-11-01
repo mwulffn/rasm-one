@@ -21,6 +21,26 @@
 //! assert_eq!(write_bin(&assembly), Ok(vec![0x4E, 0x71]));
 //! ```
 //!
+//! # Linking
+//!
+//! [`link`] joins assemblies of several sources into one, for [`write_hunk_exe`]. Its result
+//! keeps every file's lines and symbols, and reports problems as diagnostics. It takes
+//! assemblies, not hunk object files, and makes executables, not raw binaries.
+//!
+//! ```
+//! use rasm_one::{assemble, link, write_hunk_exe, MemoryProvider, Options};
+//!
+//! let mut files = MemoryProvider::new();
+//! files.insert("a.s", " xref b\n bsr b\n rts\n");
+//! files.insert("b.s", " xdef b\nb: rts\n");
+//! let inputs = [
+//!     assemble(&Options::new("a.s"), &files),
+//!     assemble(&Options::new("b.s"), &files),
+//! ];
+//! let linked = link(&inputs);
+//! assert!(write_hunk_exe(&linked).is_ok());
+//! ```
+//!
 //! # Diagnostics
 //!
 //! Each diagnostic has a stable code and, if it has a location, a [`Span`] for
@@ -130,12 +150,14 @@ mod float;
 mod isa;
 mod layout;
 mod lexer;
+mod link;
 mod output;
 mod parser;
 mod source;
 mod types;
 
 pub use error::{Diagnostic, FileError, OutputError, Related, Severity};
+pub use link::link;
 pub use output::bin::write_bin;
 pub use output::hunk::{write_hunk_exe, write_hunk_exe_with, write_hunk_object, HunkExeOptions};
 pub use output::listing::write_listing;

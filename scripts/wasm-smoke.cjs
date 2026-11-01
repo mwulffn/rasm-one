@@ -25,6 +25,13 @@ project.set_optimise(false);
 assert.strictEqual(hex(project.assemble("src/main.s", "bin").bytes()), "4e714e71303c12346000fffa");
 project.set_optimise(true);
 
+const linker = new Project();
+linker.add_file("a.s", encode(" xref b\n bsr b\n rts\n"));
+linker.add_file("b.s", encode(" xdef b\nb: rts\n"));
+const linked = linker.assemble_and_link(["a.s", "b.s"]);
+assert.strictEqual(JSON.parse(linked.report_json()).diagnostics.length, 0);
+assert.ok(hex(linked.bytes()).startsWith("000003f3"));
+
 const report = JSON.parse(binary.report_json());
 assert.strictEqual(report.outputError, null);
 assert.deepStrictEqual(report.diagnostics, []);

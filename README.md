@@ -9,7 +9,7 @@ issues for progress.
 Build with `cargo build --release`, which produces the `rasm-one` command:
 
 ```
-rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...
+rasm-one <source>... -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-m68000 ... -m68060] [-m68881 | -m68882 | -no-fpu] [-m68851] [-I<dir>]... [-L <listing>] [-no-opt | -opt-o+ | -opt-o- | -opt-o<rule>+ | -opt-o<rule>-]...
 ```
 
 | Option | Output |
@@ -37,6 +37,13 @@ the source: 1 to 5, 7 to 12, `g` and `f`. vasm's optional rules, which are off b
 here yet. Output is compared byte for byte with vasm in both modes, apart from rare layouts in
 [#56](https://github.com/mwulffn/rasm-one/issues/56). Where vasm has a bug, rasm-one does the
 correct thing instead; see `docs/vasm-bugs.md`.
+
+## Linking
+
+Give the command line several sources to get one executable: `rasm-one a.s b.s -o prog`. In the
+library, pass their assemblies to `link`, then `write_hunk_exe`. The linker doesn't read hunk
+object files or libraries yet, and it can't make raw binaries. It is compared with vlink by what a
+loader would put in memory, using `RASM_VLINK`.
 
 ## Testing
 

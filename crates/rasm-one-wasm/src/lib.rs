@@ -13,8 +13,9 @@ mod report;
 use std::rc::Rc;
 
 use rasm_one::{
-    assemble, write_bin, write_hunk_exe, write_hunk_exe_with, write_hunk_object, write_listing,
-    Assembly, Cpu, FpuChoice, HunkExeOptions, MemoryProvider, Optimisations, Options, Target,
+    assemble, link, write_bin, write_hunk_exe, write_hunk_exe_with, write_hunk_object,
+    write_listing, Assembly, Cpu, FpuChoice, HunkExeOptions, MemoryProvider, Optimisations,
+    Options, Target,
 };
 use wasm_bindgen::prelude::wasm_bindgen;
 
@@ -64,14 +65,7 @@ impl Project {
         self.has_68851 = present;
     }
 
-    /// Whether to optimise as vasm does by default, which is on unless this says otherwise.
-    pub fn set_optimise(&mut self, on: bool) {
-        self.unoptimised = !on;
-    }
-
-    /// Assembles `main` into `format`: `"hunkexe"`, `"hunkexe-kick1"` (which also
-    /// loads on Kickstart 1.x), `"hunk"` or `"bin"`.
-    pub fn assemble(&self, main: &str, format: &str) -> AssemblyResult {
+    fn options(&self, main: &str, format: &str) -> Options {
         let mut options = Options::new(main);
         options.include_dirs = self.include_dirs.clone();
         options.target = if format == "bin" {
@@ -89,6 +83,41 @@ impl Project {
         if self.has_coprocessor {
             options.fpu = FpuChoice::Coprocessor;
         }
+        options
+    }
+
+    fn result(assembly: Assembly, output: Result<Vec<u8>, String>) -> AssemblyResult {
+        let (bytes, output_error) = match output {
+            Ok(bytes) => (bytes, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
+        AssemblyResult {
+            bytes,
+            report: report::to_json(&assembly, output_error.as_deref()),
+            assembly,
+        }
+    }
+
+    /// Assembles each of `mains` and links them into a hunk executable.
+    pub fn assemble_and_link(&self, mains: Vec<String>) -> AssemblyResult {
+        let inputs: Vec<Assembly> = mains
+            .iter()
+            .map(|main| assemble(&self.options(main, "hunkexe"), self.files.as_ref()))
+            .collect();
+        let assembly = link(&inputs);
+        let output = write_hunk_exe(&assembly).map_err(|error| error.to_string());
+        Self::result(assembly, output)
+    }
+
+    /// Whether to optimise as vasm does by default, which is on unless this says otherwise.
+    pub fn set_optimise(&mut self, on: bool) {
+        self.unoptimised = !on;
+    }
+
+    /// Assembles `main` into `format`: `"hunkexe"`, `"hunkexe-kick1"` (which also
+    /// loads on Kickstart 1.x), `"hunk"` or `"bin"`.
+    pub fn assemble(&self, main: &str, format: &str) -> AssemblyResult {
+        let options = self.options(main, format);
         let assembly = assemble(&options, self.files.as_ref());
         let output = match format {
             "hunkexe" => write_hunk_exe(&assembly).map_err(|error| error.to_string()),
@@ -100,15 +129,7 @@ impl Project {
             "bin" => write_bin(&assembly).map_err(|error| error.to_string()),
             other => Err(format!("unknown format {other}")),
         };
-        let (bytes, output_error) = match output {
-            Ok(bytes) => (bytes, None),
-            Err(error) => (Vec::new(), Some(error)),
-        };
-        AssemblyResult {
-            bytes,
-            report: report::to_json(&assembly, output_error.as_deref()),
-            assembly,
-        }
+        Self::result(assembly, output)
     }
 }
 
