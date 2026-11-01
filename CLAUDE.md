@@ -46,6 +46,7 @@
 - Get vasm with `export RASM_VASM=$(scripts/fetch-vasm.sh)`. Never commit vasm or its sources (licence)
 - The linker is compared with vlink by what a loader would put in memory. Get it with `export RASM_VLINK=$(scripts/fetch-vlink.sh)`. Never commit it either
 - Without `RASM_VASM` or `RASM_VLINK`, differential tests skip locally and fail in CI. A green local run without it proves little
+- Set `RASM_VASM_CACHE=$PWD/target/vasm-cache` to keep the sweep's answers from vasm. It then takes seconds rather than minutes, and CI does the same, except in its daily run
 - The oracle runs vasm with `-no-opt`. Optimisations are added one rule at a time, each matched to its vasm flag (#20)
 - New instructions or addressing modes go in the sweep, not as hand-picked cases
 - Feed sources through `MemoryProvider`, not files on disk

@@ -2,7 +2,9 @@
 //!
 //! vasm's path comes from `RASM_VASM`; `scripts/fetch-vasm.sh` builds it.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -150,6 +152,40 @@ impl Vasm {
         result
     }
 
+    /// Like [`Vasm::assemble_with_args`], but keeps vasm's answer on disk, by a hash of the
+    /// vasm binary and everything given to it, and reuses it next time. vasm has no other
+    /// inputs, so the answer can't go stale. `RASM_VASM_CACHE` names the directory; without
+    /// it, vasm always runs.
+    pub fn assemble_cached(
+        &self,
+        source: &str,
+        cpu: &str,
+        format: Format,
+        args: &[&str],
+    ) -> Result<Output, OracleError> {
+        let Some(directory) = std::env::var_os("RASM_VASM_CACHE").map(PathBuf::from) else {
+            return self.assemble_with_args(source, cpu, format, args);
+        };
+        let mut hasher = DefaultHasher::new();
+        fs::read(&self.path)?.hash(&mut hasher);
+        (source, cpu, format.flag(), args).hash(&mut hasher);
+        let entry = directory.join(format!("{:016x}", hasher.finish()));
+        if let Some(output) = fs::read(&entry).ok().and_then(|data| decode_output(&data)) {
+            return Ok(output);
+        }
+        let output = self.assemble_with_args(source, cpu, format, args)?;
+        fs::create_dir_all(&directory)?;
+        // Written whole and then renamed, as other threads may want the same entry.
+        let partial = directory.join(format!(
+            "{:016x}.{:?}.tmp",
+            hasher.finish(),
+            std::thread::current().id()
+        ));
+        fs::write(&partial, encode_output(&output))?;
+        fs::rename(&partial, &entry)?;
+        Ok(output)
+    }
+
     /// Like [`Vasm::assemble_with_files`], with extra command-line arguments as in
     /// [`Vasm::assemble_with_args`].
     pub fn assemble_with_files_and_args(
@@ -218,11 +254,55 @@ fn unique_temp_dir() -> Result<PathBuf, std::io::Error> {
     Ok(dir)
 }
 
+fn encode_output(output: &Output) -> Vec<u8> {
+    let mut data = vec![u8::from(output.success)];
+    data.extend_from_slice(&(output.bytes.len() as u64).to_be_bytes());
+    data.extend_from_slice(&output.bytes);
+    data.extend_from_slice(output.stderr.as_bytes());
+    data
+}
+
+fn decode_output(data: &[u8]) -> Option<Output> {
+    let (success, rest) = data.split_first()?;
+    let (length, rest) = rest.split_first_chunk::<8>()?;
+    let length = usize::try_from(u64::from_be_bytes(*length)).ok()?;
+    let bytes = rest.get(..length)?.to_vec();
+    let stderr = String::from_utf8_lossy(rest.get(length..)?).into_owned();
+    Some(Output {
+        success: *success != 0,
+        bytes,
+        stderr,
+    })
+}
+
 /// Asking for optimisation rules replaces the usual `-no-opt`.
 fn no_opt_unless_optimising(args: &[&str]) -> &'static [&'static str] {
     if args.iter().any(|arg| arg.starts_with("-opt-")) {
         &[]
     } else {
         &["-no-opt"]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_output_reads_what_encode_output_wrote() {
+        let output = Output {
+            success: true,
+            bytes: vec![0x4E, 0x71],
+            stderr: "warning\n".to_string(),
+        };
+        let decoded = decode_output(&encode_output(&output));
+        assert!(decoded.is_some_and(|decoded| decoded.success
+            && decoded.bytes == output.bytes
+            && decoded.stderr == output.stderr));
+    }
+
+    #[test]
+    fn test_decode_output_refuses_a_cut_short_entry() {
+        assert!(decode_output(&[1, 0, 0]).is_none());
     }
 }

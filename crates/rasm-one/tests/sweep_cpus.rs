@@ -416,7 +416,7 @@ fn vasm_verdict(
             .collect::<Vec<_>>()
             .concat();
         let out = vasm
-            .assemble_with_args(&source, cpu, Format::Bin, &args)
+            .assemble_cached(&source, cpu, Format::Bin, &args)
             .map_err(|error| error.to_string())?;
         let mut found_errors = false;
         for message in out.stderr.lines() {
@@ -439,7 +439,7 @@ fn vasm_verdict(
                     for &index in &remaining {
                         if lines[index].contains(name) {
                             let alone = vasm
-                                .assemble_with_args(
+                                .assemble_cached(
                                     &format!("{}\n", lines[index]),
                                     cpu,
                                     Format::Bin,
@@ -561,7 +561,7 @@ fn sweep_machine(vasm: &Vasm, machine: &Machine, optimised: bool) -> Result<Stri
         .collect::<Vec<_>>()
         .concat();
     let theirs = vasm
-        .assemble_with_args(
+        .assemble_cached(
             &source,
             machine.name,
             Format::Bin,
