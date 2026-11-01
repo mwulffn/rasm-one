@@ -18,6 +18,7 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test --release -p rasm-one --test perf_budget -- --nocapture
       - run: cargo build -p rasm-one -p rasm-one-wasm --target wasm32-unknown-unknown
+      - run: scripts/wasm-smoke.sh
       - run: cargo doc -p rasm-one --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
