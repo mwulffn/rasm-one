@@ -17,7 +17,7 @@ jobs:
       - run: echo "RASM_VASM=$(scripts/fetch-vasm.sh)" >> "$GITHUB_ENV"
       - run: cargo test --workspace
       - run: cargo test --release -p rasm-one --test perf_budget -- --nocapture
-      - run: cargo build -p rasm-one --target wasm32-unknown-unknown
+      - run: cargo build -p rasm-one -p rasm-one-wasm --target wasm32-unknown-unknown
       - run: cargo doc -p rasm-one --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
