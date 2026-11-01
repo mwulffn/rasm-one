@@ -7,13 +7,18 @@ use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::FileError;
 use crate::error::{Diagnostic, Related};
 use crate::expr::{eval, Base, BinaryOp, Expr, SymId, UnaryOp, Value};
+use crate::float::FloatLiteral;
 use crate::isa::encode::Instruction;
-use crate::isa::table::{rows_for, InsnRow};
-use crate::isa::{IndexReg, Mode, Operand};
+use crate::isa::table::{
+    rows_for, Coprocessor, InsnRow, MmuRegisterHome, CONTROL_REGISTERS, CPU_020_UP, MMU_REGISTERS,
+};
+use crate::isa::{
+    BitFieldArg, FullBase, FullDisp, FullMode, IndexReg, Indirection, Mode, Operand, Width,
+};
 use crate::lexer::{LexError, Lexer, Punct, Tok};
 use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
-use crate::{Expansion, ExpansionKind};
+use crate::{Expansion, ExpansionKind, FpuChoice};
 
 /// A symbol being collected.
 #[derive(Debug, Clone)]
@@ -37,6 +42,8 @@ pub(crate) struct SectionEntry {
     pub mem: MemKind,
     /// Fixed address given by `org`.
     pub origin: Option<i64>,
+    /// True for an `offset` block, whose bytes are dropped.
+    pub dummy: bool,
 }
 
 /// Output of parsing.
@@ -49,6 +56,12 @@ pub(crate) struct Program {
     pub files: Vec<String>,
     /// Includes and macro expansions.
     pub expansions: Vec<Expansion>,
+    /// Name given by `idnt`.
+    pub unit_name: Option<String>,
+    /// True if labels are final addresses, as in a raw binary.
+    pub fixed_addresses: bool,
+    /// The limit on the size of the output.
+    pub max_output_bytes: i64,
     pub symbols: Vec<SymbolEntry>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -106,6 +119,26 @@ fn is_directive(name: &str) -> bool {
             | "rs"
             | "rsreset"
             | "rsset"
+            | "so"
+            | "clrso"
+            | "setso"
+            | "fo"
+            | "clrfo"
+            | "setfo"
+            | "offset"
+            | "idnt"
+            | "opt"
+            | "printt"
+            | "printv"
+            | "list"
+            | "nolist"
+            | "page"
+            | "nopage"
+            | "ttl"
+            | "spc"
+            | "llen"
+            | "plen"
+            | "echo"
             | "fail"
             | "end"
             | "include"
@@ -124,7 +157,10 @@ fn is_directive(name: &str) -> bool {
             | "elseif"
             | "endc"
             | "endif"
-    ) || is_if(name)
+    ) || name == "machine"
+        || name == "fpu"
+        || name.starts_with("mc680")
+        || is_if(name)
         || section_shortcut(name).is_some()
 }
 
@@ -140,13 +176,25 @@ fn section_shortcut(name: &str) -> Option<(&'static str, SectionKind, MemKind)> 
         "bss" => ("BSS", SectionKind::Bss, MemKind::Any),
         "bss_c" => ("BSS_C", SectionKind::Bss, MemKind::Chip),
         "bss_f" => ("BSS_F", SectionKind::Bss, MemKind::Fast),
+        "text" | "cseg" => ("CODE", SectionKind::Code, MemKind::Any),
+        "dseg" => ("DATA", SectionKind::Data, MemKind::Any),
         _ => return None,
     })
 }
 
-/// Macro calls nested deeper than this are an error. Calls recurse in the
+/// Macro calls, `rept` blocks and includes nested deeper than this are an error. Calls recurse in the
 /// parser, so this also protects the stack, which is small under WASM.
-const MAX_MACRO_DEPTH: usize = 200;
+const MAX_EXPANSION_DEPTH: usize = 200;
+
+/// Parentheses and unary operators nested deeper than this are an error, since
+/// parsing and evaluating them recurse.
+const MAX_EXPRESSION_DEPTH: usize = 32;
+
+/// Binary operators in one expression; each deepens the tree that is evaluated.
+const MAX_EXPRESSION_CHAIN: usize = 1000;
+
+/// The largest offset or alignment for `cnop`.
+const MAX_ALIGNMENT: i64 = 0x8000_0000;
 
 /// Name of the symbol holding the argument count during a macro.
 const NARG: &str = "NARG";
@@ -157,6 +205,18 @@ const REPTN: &str = "REPTN";
 /// True for symbols the assembler maintains itself, which aren't exported.
 pub(crate) fn is_internal_symbol(name: &str) -> bool {
     matches!(name, NARG | REPTN | RS_COUNTER)
+}
+
+fn expr_has_division(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary(op, a, b) => {
+            matches!(op, BinaryOp::Div | BinaryOp::Rem)
+                || expr_has_division(a)
+                || expr_has_division(b)
+        }
+        Expr::Unary(_, inner) => expr_has_division(inner),
+        _ => false,
+    }
 }
 
 fn is_local_label(name: &str) -> bool {
@@ -186,6 +246,9 @@ fn is_if(word: &str) -> bool {
 struct SrcLine<'a> {
     number: u32,
     text: &'a [u8],
+    /// False if macro parameters changed the text, so that its columns don't match
+    /// the source file.
+    exact_columns: bool,
 }
 
 /// A macro body: line numbers and text from where it was defined.
@@ -232,6 +295,168 @@ enum PendingWork {
         path: String,
         span: Span,
     },
+}
+
+/// A word inside an addressing mode's parentheses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddressPart {
+    Data(u8),
+    Addr(u8),
+    Pc,
+    SuppressedData(u8),
+    SuppressedAddr(u8),
+    SuppressedPc,
+}
+
+/// The pieces of an addressing mode in parentheses.
+#[derive(Debug, Default)]
+struct ModeParts {
+    base: Option<FullBase>,
+    index: Option<IndexReg>,
+    base_disp: Option<(Expr, Option<Width>)>,
+    outer_disp: Option<FullDisp>,
+    indirection: Indirection,
+}
+
+impl ModeParts {
+    /// Chooses the simplest mode for the pieces.
+    fn into_mode(self) -> Result<Mode, &'static str> {
+        let ModeParts {
+            base,
+            index,
+            base_disp,
+            outer_disp,
+            indirection,
+        } = self;
+        let (disp, width) = match base_disp {
+            Some((expr, width)) => (Some(expr), width),
+            None => (None, None),
+        };
+        if indirection == Indirection::None {
+            let simple_index = index.filter(|index| !index.suppressed);
+            let unsuppressed = index.is_none() || simple_index.is_some();
+            match (base, width, unsuppressed) {
+                (Some(FullBase::Addr(n)), None, true) => {
+                    return Ok(match (disp, simple_index) {
+                        (None, None) => Mode::Indirect(n),
+                        (Some(expr), None) => Mode::Disp(expr, n),
+                        (expr, Some(index)) => Mode::Index(expr.unwrap_or(Expr::Num(0)), n, index),
+                    });
+                }
+                (Some(FullBase::Addr(n)), Some(Width::Word), true) if simple_index.is_none() => {
+                    if let Some(expr) = disp {
+                        return Ok(Mode::DispWord(expr, n));
+                    }
+                }
+                (Some(FullBase::Pc), None, true) => {
+                    let expr = disp.unwrap_or(Expr::Num(0));
+                    return Ok(match simple_index {
+                        None => Mode::PcDisp(expr),
+                        Some(index) => Mode::PcIndex(expr, index),
+                    });
+                }
+                (Some(FullBase::Pc), Some(Width::Word), true) if simple_index.is_none() => {
+                    if let Some(expr) = disp {
+                        return Ok(Mode::PcDispWord(expr));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if base.is_none() && index.is_none() && disp.is_none() && indirection == Indirection::None {
+            return Err("empty addressing mode");
+        }
+        Ok(Mode::Full(Box::new(FullMode {
+            base: base.unwrap_or(FullBase::None),
+            index,
+            indirection,
+            base_disp: disp.map(|expr| FullDisp { expr, width }),
+            outer_disp,
+        })))
+    }
+}
+
+/// True for modes that only exist on 68020 and later.
+fn needs_020(mode: &Mode) -> bool {
+    match mode {
+        Mode::Full(_) => true,
+        Mode::Index(_, _, index) | Mode::PcIndex(_, index) => index.scale != 0,
+        Mode::BitField { ea, .. } | Mode::PackedStore { ea, .. } => needs_020(ea),
+        _ => false,
+    }
+}
+
+/// True if the 68060 emulates this instruction: from its table row, or for FPU
+/// forms that only trap with certain operands. A misaligned `cas` also traps, but
+/// that depends on the address at run time.
+fn traps_on_68060(instruction: &Instruction) -> bool {
+    if instruction.row.trap_060 {
+        return true;
+    }
+    if instruction.row.coprocessor != Coprocessor::Fpu {
+        return false;
+    }
+    let immediate = |mode: &Mode| matches!(mode, Mode::Immediate(_) | Mode::Float(_));
+    let wide_immediate = matches!(instruction.size, Some(Size::Extended | Size::Packed))
+        && instruction
+            .operands
+            .first()
+            .is_some_and(|op| immediate(&op.mode));
+    let dynamic_list = instruction.row.mnemonic == "fmovem"
+        && instruction
+            .operands
+            .iter()
+            .any(|op| matches!(op.mode, Mode::DataReg(_)))
+        && instruction.size == Some(Size::Extended);
+    let immediate_to_list = instruction
+        .operands
+        .first()
+        .is_some_and(|op| immediate(&op.mode))
+        && instruction
+            .operands
+            .iter()
+            .any(|op| matches!(op.mode, Mode::FpControlList(_)));
+    wide_immediate || dynamic_list || immediate_to_list
+}
+
+/// The size of an MMU register, from its command word bits.
+fn mmu_register_size(bits: u16) -> Size {
+    // BADn and BACn are not in the table, and are words.
+    MMU_REGISTERS
+        .iter()
+        .find(|(_, register, _, _)| *register == bits)
+        .map_or(Size::Word, |(_, _, _, size)| *size)
+}
+
+fn fp_register(name: &str) -> Option<u8> {
+    match name.as_bytes() {
+        [b'f', b'p', n @ b'0'..=b'7'] => Some(n - b'0'),
+        _ => None,
+    }
+}
+
+fn fp_control_bits(name: &str) -> Option<u16> {
+    match name {
+        "fpcr" => Some(0x1000),
+        "fpsr" => Some(0x0800),
+        "fpiar" => Some(0x0400),
+        _ => None,
+    }
+}
+
+fn special_words(mnemonic: &str) -> SpecialWords {
+    match mnemonic {
+        "movec" => SpecialWords::ControlRegisters,
+        "cinvl" | "cinvp" | "cinva" | "cpushl" | "cpushp" | "cpusha" => SpecialWords::CacheNames,
+        "pflush" | "pflushs" | "ploadr" | "ploadw" | "ptestr" | "ptestw" | "pmove" | "pmovefd"
+        | "pvalid" => SpecialWords::Mmu,
+        _ if rows_for(mnemonic)
+            .is_some_and(|rows| rows.iter().any(|row| row.coprocessor == Coprocessor::Fpu)) =>
+        {
+            SpecialWords::Fpu
+        }
+        _ => SpecialWords::None,
+    }
 }
 
 /// Finds the first word that could be a directive, skipping any label. Returns
@@ -360,6 +585,9 @@ const RS_COUNTER: &str = "__RS";
 /// Parses whole files into a [`Program`].
 pub(crate) struct Parser<'f> {
     cpu: Cpu,
+    fpu: FpuChoice,
+    mmu_68851: bool,
+    fixed_addresses: bool,
     provider: &'f dyn FileProvider,
     /// Directories to search for files, from options and `incdir`.
     include_dirs: Vec<String>,
@@ -378,6 +606,8 @@ pub(crate) struct Parser<'f> {
     /// operand has to be constant at that point.
     constants: HashMap<SymId, i64>,
     rs_counter: i64,
+    so_counter: i64,
+    fo_counter: i64,
     /// Set by `end`.
     ended: bool,
     /// Set by `mexit` until the macro has been left.
@@ -386,6 +616,8 @@ pub(crate) struct Parser<'f> {
     /// Number for the next macro call, for `\\@`.
     macro_calls: u32,
     macro_depth: usize,
+    expansion_depth: usize,
+    max_atoms: usize,
     /// Argument count of the macro being expanded.
     narg: Option<i64>,
     /// Iteration of the `rept` being expanded.
@@ -397,11 +629,14 @@ pub(crate) struct Parser<'f> {
 }
 
 impl<'f> Parser<'f> {
-    pub fn new(cpu: Cpu, provider: &'f dyn FileProvider, include_dirs: &[String]) -> Self {
+    pub fn new(options: &crate::Options, provider: &'f dyn FileProvider) -> Self {
         Self {
-            cpu,
+            cpu: options.cpu,
+            fpu: options.fpu,
+            mmu_68851: options.mmu_68851,
+            fixed_addresses: options.fixed_addresses,
             provider,
-            include_dirs: include_dirs.to_vec(),
+            include_dirs: options.include_dirs.clone(),
             file_stack: Vec::new(),
             current_expansion: None,
             chained_diagnostics: 0,
@@ -412,11 +647,15 @@ impl<'f> Parser<'f> {
             register_aliases: HashMap::new(),
             constants: HashMap::new(),
             rs_counter: 0,
+            so_counter: 0,
+            fo_counter: 0,
             ended: false,
             macro_exit: false,
             macros: HashMap::new(),
             macro_calls: 1,
             macro_depth: 0,
+            expansion_depth: 0,
+            max_atoms: options.max_atoms,
             narg: None,
             reptn: None,
             conditionals: Vec::new(),
@@ -425,7 +664,9 @@ impl<'f> Parser<'f> {
         }
     }
 
-    pub fn finish(self) -> Program {
+    pub fn finish(mut self, max_output_bytes: i64) -> Program {
+        self.program.fixed_addresses = self.fixed_addresses;
+        self.program.max_output_bytes = max_output_bytes;
         self.program
     }
 
@@ -488,6 +729,7 @@ impl<'f> Parser<'f> {
     }
 
     fn include(&mut self, path: &str, site: Span) -> Result<(), Diagnostic> {
+        self.check_depth(site)?;
         let from = self.current_file().map(str::to_string);
         let (resolved, source) = self
             .find_file(path, from.as_deref())
@@ -520,6 +762,7 @@ impl<'f> Parser<'f> {
             .map(|(index, raw)| SrcLine {
                 number: index as u32 + 1,
                 text: raw.strip_suffix(b"\r").unwrap_or(raw),
+                exact_columns: true,
             })
             .collect();
         self.parse_lines(file, &lines);
@@ -541,6 +784,11 @@ impl<'f> Parser<'f> {
                     lexer: Lexer::new(line.text),
                     file,
                     line: line.number,
+                    special: SpecialWords::None,
+                    exact_columns: line.exact_columns,
+                    expression_depth: 0,
+                    expression_is_raw: false,
+                    float_immediates: None,
                 }
                 .parse()
             };
@@ -652,7 +900,28 @@ impl<'f> Parser<'f> {
         self.push_atom(AtomKind::Equate(id, Expr::Num(value)), span);
     }
 
+    /// Fails if expansions are nested too deeply.
+    fn check_depth(&self, site: Span) -> Result<(), Diagnostic> {
+        if self.expansion_depth >= MAX_EXPANSION_DEPTH {
+            return Err(Diagnostic::error(
+                "macro-depth",
+                format!(
+                    "macros, rept blocks and includes nested more than \
+                     {MAX_EXPANSION_DEPTH} levels deep"
+                ),
+                site,
+            ));
+        }
+        Ok(())
+    }
+
     fn run_expansion(&mut self, kind: ExpansionKind, site: Span, file: FileId, lines: &[SrcLine]) {
+        if let Err(diagnostic) = self.check_depth(site) {
+            self.program.diagnostics.push(diagnostic);
+            self.macro_exit = false;
+            return;
+        }
+        self.expansion_depth += 1;
         self.program.expansions.push(Expansion {
             kind,
             site,
@@ -662,6 +931,7 @@ impl<'f> Parser<'f> {
         self.current_expansion = Some(self.program.expansions.len() as u32 - 1);
         self.parse_lines(file, lines);
         self.current_expansion = outer;
+        self.expansion_depth -= 1;
     }
 
     fn expand_macro(
@@ -670,23 +940,22 @@ impl<'f> Parser<'f> {
         call: &MacroCall,
         site: Span,
     ) -> Result<(), Diagnostic> {
-        if self.macro_depth >= MAX_MACRO_DEPTH {
-            return Err(Diagnostic::error(
-                "macro-depth",
-                format!("macro calls nested more than {MAX_MACRO_DEPTH} levels deep"),
-                site,
-            ));
-        }
-        let text: Vec<(u32, Vec<u8>)> = definition
+        self.check_depth(site)?;
+        let text: Vec<(u32, Vec<u8>, bool)> = definition
             .lines
             .iter()
-            .map(|(number, line)| (*number, self.substitute(line, call)))
+            .map(|(number, line)| {
+                let expanded = self.substitute(line, call);
+                let exact = expanded == *line;
+                (*number, expanded, exact)
+            })
             .collect();
         let lines: Vec<SrcLine> = text
             .iter()
-            .map(|(number, text)| SrcLine {
+            .map(|(number, text, exact)| SrcLine {
                 number: *number,
                 text,
+                exact_columns: *exact,
             })
             .collect();
 
@@ -798,7 +1067,30 @@ impl<'f> Parser<'f> {
                 self.conditionals.pop();
                 Ok(())
             }
-            "else" => {
+            "else" | "elseif" => {
+                // `elseif` is another name for `else`. vasm ignores anything after
+                // it, so `elseif 0` would run its block; that is reported instead.
+                let rest = Lexer::new(&line.text[end..]);
+                let mut rest = rest;
+                rest.skip_blanks();
+                if word == "elseif"
+                    && !matches!(rest.peek(), Ok(Tok::End))
+                    && self
+                        .conditionals
+                        .last()
+                        .is_some_and(|top| top.parent_active)
+                {
+                    return Err(Diagnostic::error(
+                        "syntax",
+                        "elseif takes no condition; use elif",
+                        Span {
+                            file,
+                            line: line.number,
+                            col: 1,
+                            len: 1,
+                        },
+                    ));
+                }
                 if let Some(top) = self.conditionals.last_mut() {
                     if top.seen_else && top.parent_active {
                         return Err(Diagnostic::error(
@@ -820,7 +1112,7 @@ impl<'f> Parser<'f> {
                 }
                 Ok(())
             }
-            "elif" | "elseif" => {
+            "elif" => {
                 let eligible = self
                     .conditionals
                     .last()
@@ -836,6 +1128,11 @@ impl<'f> Parser<'f> {
                     lexer,
                     file,
                     line: line.number,
+                    special: SpecialWords::None,
+                    exact_columns: line.exact_columns,
+                    expression_depth: 0,
+                    expression_is_raw: false,
+                    float_immediates: None,
                 };
                 let value = parser.parse_constant()?;
                 parser.expect_end()?;
@@ -848,6 +1145,15 @@ impl<'f> Parser<'f> {
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    /// True if FPU instructions can be used now.
+    fn has_fpu(&self) -> bool {
+        match self.fpu {
+            FpuChoice::BuiltIn => matches!(self.cpu, Cpu::M68040 | Cpu::M68060),
+            FpuChoice::Coprocessor => true,
+            FpuChoice::None => false,
         }
     }
 
@@ -909,6 +1215,7 @@ impl<'f> Parser<'f> {
             kind,
             mem,
             origin,
+            dummy: false,
         });
         self.program.sections.len() - 1
     }
@@ -949,6 +1256,18 @@ impl<'f> Parser<'f> {
     }
 
     fn push_atom(&mut self, kind: AtomKind, span: Span) {
+        // Generated code has no natural limit, so stop rather than exhaust memory.
+        if self.program.atoms.len() >= self.max_atoms {
+            if !self.ended {
+                self.program.diagnostics.push(Diagnostic::error(
+                    "limit-exceeded",
+                    format!("source generates more than {} statements", self.max_atoms),
+                    span,
+                ));
+                self.ended = true;
+            }
+            return;
+        }
         let section = self.section();
         self.program.atoms.push(Atom {
             kind,
@@ -1017,15 +1336,43 @@ pub(crate) fn add_expansion_chain(
     }
 }
 
+/// Words an instruction's operands can use besides the general modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecialWords {
+    None,
+    ControlRegisters,
+    CacheNames,
+    Fpu,
+    Mmu,
+}
+
 struct LineParser<'p, 'a, 'f> {
     parser: &'p mut Parser<'f>,
     lexer: Lexer<'a>,
     file: FileId,
     line: u32,
+    special: SpecialWords,
+    exact_columns: bool,
+    expression_depth: usize,
+    /// True once the expression being parsed has used a symbol, `*`, a string or
+    /// a number that isn't decimal. Otherwise it is a floating-point number.
+    expression_is_raw: bool,
+    /// The size being assembled, when immediates are floating-point numbers.
+    float_immediates: Option<Size>,
 }
 
 impl LineParser<'_, '_, '_> {
     fn span(&self, start: usize) -> Span {
+        // Text that macro parameters changed has no matching column in the source,
+        // so the span only says which line.
+        if !self.exact_columns {
+            return Span {
+                file: self.file,
+                line: self.line,
+                col: 1,
+                len: 1,
+            };
+        }
         Span {
             file: self.file,
             line: self.line,
@@ -1045,7 +1392,11 @@ impl LineParser<'_, '_, '_> {
             Span {
                 file: self.file,
                 line: self.line,
-                col: error.pos as u32 + 1,
+                col: if self.exact_columns {
+                    error.pos as u32 + 1
+                } else {
+                    1
+                },
                 len: 1,
             },
         )
@@ -1102,6 +1453,9 @@ impl LineParser<'_, '_, '_> {
                 _ => {}
             }
             return self.parse_after_column_zero();
+        }
+        if self.peek_is(Punct::Star)? {
+            return Ok(());
         }
         // An indented word is a label only if a colon follows it.
         let start = self.lexer.pos();
@@ -1200,7 +1554,8 @@ impl LineParser<'_, '_, '_> {
             return Err(self.error_at("syntax", "label expected", start));
         };
         let span = self.span(start);
-        if self.peek_is(Punct::Colon)? {
+        let has_colon = self.peek_is(Punct::Colon)?;
+        if has_colon {
             self.eat_colons(&name, span)?;
         } else {
             let lower = name.to_ascii_lowercase();
@@ -1213,7 +1568,7 @@ impl LineParser<'_, '_, '_> {
             }
         }
         let at_equals = self.peek_is(Punct::Eq)?;
-        if !self.lexer.at_blank() && !at_equals && self.peek()? != Tok::End {
+        if !has_colon && !self.lexer.at_blank() && !at_equals && self.peek()? != Tok::End {
             return Err(self.error_at("syntax", "unexpected text after label", self.lexer.pos()));
         }
         self.parse_statement(Some((name, span)))
@@ -1351,10 +1706,12 @@ impl LineParser<'_, '_, '_> {
                 self.expect(Punct::Comma, ",")?;
                 let alignment = self.parse_constant()?;
                 self.expect_end()?;
-                if alignment < 0 || offset < 0 {
+                if !(0..=MAX_ALIGNMENT).contains(&alignment)
+                    || !(0..=MAX_ALIGNMENT).contains(&offset)
+                {
                     return Err(Diagnostic::error(
                         "out-of-range",
-                        "cnop takes non-negative values",
+                        "cnop takes values from 0 to $80000000",
                         span,
                     ));
                 }
@@ -1416,6 +1773,11 @@ impl LineParser<'_, '_, '_> {
             Some(Size::Long) => "l",
             Some(Size::Short) => "s",
             Some(Size::Word) | None => "w",
+            Some(Size::Single) => "s",
+            Some(Size::Double) => "d",
+            Some(Size::Extended) => "x",
+            Some(Size::Packed) => "p",
+            Some(Size::Quad) => "q",
         };
         self.parser.pending_work = Some(PendingWork::CallMacro {
             name: name.to_string(),
@@ -1499,12 +1861,19 @@ impl LineParser<'_, '_, '_> {
             "endc" | "endif" => {
                 self.parser.conditionals.pop();
             }
-            "else" if top.seen_else => {
+            "elseif" if self.lexer.peek().map_or(true, |tok| tok != Tok::End) => {
+                return Err(Diagnostic::error(
+                    "syntax",
+                    "elseif takes no condition; use elif",
+                    span,
+                ));
+            }
+            "else" | "elseif" if top.seen_else => {
                 return Err(Diagnostic::error("syntax", "second else in a block", span));
             }
             _ => {
                 top.active = false;
-                top.seen_else = word == "else";
+                top.seen_else = word != "elif";
             }
         }
         Ok(())
@@ -1636,6 +2005,59 @@ impl LineParser<'_, '_, '_> {
         )
     }
 
+    /// Changes the target CPU from here on.
+    fn set_cpu(&mut self, number: &str, span: Span) -> Result<(), Diagnostic> {
+        let cpu = number.parse().ok().and_then(Cpu::from_number);
+        self.parser.cpu = cpu.ok_or_else(|| {
+            Diagnostic::error("unknown-cpu", format!("unknown CPU {number}"), span)
+        })?;
+        Ok(())
+    }
+
+    /// `so` is like `rs`, with a counter of its own.
+    fn parse_so(
+        &mut self,
+        label: Option<(String, Span)>,
+        size: Option<Size>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let size = self.data_size(size, span)?;
+        let count = self.parse_constant()?;
+        self.expect_end()?;
+        let value = self.parser.so_counter;
+        self.parser.so_counter = value.wrapping_add(count.wrapping_mul(i64::from(size.bytes())));
+        match label {
+            Some((name, label_span)) => {
+                self.define_equate(&name, Expr::Num(value), false, label_span)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// `fo` counts down, for stack frames: the label gets the value after
+    /// moving the counter.
+    fn parse_fo(
+        &mut self,
+        label: Option<(String, Span)>,
+        size: Option<Size>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let size = self.data_size(size, span)?;
+        let count = self.parse_constant()?;
+        self.expect_end()?;
+        let value = self
+            .parser
+            .fo_counter
+            .wrapping_sub(count.wrapping_mul(i64::from(size.bytes())));
+        self.parser.fo_counter = value;
+        match label {
+            Some((name, label_span)) => {
+                self.define_equate(&name, Expr::Num(value), false, label_span)
+            }
+            None => Ok(()),
+        }
+    }
+
     fn set_rs_counter(&mut self, value: i64, span: Span) -> Result<(), Diagnostic> {
         self.parser.rs_counter = value;
         self.define_equate(RS_COUNTER, Expr::Num(value), true, span)
@@ -1662,16 +2084,33 @@ impl LineParser<'_, '_, '_> {
                 self.define_label(&label, span)?;
             }
             return match self.peek()? {
-                Tok::End => Ok(()),
+                Tok::End | Tok::Punct(Punct::Star) => Ok(()),
                 _ => Err(self.error_at("syntax", "mnemonic expected", start)),
             };
         };
         let size = self.parse_size_suffix()?;
         let span = self.span(start);
         let lower = name.to_ascii_lowercase();
+        let is_fpu = rows_for(&lower)
+            .is_some_and(|rows| rows.iter().any(|row| row.coprocessor == Coprocessor::Fpu));
+        let size = match size {
+            Some(Size::Short)
+                if is_fpu || matches!(lower.as_str(), "dc" | "ds" | "blk" | "dcb") =>
+            {
+                Some(Size::Single)
+            }
+            other => other,
+        };
 
         if let Some(rows) = rows_for(&lower) {
             self.lexer.skip_blanks();
+            // A global label on this line starts a new scope for local labels,
+            // which the operands must see.
+            if let Some((name, _)) = &label {
+                if !is_local_label(name) {
+                    self.parser.label_scope = name.clone();
+                }
+            }
             let instruction = self.parse_instruction(&lower, rows, size, span);
             self.parser.push_atom(AtomKind::AlignInstruction, span);
             if let Some((label, label_span)) = label {
@@ -1704,6 +2143,8 @@ impl LineParser<'_, '_, '_> {
                 return self.parse_equr(label, span);
             }
             "rs" => return self.parse_rs(label, size, span),
+            "so" => return self.parse_so(label, size, span),
+            "fo" => return self.parse_fo(label, size, span),
             "macro" => {
                 self.no_size(size, span)?;
                 return self.parse_macro_definition(label, span);
@@ -1808,6 +2249,135 @@ impl LineParser<'_, '_, '_> {
             "dc" => self.parse_dc(size, span),
             "ds" | "blk" | "dcb" => self.parse_space(&lower, size, span),
             "section" => self.parse_section(size, span),
+            "clrso" | "clrfo" => {
+                self.no_size(size, span)?;
+                if lower == "clrso" {
+                    self.parser.so_counter = 0;
+                } else {
+                    self.parser.fo_counter = 0;
+                }
+                Ok(())
+            }
+            "setso" | "setfo" => {
+                self.no_size(size, span)?;
+                let value = self.parse_constant()?;
+                self.expect_end()?;
+                if lower == "setso" {
+                    self.parser.so_counter = value;
+                } else {
+                    self.parser.fo_counter = value;
+                }
+                Ok(())
+            }
+            "offset" => {
+                self.no_size(size, span)?;
+                let base = if self.peek()? == Tok::End {
+                    0
+                } else {
+                    self.parse_constant()?
+                };
+                self.expect_end()?;
+                if !(-0xFFFF_FFFF..=0xFFFF_FFFF).contains(&base) {
+                    return Err(Diagnostic::error(
+                        "out-of-range",
+                        "offset base out of range",
+                        span,
+                    ));
+                }
+                let section =
+                    self.parser
+                        .add_section("offset", SectionKind::Bss, MemKind::Any, Some(base));
+                self.parser.program.sections[section].dummy = true;
+                self.parser.current = Some(section);
+                Ok(())
+            }
+            "machine" => {
+                self.no_size(size, span)?;
+                let word = self.lexer.word().to_vec();
+                let text = String::from_utf8_lossy(&word).to_ascii_lowercase();
+                let number = text.strip_prefix("mc").unwrap_or(&text);
+                if matches!(number, "68881" | "68882") {
+                    self.parser.fpu = FpuChoice::Coprocessor;
+                    return Ok(());
+                }
+                if number == "68851" {
+                    self.parser.mmu_68851 = true;
+                    return Ok(());
+                }
+                self.set_cpu(number, span)
+            }
+            "mc68851" => {
+                self.no_size(size, span)?;
+                self.parser.mmu_68851 = true;
+                Ok(())
+            }
+            "mc68881" | "mc68882" => {
+                self.no_size(size, span)?;
+                self.parser.fpu = FpuChoice::Coprocessor;
+                Ok(())
+            }
+            "fpu" => {
+                self.no_size(size, span)?;
+                let id = self.parse_constant()?;
+                self.expect_end()?;
+                self.parser.fpu = match id {
+                    0 => FpuChoice::None,
+                    1 => FpuChoice::Coprocessor,
+                    _ => {
+                        return Err(Diagnostic::error(
+                            "unsupported-fpu",
+                            "only coprocessor ID 1 is supported",
+                            span,
+                        ));
+                    }
+                };
+                Ok(())
+            }
+            directive if directive.starts_with("mc680") => {
+                self.no_size(size, span)?;
+                self.set_cpu(&directive[2..], span)
+            }
+            "idnt" => {
+                self.no_size(size, span)?;
+                let name = self.parse_path(span)?;
+                self.expect_end()?;
+                self.parser.program.unit_name = Some(name);
+                Ok(())
+            }
+            "opt" => Err(Diagnostic::error(
+                "unsupported-opt",
+                "opt is not supported, because ignoring it could change what the source means",
+                span,
+            )),
+            // Listings aren't affected by these; the rest of the line is ignored.
+            "list" | "nolist" | "page" | "nopage" | "ttl" | "spc" | "llen" | "plen" => {
+                self.no_size(size, span)
+            }
+            "printt" | "echo" => {
+                self.no_size(size, span)?;
+                let Tok::Str(text) = self.peek()? else {
+                    return Err(Diagnostic::error("syntax", "string expected", span));
+                };
+                self.advance()?;
+                self.expect_end()?;
+                self.parser.program.diagnostics.push(Diagnostic::info(
+                    "print",
+                    String::from_utf8_lossy(&text),
+                    span,
+                ));
+                Ok(())
+            }
+            "printv" => {
+                self.no_size(size, span)?;
+                let value = self.parse_constant()?;
+                self.expect_end()?;
+                self.parser.program.diagnostics.push(Diagnostic::info(
+                    "print",
+                    format!("{value} (${value:X})"),
+                    span,
+                ));
+                Ok(())
+            }
             "rsreset" => {
                 self.no_size(size, span)?;
                 self.set_rs_counter(0, span)
@@ -1880,6 +2450,16 @@ impl LineParser<'_, '_, '_> {
         span: Span,
     ) -> Result<Instruction, Diagnostic> {
         let unsized_insn = rows.iter().all(|r| r.default_size.is_none());
+        // These ignore other sizes, as unsized instructions do, but `.q` is a size
+        // that only means something to an MMU instruction with 64-bit operands.
+        let mmu_operands = special_words(mnemonic) == SpecialWords::Mmu;
+        if mmu_operands && unsized_insn && size == Some(Size::Quad) {
+            return Err(Diagnostic::error(
+                "bad-size",
+                format!("{mnemonic} cannot have this size"),
+                span,
+            ));
+        }
         if unsized_insn {
             if size.is_some() {
                 self.parser.program.diagnostics.push(Diagnostic::warning(
@@ -1892,8 +2472,11 @@ impl LineParser<'_, '_, '_> {
             if rows.iter().all(|r| r.operands.is_empty()) {
                 return self.select_row(mnemonic, rows, None, Vec::new(), span);
             }
+            self.special = special_words(mnemonic);
             let operands = self.parse_operands()?;
-            return self.select_row(mnemonic, rows, None, operands, span);
+            let instruction = self.select_row(mnemonic, rows, None, operands, span)?;
+            self.warn_if_trapped(mnemonic, &instruction, span);
+            return Ok(instruction);
         }
         if let Some(size) = size {
             if !rows.iter().any(|r| r.sizes.contains(&size)) {
@@ -1904,8 +2487,29 @@ impl LineParser<'_, '_, '_> {
                 ));
             }
         }
+        self.special = special_words(mnemonic);
+        self.float_immediates = size.filter(|size| {
+            matches!(
+                size,
+                Size::Single | Size::Double | Size::Extended | Size::Packed
+            ) && self.special == SpecialWords::Fpu
+                && !matches!(mnemonic, "fmovem" | "fmovecr")
+        });
         let operands = self.parse_operands()?;
-        self.select_row(mnemonic, rows, size, operands, span)
+        let instruction = self.select_row(mnemonic, rows, size, operands, span)?;
+        self.warn_if_trapped(mnemonic, &instruction, span);
+        Ok(instruction)
+    }
+
+    /// Warns about an instruction the 68060 emulates through an exception.
+    fn warn_if_trapped(&mut self, mnemonic: &str, instruction: &Instruction, span: Span) {
+        if self.parser.cpu == Cpu::M68060 && traps_on_68060(instruction) {
+            self.parser.program.diagnostics.push(Diagnostic::warning(
+                "trapped-on-68060",
+                format!("{mnemonic} in this form traps to software on the 68060"),
+                span,
+            ));
+        }
     }
 
     fn parse_operands(&mut self) -> Result<Vec<Operand>, Diagnostic> {
@@ -1940,9 +2544,9 @@ impl LineParser<'_, '_, '_> {
                     .iter()
                     .zip(&operands)
                     .all(|(set, op)| set.intersects(op.mode.class()))
-                && row
-                    .default_size
-                    .map_or(true, |default| row.sizes.contains(&size.unwrap_or(default)))
+                && row.default_size.map_or(size.is_none(), |default| {
+                    row.sizes.contains(&size.unwrap_or(default))
+                })
         };
         let mut matching = rows.iter().filter(|row| fits(row)).peekable();
         if matching.peek().is_none() {
@@ -1952,17 +2556,54 @@ impl LineParser<'_, '_, '_> {
                 span,
             ));
         }
-        let Some(row) = matching.find(|row| row.cpus.contains(self.parser.cpu)) else {
+        let has_fpu = self.parser.has_fpu();
+        let cpu = self.parser.cpu;
+        let mmu_68851 = self.parser.mmu_68851;
+        let Some(row) = matching.find(|row| {
+            row.cpus.contains(cpu)
+                && match row.coprocessor {
+                    Coprocessor::None => true,
+                    Coprocessor::Fpu => has_fpu,
+                    Coprocessor::Mmu => cpu == Cpu::M68030 || mmu_68851,
+                    Coprocessor::Mmu851 => mmu_68851,
+                }
+        }) else {
             return Err(Diagnostic::error(
                 "unsupported-cpu",
                 format!("{mnemonic} is not available on the selected CPU"),
                 span,
             ));
         };
+        // `pmove` has the size of its MMU register, and takes no other.
+        let register_size = operands.iter().find_map(|operand| match operand.mode {
+            Mode::MmuReg(bits) if mnemonic.starts_with("pmove") => Some(mmu_register_size(bits)),
+            _ => None,
+        });
+        if let (Some(register), Some(written)) = (register_size, size) {
+            if register != written {
+                return Err(Diagnostic::error(
+                    "bad-size",
+                    "this size doesn't match the MMU register",
+                    span,
+                ));
+            }
+        }
+        let size = size.or(register_size);
+        let wide = CPU_020_UP.contains(self.parser.cpu);
+        if !wide && operands.iter().any(|operand| needs_020(&operand.mode)) {
+            return Err(Diagnostic::error(
+                "unsupported-cpu",
+                "this addressing mode needs a 68020 or later",
+                span,
+            ));
+        }
         Ok(Instruction {
             row,
             size: size.or(row.default_size),
             operands,
+            wide,
+            fixed_addresses: self.parser.fixed_addresses,
+            mmu_68851: self.parser.mmu_68851,
         })
     }
 
@@ -1976,8 +2617,31 @@ impl LineParser<'_, '_, '_> {
     }
 
     fn parse_mode(&mut self) -> Result<Mode, Diagnostic> {
+        let mode = self.parse_ea()?;
+        if self.peek_is(Punct::LBrace)? {
+            return self.parse_bit_field(mode);
+        }
+        Ok(mode)
+    }
+
+    fn parse_ea(&mut self) -> Result<Mode, Diagnostic> {
         if self.eat(Punct::Hash)? {
-            return Ok(Mode::Immediate(self.parse_expr()?));
+            if let Some(text) = self.float_literal_if_fpu() {
+                return Ok(Mode::Float(FloatLiteral { text }));
+            }
+            let (expr, is_raw) = self.parse_expr_tracking_raw()?;
+            if self.float_immediates.is_some() && !is_raw {
+                let text = self.decimal_expression_text(&expr)?;
+                return Ok(Mode::Float(FloatLiteral { text }));
+            }
+            return Ok(Mode::Immediate(expr));
+        }
+        if self.special == SpecialWords::Fpu {
+            if let Some(mode) = self.try_fp_operand()? {
+                return Ok(mode);
+            }
+        } else if let Some(mode) = self.try_special_word()? {
+            return Ok(mode);
         }
         if let Tok::Ident(name) = self.peek()? {
             match self.parser.reg(name) {
@@ -2001,12 +2665,15 @@ impl LineParser<'_, '_, '_> {
         if let Some(mode) = self.try_predecrement()? {
             return Ok(mode);
         }
+        if let Some(mode) = self.try_indirect_pair()? {
+            return Ok(mode);
+        }
         if let Some(mode) = self.try_parenthesised()? {
             return Ok(mode);
         }
         let expr = self.parse_expr()?;
         if self.eat(Punct::LParen)? {
-            return self.parse_base_and_index(expr);
+            return self.parse_address_parts(Some((expr, None)));
         }
         match self.parse_size_suffix()? {
             Some(Size::Word) => Ok(Mode::AbsWord(expr)),
@@ -2019,10 +2686,171 @@ impl LineParser<'_, '_, '_> {
         }
     }
 
+    /// Recognises an MMU register available now, or a function code.
+    fn mmu_word(&self, word: &str) -> Option<Mode> {
+        match word {
+            "sfc" => return Some(Mode::FunctionCode(0)),
+            "dfc" => return Some(Mode::FunctionCode(1)),
+            _ => {}
+        }
+        let has_851 = self.parser.mmu_68851;
+        let is_030 = self.parser.cpu == Cpu::M68030;
+        if has_851 {
+            // BADn and BACn are numbered registers on the 68851.
+            let numbered = |prefix: &str, base: u16| {
+                let digit = word.strip_prefix(prefix)?.parse::<u16>().ok()?;
+                (digit < 8).then_some(base | digit << 2)
+            };
+            if let Some(bits) = numbered("bad", 0x7000).or_else(|| numbered("bac", 0x7400)) {
+                return Some(Mode::MmuReg(bits));
+            }
+        }
+        MMU_REGISTERS
+            .iter()
+            .find(|(name, _, home, _)| {
+                *name == word
+                    && match home {
+                        MmuRegisterHome::Both => true,
+                        MmuRegisterHome::Only851 => has_851,
+                        MmuRegisterHome::Only030 => is_030,
+                    }
+            })
+            .map(|(_, bits, _, _)| Mode::MmuReg(*bits))
+    }
+
+    /// Parses an expression and says whether it used anything but decimal numbers.
+    fn parse_expr_tracking_raw(&mut self) -> Result<(Expr, bool), Diagnostic> {
+        self.expression_is_raw = false;
+        let expr = self.parse_expr()?;
+        Ok((expr, self.expression_is_raw))
+    }
+
+    /// Writes the value of an expression of decimal numbers, for use as a
+    /// floating-point number. Integer division would give the wrong value.
+    fn decimal_expression_text(&mut self, expr: &Expr) -> Result<String, Diagnostic> {
+        let span = self.span(self.lexer.pos());
+        if expr_has_division(expr) {
+            return Err(Diagnostic::error(
+                "bad-float",
+                "division in a floating-point expression isn't supported; write the value",
+                span,
+            ));
+        }
+        Ok(self.parser.constant(expr, span)?.to_string())
+    }
+
+    /// Reads a floating-point literal, on an FPU instruction only.
+    fn float_literal_if_fpu(&mut self) -> Option<String> {
+        if self.special == SpecialWords::Fpu {
+            self.lexer.float_literal()
+        } else {
+            None
+        }
+    }
+
+    /// Recognises floating-point registers and lists.
+    fn try_fp_operand(&mut self) -> Result<Option<Mode>, Diagnostic> {
+        let Tok::Ident(name) = self.peek()? else {
+            return Ok(None);
+        };
+        let lower = name.to_ascii_lowercase();
+        if let Some(bits) = fp_control_bits(&lower) {
+            self.advance()?;
+            return self.parse_fp_control_list(bits).map(Some);
+        }
+        let Some(first) = fp_register(&lower) else {
+            return Ok(None);
+        };
+        self.advance()?;
+        if self.eat(Punct::Colon)? {
+            let second = self.parse_fp_register()?;
+            return Ok(Some(Mode::FpPair(first, second)));
+        }
+        if !self.peek_is(Punct::Minus)? && !self.peek_is(Punct::Slash)? {
+            return Ok(Some(Mode::FpReg(first)));
+        }
+        let mut mask = 0u8;
+        let mut low = first;
+        loop {
+            let mut high = low;
+            if self.eat(Punct::Minus)? {
+                high = self.parse_fp_register()?;
+            }
+            for n in low.min(high)..=low.max(high) {
+                mask |= 1 << n;
+            }
+            if !self.eat(Punct::Slash)? {
+                return Ok(Some(Mode::FpList(mask)));
+            }
+            low = self.parse_fp_register()?;
+        }
+    }
+
+    fn parse_fp_register(&mut self) -> Result<u8, Diagnostic> {
+        let start = self.lexer.pos();
+        let word = self.eat_ident()?.map(|name| name.to_ascii_lowercase());
+        word.as_deref()
+            .and_then(fp_register)
+            .ok_or_else(|| self.error_at("syntax", "floating-point register expected", start))
+    }
+
+    fn parse_fp_control_list(&mut self, first: u16) -> Result<Mode, Diagnostic> {
+        if !self.peek_is(Punct::Slash)? {
+            return Ok(Mode::FpControl(first));
+        }
+        let mut bits = first;
+        while self.eat(Punct::Slash)? {
+            let start = self.lexer.pos();
+            let word = self.eat_ident()?.map(|name| name.to_ascii_lowercase());
+            bits |= word
+                .as_deref()
+                .and_then(fp_control_bits)
+                .ok_or_else(|| self.error_at("syntax", "FP control register expected", start))?;
+        }
+        Ok(Mode::FpControlList(bits))
+    }
+
+    /// Recognises a control register or cache name where the mnemonic takes one.
+    fn try_special_word(&mut self) -> Result<Option<Mode>, Diagnostic> {
+        if self.special == SpecialWords::None {
+            return Ok(None);
+        }
+        let Tok::Ident(name) = self.peek()? else {
+            return Ok(None);
+        };
+        let lower = name.to_ascii_lowercase();
+        let mode = match self.special {
+            SpecialWords::ControlRegisters => CONTROL_REGISTERS
+                .iter()
+                .find(|(register, _, cpus)| *register == lower && cpus.contains(self.parser.cpu))
+                .map(|(_, code, _)| Mode::ControlReg(*code)),
+            SpecialWords::Mmu => self.mmu_word(&lower),
+            _ => match lower.as_str() {
+                "nc" => Some(Mode::Cache(0)),
+                "dc" => Some(Mode::Cache(1)),
+                "ic" => Some(Mode::Cache(2)),
+                "bc" => Some(Mode::Cache(3)),
+                _ => None,
+            },
+        };
+        if mode.is_some() {
+            self.advance()?;
+        }
+        Ok(mode)
+    }
+
     /// Having peeked a register numbered 0-15, returns `single` unless a
-    /// register list follows.
+    /// register list or pair follows.
     fn parse_after_register(&mut self, first: u8, single: Mode) -> Result<Mode, Diagnostic> {
         self.advance()?;
+        if first < 8 && self.peek_is(Punct::Colon)? {
+            self.advance()?;
+            let start = self.lexer.pos();
+            return match self.parse_list_register()? {
+                second if second < 8 => Ok(Mode::RegPair(first, second)),
+                _ => Err(self.error_at("syntax", "data register expected", start)),
+            };
+        }
         if !self.peek_is(Punct::Minus)? && !self.peek_is(Punct::Slash)? {
             return Ok(single);
         }
@@ -2074,86 +2902,301 @@ impl LineParser<'_, '_, '_> {
         Ok(None)
     }
 
-    /// Recognises `(An)`, `(An)+`, `(d,An)`, `(An,Xn)`, `(d,An,Xn)` and the
-    /// PC forms. Returns `None` for a parenthesised expression such as
-    /// `(4+2)*3(a0)`, leaving the position unchanged.
-    fn try_parenthesised(&mut self) -> Result<Option<Mode>, Diagnostic> {
-        let saved = self.lexer.pos();
+    /// Reads `(Rn)`, returning the register numbered 0-15.
+    fn try_parenthesised_register(&mut self) -> Result<Option<u8>, Diagnostic> {
         if !self.eat(Punct::LParen)? {
             return Ok(None);
         }
-        // A leading base register has no displacement, so `(An)` is plain
-        // indirect rather than the zero displacement this call reports.
-        if self.next_is_base_register()? {
-            let mode = self.parse_base_and_index(Expr::Num(0))?;
-            if let Mode::Disp(_, n) = &mode {
-                let n = *n;
-                if self.eat(Punct::Plus)? {
-                    return Ok(Some(Mode::PostInc(n)));
-                }
-                return Ok(Some(Mode::Indirect(n)));
-            }
-            return Ok(Some(mode));
+        let reg = self.eat_ident()?.and_then(|name| self.parser.reg(&name));
+        if !self.eat(Punct::RParen)? {
+            return Ok(None);
         }
-        let parsed = self.parse_expr();
-        if let Ok(expr) = parsed {
-            if self.eat(Punct::Comma)? {
-                return self.parse_base_and_index(expr).map(Some);
+        Ok(match reg {
+            Some(Reg::Data(n)) => Some(n),
+            Some(Reg::Addr(n)) => Some(n + 8),
+            _ => None,
+        })
+    }
+
+    /// Recognises `(Rn):(Rn)`, leaving anything else for the other parsers.
+    fn try_indirect_pair(&mut self) -> Result<Option<Mode>, Diagnostic> {
+        let saved = self.lexer.pos();
+        if let Some(first) = self.try_parenthesised_register().unwrap_or(None) {
+            if self.eat(Punct::Colon)? {
+                if let Some(second) = self.try_parenthesised_register()? {
+                    return Ok(Some(Mode::IndirectPair(first, second)));
+                }
             }
         }
         self.lexer.set_pos(saved);
         Ok(None)
     }
 
-    fn next_is_base_register(&self) -> Result<bool, Diagnostic> {
+    /// Parses `{offset:width}` after an operand, or `{#k}` or `{Dn}`.
+    fn parse_bit_field(&mut self, ea: Mode) -> Result<Mode, Diagnostic> {
+        self.expect(Punct::LBrace, "{")?;
+        if self.eat(Punct::Hash)? {
+            let factor = BitFieldArg::Value(self.parse_expr()?);
+            self.expect(Punct::RBrace, "}")?;
+            return Ok(Mode::PackedStore {
+                ea: Box::new(ea),
+                factor,
+            });
+        }
+        let offset = self.parse_bit_field_arg()?;
+        if matches!(offset, BitFieldArg::Reg(_)) && self.eat(Punct::RBrace)? {
+            return Ok(Mode::PackedStore {
+                ea: Box::new(ea),
+                factor: offset,
+            });
+        }
+        self.expect(Punct::Colon, ":")?;
+        let width = self.parse_bit_field_arg()?;
+        self.expect(Punct::RBrace, "}")?;
+        Ok(Mode::BitField {
+            ea: Box::new(ea),
+            offset,
+            width,
+        })
+    }
+
+    fn parse_bit_field_arg(&mut self) -> Result<BitFieldArg, Diagnostic> {
+        if let Tok::Ident(name) = self.peek()? {
+            if let Some(Reg::Data(n)) = self.parser.reg(name) {
+                self.advance()?;
+                return Ok(BitFieldArg::Reg(n));
+            }
+        }
+        Ok(BitFieldArg::Value(self.parse_expr()?))
+    }
+
+    /// Recognises a mode in parentheses. Returns `None` for a parenthesised
+    /// expression such as `(4+2)*3(a0)`, leaving the position unchanged.
+    fn try_parenthesised(&mut self) -> Result<Option<Mode>, Diagnostic> {
+        let saved = self.lexer.pos();
+        if !self.eat(Punct::LParen)? {
+            return Ok(None);
+        }
+        if self.peek_is(Punct::LBracket)? || self.next_is_register_part()? {
+            return self.parse_address_parts(None).map(Some);
+        }
+        // An expression is a mode only if something follows it inside the
+        // parentheses; otherwise it is the start of a larger expression.
+        if let Ok(expr) = self.parse_expr() {
+            let width = self.parse_disp_width()?;
+            if self.eat(Punct::Comma)? {
+                return self.parse_address_parts(Some((expr, width))).map(Some);
+            }
+        }
+        self.lexer.set_pos(saved);
+        Ok(None)
+    }
+
+    fn next_is_register_part(&self) -> Result<bool, Diagnostic> {
         Ok(match self.peek()? {
-            Tok::Ident(name) => matches!(self.parser.reg(name), Some(Reg::Addr(_) | Reg::Pc)),
+            Tok::Ident(name) => self.address_part(name).is_some(),
             _ => false,
         })
     }
 
-    /// Parses `An)`, `An,Xn)`, `PC)` or `PC,Xn)` after the displacement.
-    fn parse_base_and_index(&mut self, disp: Expr) -> Result<Mode, Diagnostic> {
+    /// Reads an optional `.w` or `.l` after a displacement.
+    fn parse_disp_width(&mut self) -> Result<Option<Width>, Diagnostic> {
         let start = self.lexer.pos();
-        let base = self
-            .eat_ident()?
-            .as_deref()
-            .and_then(|word| self.parser.reg(word))
-            .filter(|reg| !matches!(reg, Reg::Data(_)));
-        let Some(base) = base else {
-            return Err(self.error_at("syntax", "address register or PC expected", start));
-        };
-        let index = if self.eat(Punct::Comma)? {
-            Some(self.parse_index()?)
-        } else {
-            None
-        };
-        self.expect(Punct::RParen, ")")?;
-        Ok(match (base, index) {
-            (Reg::Addr(n), None) => Mode::Disp(disp, n),
-            (Reg::Addr(n), Some(index)) => Mode::Index(disp, n, index),
-            (_, None) => Mode::PcDisp(disp),
-            (_, Some(index)) => Mode::PcIndex(disp, index),
-        })
+        match self.parse_size_suffix()? {
+            None => Ok(None),
+            Some(Size::Word) => Ok(Some(Width::Word)),
+            Some(Size::Long) => Ok(Some(Width::Long)),
+            Some(_) => Err(self.error_at("bad-size", "a displacement is .w or .l", start)),
+        }
     }
 
-    fn parse_index(&mut self) -> Result<IndexReg, Diagnostic> {
+    /// Interprets a word inside an addressing mode's parentheses.
+    fn address_part(&self, name: &str) -> Option<AddressPart> {
+        if let Some(reg) = self.parser.reg(name) {
+            return match reg {
+                Reg::Data(n) => Some(AddressPart::Data(n)),
+                Reg::Addr(n) => Some(AddressPart::Addr(n)),
+                Reg::Pc => Some(AddressPart::Pc),
+                _ => None,
+            };
+        }
+        match name.to_ascii_lowercase().as_bytes() {
+            [b'z', b'p', b'c'] => Some(AddressPart::SuppressedPc),
+            [b'z', b's', b'p'] => Some(AddressPart::SuppressedAddr(7)),
+            [b'z', b'a', n @ b'0'..=b'7'] => Some(AddressPart::SuppressedAddr(n - b'0')),
+            [b'z', b'd', n @ b'0'..=b'7'] => Some(AddressPart::SuppressedData(n - b'0')),
+            _ => None,
+        }
+    }
+
+    /// Parses what is inside an addressing mode's parentheses, up to and
+    /// including the closing one. `displacement` was read before the caller knew
+    /// this was a mode.
+    fn parse_address_parts(
+        &mut self,
+        displacement: Option<(Expr, Option<Width>)>,
+    ) -> Result<Mode, Diagnostic> {
         let start = self.lexer.pos();
-        let reg = match self
-            .eat_ident()?
-            .as_deref()
-            .and_then(|word| self.parser.reg(word))
-        {
-            Some(Reg::Data(n)) => n,
-            Some(Reg::Addr(n)) => n + 8,
-            _ => return Err(self.error_at("syntax", "index register expected", start)),
+        let mut parts = ModeParts {
+            base_disp: displacement,
+            ..ModeParts::default()
         };
+        if self.eat(Punct::LBracket)? {
+            self.parse_part_list(&mut parts)?;
+            self.expect(Punct::RBracket, "]")?;
+            parts.indirection = if parts.index.is_some() {
+                Indirection::PreIndexed
+            } else {
+                Indirection::PostIndexed
+            };
+            if self.eat(Punct::Comma)? {
+                self.parse_after_memory(&mut parts)?;
+            }
+        } else if !self.peek_is(Punct::RParen)? {
+            self.parse_part_list(&mut parts)?;
+        }
+        self.expect(Punct::RParen, ")")?;
+        let is_plain = parts.index.is_none() && parts.base_disp.is_none();
+        if is_plain && parts.indirection == Indirection::None {
+            if let Some(FullBase::Addr(n)) = parts.base {
+                if self.eat(Punct::Plus)? {
+                    return Ok(Mode::PostInc(n));
+                }
+            }
+        }
+        parts
+            .into_mode()
+            .map_err(|message| self.error_at("syntax", message, start))
+    }
+
+    /// Parses comma-separated base, index and displacement.
+    fn parse_part_list(&mut self, parts: &mut ModeParts) -> Result<(), Diagnostic> {
+        loop {
+            self.parse_part(parts)?;
+            if !self.eat(Punct::Comma)? {
+                return Ok(());
+            }
+        }
+    }
+
+    fn parse_part(&mut self, parts: &mut ModeParts) -> Result<(), Diagnostic> {
+        let start = self.lexer.pos();
+        let part = match self.peek()? {
+            Tok::Ident(name) => self.address_part(name),
+            _ => None,
+        };
+        let Some(part) = part else {
+            if parts.base.is_some() || parts.index.is_some() || parts.base_disp.is_some() {
+                return Err(self.error_at("syntax", "base or index register expected", start));
+            }
+            let expr = self.parse_expr()?;
+            let width = self.parse_disp_width()?;
+            parts.base_disp = Some((expr, width));
+            return Ok(());
+        };
+        self.advance()?;
+        // An address register is the base, unless there is one or it has a suffix.
+        // A base can't come after the index.
+        let has_suffix = self.peek_is(Punct::Dot)? || self.peek_is(Punct::Star)?;
+        if parts.index.is_some() && parts.base.is_none() && !has_suffix {
+            return Err(self.error_at("syntax", "the base comes before the index", start));
+        }
+        match part {
+            AddressPart::Addr(n) if parts.base.is_none() && !has_suffix => {
+                parts.base = Some(FullBase::Addr(n));
+            }
+            AddressPart::Pc if parts.base.is_none() => parts.base = Some(FullBase::Pc),
+            AddressPart::SuppressedPc if parts.base.is_none() => {
+                parts.base = Some(FullBase::SuppressedPc);
+            }
+            AddressPart::SuppressedAddr(n) if parts.base.is_none() && !has_suffix => {
+                parts.base = Some(FullBase::SuppressedAddr(n));
+            }
+            AddressPart::Data(n) => self.set_index(parts, n, false, start)?,
+            AddressPart::Addr(n) => self.set_index(parts, n + 8, false, start)?,
+            AddressPart::SuppressedData(n) => self.set_index(parts, n, true, start)?,
+            AddressPart::SuppressedAddr(n) => self.set_index(parts, n + 8, true, start)?,
+            AddressPart::Pc | AddressPart::SuppressedPc => {
+                return Err(self.error_at("syntax", "more than one base register", start));
+            }
+        }
+        Ok(())
+    }
+
+    fn set_index(
+        &mut self,
+        parts: &mut ModeParts,
+        reg: u8,
+        suppressed: bool,
+        start: usize,
+    ) -> Result<(), Diagnostic> {
+        if parts.index.is_some() {
+            return Err(self.error_at("syntax", "more than one index register", start));
+        }
+        parts.index = Some(self.parse_index_suffix(reg, suppressed, start)?);
+        Ok(())
+    }
+
+    /// Reads the optional size and scale of an index register.
+    fn parse_index_suffix(
+        &mut self,
+        reg: u8,
+        suppressed: bool,
+        start: usize,
+    ) -> Result<IndexReg, Diagnostic> {
         let long = match self.parse_size_suffix()? {
             None | Some(Size::Word) => false,
             Some(Size::Long) => true,
             Some(_) => return Err(self.error_at("bad-size", "an index is .w or .l", start)),
         };
-        Ok(IndexReg { reg, long })
+        let mut scale = 0;
+        if self.eat(Punct::Star)? {
+            let at = self.lexer.pos();
+            scale = match self.peek()? {
+                Tok::Num(1) => 0,
+                Tok::Num(2) => 1,
+                Tok::Num(4) => 2,
+                Tok::Num(8) => 3,
+                _ => return Err(self.error_at("syntax", "scale must be 1, 2, 4 or 8", at)),
+            };
+            self.advance()?;
+        }
+        Ok(IndexReg {
+            reg,
+            long,
+            scale,
+            suppressed,
+        })
+    }
+
+    /// Parses what can follow `[...]`: an index and an outer displacement.
+    fn parse_after_memory(&mut self, parts: &mut ModeParts) -> Result<(), Diagnostic> {
+        let start = self.lexer.pos();
+        let part = match self.peek()? {
+            Tok::Ident(name) => self.address_part(name),
+            _ => None,
+        };
+        if let Some(part) = part {
+            self.advance()?;
+            let (reg, suppressed) = match part {
+                AddressPart::Data(n) => (n, false),
+                AddressPart::Addr(n) => (n + 8, false),
+                AddressPart::SuppressedData(n) => (n, true),
+                AddressPart::SuppressedAddr(n) => (n + 8, true),
+                _ => return Err(self.error_at("syntax", "index register expected", start)),
+            };
+            if parts.index.is_some() {
+                return Err(self.error_at("syntax", "more than one index register", start));
+            }
+            parts.index = Some(self.parse_index_suffix(reg, suppressed, start)?);
+            if !self.eat(Punct::Comma)? {
+                return Ok(());
+            }
+        }
+        let expr = self.parse_expr()?;
+        let width = self.parse_disp_width()?;
+        parts.outer_disp = Some(FullDisp { expr, width });
+        Ok(())
     }
 
     fn parse_dc(&mut self, size: Option<Size>, span: Span) -> Result<(), Diagnostic> {
@@ -2177,6 +3220,21 @@ impl LineParser<'_, '_, '_> {
 
     fn parse_data_item(&mut self, size: Size) -> Result<DataItem, Diagnostic> {
         let start = self.lexer.pos();
+        if matches!(
+            size,
+            Size::Single | Size::Double | Size::Extended | Size::Packed
+        ) {
+            if let Some(text) = self.lexer.float_literal() {
+                return Ok(DataItem::Float(FloatLiteral { text }, self.span(start)));
+            }
+            let (expr, is_raw) = self.parse_expr_tracking_raw()?;
+            let span = self.span(start);
+            if !is_raw {
+                let text = self.decimal_expression_text(&expr)?;
+                return Ok(DataItem::Float(FloatLiteral { text }, span));
+            }
+            return Ok(DataItem::Expr(expr, span));
+        }
         if size == Size::Byte {
             if let Tok::Str(bytes) = self.peek()? {
                 let saved = self.lexer.pos();
@@ -2273,10 +3331,19 @@ impl LineParser<'_, '_, '_> {
             return self.parse_unary();
         }
         let mut left = self.parse_binary(level + 1)?;
+        let mut chain = 0;
         while let Tok::Punct(punct) = self.peek()? {
             let Some(op) = binary_op(punct, level) else {
                 break;
             };
+            chain += 1;
+            if chain > MAX_EXPRESSION_CHAIN {
+                return Err(self.error_at(
+                    "expression-depth",
+                    "expression too long",
+                    self.lexer.pos(),
+                ));
+            }
             self.advance()?;
             let right = self.parse_binary(level + 1)?;
             left = Expr::Binary(op, Box::new(left), Box::new(right));
@@ -2285,7 +3352,26 @@ impl LineParser<'_, '_, '_> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, Diagnostic> {
+        if self.expression_depth >= MAX_EXPRESSION_DEPTH {
+            return Err(self.error_at(
+                "expression-depth",
+                "expression nested too deeply",
+                self.lexer.pos(),
+            ));
+        }
+        self.expression_depth += 1;
+        let result = self.parse_unary_inner();
+        self.expression_depth -= 1;
+        result
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr, Diagnostic> {
         let start = self.lexer.pos();
+        // Decimal digits are the only thing that keeps an expression a number.
+        let first = self.lexer.rest().first().copied();
+        if !matches!(first, Some(b'0'..=b'9' | b'(' | b'-' | b'+' | b'~' | b'!')) {
+            self.expression_is_raw = true;
+        }
         let tok = self.peek()?;
         let op = match tok {
             Tok::Punct(Punct::Minus) => Some(UnaryOp::Neg),

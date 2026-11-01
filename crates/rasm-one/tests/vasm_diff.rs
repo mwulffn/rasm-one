@@ -8,7 +8,9 @@ use rasm_oracle::{Format, Vasm};
 fn ours(source: &str) -> Assembly {
     let mut files = MemoryProvider::new();
     files.insert("t.s", source);
-    assemble(&Options::new("t.s"), &files)
+    let mut options = Options::new("t.s");
+    options.fixed_addresses = true;
+    assemble(&options, &files)
 }
 
 /// Sources both assemblers must accept, with identical bytes.
@@ -319,6 +321,50 @@ const ACCEPTED: &[&str] = &[
     "x rs 2\ny rs 0\n dc.b x,y",
     "n equ 3\nx rs.b n\ny rs.b 0\n dc.b y",
     " rs.b 4\ny rs.b 0\n dc.b y",
+    // Local labels on an instruction's line belong to the label before them.
+    "foo: nop\n.x: nop\nbar: bra .x\n.x: rts",
+    "foo: dc.w .x\n.x: nop\nbar: dc.w .x\n.x: rts",
+    // Immediates that are the 32-bit view of a negative number.
+    " move.w #$ffffff00,d0",
+    " move.w #$ffff8000,d0",
+    " move.b #$ffffff80,d0",
+    // Habits seen in real sources.
+    "l:rts",
+    "l::rts",
+    "l:dc.w 1",
+    " l:rts",
+    "  * c\n nop",
+    "\t*** x\n nop",
+    " *c",
+    "l: *c\n nop",
+    "l *c",
+    " list\n nop",
+    " nolist\n nop",
+    " LIST x y\n nop",
+    " page\n nopage\n ttl x\n spc 1\n llen 80\n plen 60\n nop",
+    // so and fo.
+    "x so.w 1\ny so.b 0\n dc.b x,y",
+    " clrso\nx so.l 1\n dc.b x",
+    " setso 8\nx so.w 1\ny so.b 0\n dc.b x,y",
+    " so.w 2\nx so.b 0\n dc.b x",
+    " clrfo\nx fo.w 1\ny fo.b 1\n dc.w x,y",
+    " setfo 8\nx fo.w 1\n dc.w x",
+    // offset blocks.
+    " offset\nx ds.w 1\ny ds.b 0\n section c,code\n dc.b x,y",
+    " offset 4\nx ds.w 1\ny ds.b 0\n section c,code\n dc.b x,y",
+    " offset 4\nx ds.w 1\ny ds.b 0\n dc.b x,y",
+    " offset\nx ds.w 1\n dc.b 1",
+    " dc.b 1\n offset\n ds.w 1\n dc.b 2",
+    " section c,code\n nop\n offset\nx ds.l 1\ny ds.b 0\n section c,code\n dc.b y\n rts",
+    // Directives that make no bytes.
+    " idnt x\n nop",
+    " idnt \"x y\"\n nop",
+    " printt \"x\"\n nop",
+    " echo \"x\"\n nop",
+    " printv 1\n nop",
+    " text\n nop",
+    " cseg\n nop",
+    " dseg\n dc.w 1",
     // end and section shortcuts.
     " end\n bogus",
     " nop\n end\n nop",
@@ -354,6 +400,10 @@ const ACCEPTED: &[&str] = &[
 
 /// Valid syntax that both assemblers must reject.
 const REJECTED: &[&str] = &[
+    " move.w #$ffff0000,d0",
+    " move.w #$ffff7fff,d0",
+    " move.b #$ffffff00,d0",
+    " move.b #$ffffff7f,d0",
     " moveq #-129,d0",
     " addq.w #0,d0",
     " addq.w #9,d0",
@@ -474,6 +524,13 @@ const REJECTED: &[&str] = &[
 /// Deliberately stricter than vasm, which only warns or misreads these. The
 /// brief asks for a strict dialect in which anything else is a clear error.
 const STRICTER_THAN_VASM: &[&str] = &[
+    " machine 99",
+    " machine",
+    " cpu32",
+    " opt o-\n nop",
+    " idnt",
+    " printt",
+    " so.s 1",
     " fail",
     " fail oops",
     " cnop 0",

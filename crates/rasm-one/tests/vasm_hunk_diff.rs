@@ -2,7 +2,10 @@
 
 use std::error::Error;
 
-use rasm_one::{assemble, write_hunk_exe, MemoryProvider, Options, OutputError};
+use rasm_one::{
+    assemble, write_hunk_exe, write_hunk_exe_with, HunkExeOptions, MemoryProvider, Options,
+    OutputError,
+};
 use rasm_oracle::{Format, Vasm};
 
 fn ours(source: &str) -> Result<Vec<u8>, OutputError> {
@@ -74,7 +77,16 @@ const ACCEPTED: &[&str] = &[
     " bss\n ds.w 1\n section BSS,bss\n ds.w 1",
     "x equ 1\nl: nop\ny equ 2",
     "n equ 1\nl: nop\n dc.l l+n",
+    // A constant PC displacement is used as it is, wherever the instruction is.
+    " nop\n nop\n jmp 2(pc,d0.w)\n move.w 4(pc),d0\n lea 6(pc),a0",
+    " nop\n lea 4(pc),a0",
+    // Local labels on an instruction's line belong to the label before them.
+    "foo: nop\n.x: nop\nbar: bra .x\n.x: rts",
+    "foo: nop\n1$: nop\nbar: bra 1$\n1$: rts",
+    "foo: nop\n.x: nop\nbar: lea .x(pc),a0\n.x: rts",
     // Relocations.
+    " move.l #s,s\ns: dc.l s",
+    " move.l s,s\n dc.l s\ns:",
     " dc.b 1\n dc.l s\ns:",
     " section c,code\ns: dc.l s,t,s,t+2\n section d,data\nt: dc.l s,t,u\n section b,bss\nu: ds.w 1",
     " dc.l s\n ds.b 65534\ns: dc.l s",
@@ -125,6 +137,37 @@ fn test_write_hunk_exe_accepted_sources_match_vasm_bytes() -> Result<(), Box<dyn
 }
 
 #[test]
+fn test_write_hunk_exe_kickstart1_matches_vasm_kick1hunks() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for source in ACCEPTED {
+        let source = format!("{source}\n");
+        let theirs =
+            vasm.assemble_with_args(&source, "68000", Format::HunkExe, &["-kick1hunks"])?;
+        assert!(
+            theirs.success,
+            "vasm rejected {source:?}: {}",
+            theirs.stderr
+        );
+        let mut files = MemoryProvider::new();
+        files.insert("t.s", source.as_str());
+        let options = HunkExeOptions { kickstart1: true };
+        match write_hunk_exe_with(&assemble(&Options::new("t.s"), &files), options) {
+            Ok(bytes) if bytes == theirs.bytes => {}
+            Ok(bytes) => failures.push(format!(
+                "{source:?}\n  ours  {bytes:02x?}\n  vasm  {:02x?}",
+                theirs.bytes
+            )),
+            Err(error) => failures.push(format!("{source:?}: {error}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+#[test]
 fn test_write_hunk_exe_rejected_sources_match_vasm_rejection() -> Result<(), Box<dyn Error>> {
     let Some(vasm) = Vasm::from_env()? else {
         return Ok(());
@@ -140,6 +183,14 @@ fn test_write_hunk_exe_rejected_sources_match_vasm_rejection() -> Result<(), Box
     }
     assert!(failures.is_empty(), "we accepted {failures:?}");
     Ok(())
+}
+
+/// See docs/vasm-bugs.md: vasm writes a displacement of 0 for these.
+#[test]
+fn test_write_hunk_exe_branch_to_constant_is_error() {
+    for source in [" bra 4\n", " dbra d0,4\n", " bsr.s 4\n"] {
+        assert!(ours(source).is_err(), "{source}");
+    }
 }
 
 #[test]

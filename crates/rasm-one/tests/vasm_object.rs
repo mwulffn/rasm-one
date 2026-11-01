@@ -86,6 +86,16 @@ const ACCEPTED: &[&str] = &[
     " section c,code\n nop\n move.w t(pc,d0.w),d1\n section d,code\n dc.w 1\nt: dc.w 1",
     " section c,code\n nop\n bsr.s t\n section d,code\n dc.w 1\nt: dc.w 1",
     " section c,code\n nop\n bsr t\n bsr u\n bsr t\n section d,code\nt: dc.w 1\n section e,code\nu: dc.w 1",
+    // idnt and section aliases.
+    " idnt foo\n nop",
+    " idnt \"a b\"\n nop",
+    " idnt abcd\n nop",
+    " text\n nop\n dseg\n dc.w 1",
+    " cseg\n nop",
+    " code\n nop\n text\n rts",
+    // offset blocks hold nothing.
+    " offset\nx ds.w 1\n section c,code\n dc.w x",
+    " nop\n offset 4\nx ds.w 1\ny ds.w 1\n xdef y",
     // Macros and local labels.
     "a: nop\n.l: nop\n xref x\n dc.l .l,x",
     "m macro\n xdef \\1\n\\1: nop\n endm\n m foo\n m bar",

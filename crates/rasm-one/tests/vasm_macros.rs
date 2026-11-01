@@ -37,7 +37,10 @@ const ACCEPTED: &[&str] = &[
     "l: if 1\n dc.b 1\n endc\n dc.l l",
     " IF 1\n ENDC",
     " if 1 ;c\n dc.b 1\n endc ;c",
-    " if 0\n elseif 1\n dc.b 1\n endc",
+    " if 0\n elseif\n dc.b 1\n endc",
+    " if 1\n dc.b 2\n elseif\n dc.b 1\n endc",
+    " if 0\n elif 0\n dc.b 3\n elseif\n dc.b 1\n endc",
+    " if 1\n dc.b 3\n elseif\n dc.b 1\n endc",
     " if 0\n dc.b 1\n elif 1\n dc.b 2\n endc",
     " if 1\n dc.b 1\n elif 1\n dc.b 2\n else\n dc.b 3\n endc",
     " if 0\n dc.b 1\n elif 0\n dc.b 2\n else\n dc.b 3\n endc",
@@ -173,6 +176,9 @@ const REJECTED: &[&str] = &[
 /// vasm accepts these with at most a warning. The dialect is strict, so they
 /// are errors here.
 const STRICTER_THAN_VASM: &[&str] = &[
+    " if 0\n elseif 1\n dc.b 1\n endc",
+    " if 0\n elseif 0\n dc.b 1\n endc",
+    " if 1\n elseif 1\n dc.b 1\n endc",
     " if 1\n else\n else\n endc",
     " if 1,2\n endc",
     "m macro\n dc.b \\1\n endm\n m (1,2)",

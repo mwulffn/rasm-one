@@ -12,7 +12,7 @@
 
 ## Rust Edition and Toolchain
 - Edition: 2021 (always specify in Cargo.toml)
-- MSRV: 1.75.0 (stable, pinned in rust-toolchain.toml)
+- Toolchain: a recent stable, pinned exactly in rust-toolchain.toml and matched by `rust-version` in Cargo.toml. Update both together, deliberately
 - Do NOT use nightly features
 
 ## Error Handling
@@ -42,7 +42,7 @@
 - Do not add a crate to solve a problem that can be solved with std in under 20 lines
 
 ## Testing
-- vasm is the reference: rasm-one's output must match it byte for byte. Differential tests live in `crates/rasm-one/tests/vasm_*.rs` and `sweep_68000.rs`, using the `rasm-oracle` crate
+- vasm is the reference: rasm-one's output must match it byte for byte, except where vasm has a bug. Never copy a bug: do the correct thing, add a test, and add it to `docs/vasm-bugs.md`. Differential tests live in `crates/rasm-one/tests/vasm_*.rs` and `sweep_cpus.rs`, using the `rasm-oracle` crate
 - Get vasm with `export RASM_VASM=$(scripts/fetch-vasm.sh)`. Never commit vasm or its sources (licence)
 - Without `RASM_VASM`, differential tests skip locally and fail in CI. A green local run without it proves little
 - The oracle runs vasm with `-no-opt`. Optimisations are added one rule at a time, each matched to its vasm flag (#20)

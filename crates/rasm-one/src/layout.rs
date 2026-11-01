@@ -5,14 +5,15 @@ use std::cell::Cell;
 use crate::atom::{Atom, AtomKind, DataItem};
 use crate::error::Diagnostic;
 use crate::expr::{eval, Base, Value};
-use crate::isa::encode::{encode, EmitContext};
+use crate::float::float_bytes;
+use crate::isa::encode::{encode, raw_float_bits, EmitContext, Sizer};
 use crate::parser::{add_expansion_chain, is_internal_symbol, Program, SectionEntry};
 use crate::types::{SectionKind, Size};
 use crate::{Expansion, LineEntry, Reloc, Section, Symbol};
 
-/// Forward references in `ds` counts settle quickly; this bound only catches
-/// sources that can never settle.
-const MAX_PASSES: usize = 32;
+/// A chain of forward equates settles one link per pass; this bound only catches
+/// sources that can never settle, or that would take unreasonably long to.
+const MAX_PASSES: usize = 1000;
 
 /// Largest permitted `ds`/`blk` size in bytes.
 const MAX_SPACE: i64 = 0x7FFF_FFFF;
@@ -30,6 +31,8 @@ pub(crate) struct Built {
     pub diagnostics: Vec<Diagnostic>,
     pub files: Vec<String>,
     pub expansions: Vec<Expansion>,
+    pub unit_name: Option<String>,
+    pub max_output_bytes: i64,
 }
 
 /// Lays out a parsed program and generates its bytes.
@@ -58,7 +61,12 @@ pub(crate) fn build(program: Program) -> Built {
     let mut settled = false;
     for _ in 0..MAX_PASSES {
         let before = values.clone();
-        layout_pass(&program.sections, &program.atoms, &values);
+        layout_pass(
+            &program.sections,
+            &program.atoms,
+            &values,
+            program.fixed_addresses,
+        );
         settled = before == values;
         if settled {
             break;
@@ -74,12 +82,34 @@ pub(crate) fn build(program: Program) -> Built {
         });
     }
 
+    // Checked after layout, so nothing has been allocated for an oversized result.
+    let total = layout_pass(
+        &program.sections,
+        &program.atoms,
+        &values,
+        program.fixed_addresses,
+    );
+    let too_large = total > program.max_output_bytes;
+    if too_large {
+        diagnostics.push(Diagnostic {
+            severity: crate::Severity::Error,
+            code: "limit-exceeded",
+            message: format!(
+                "output of {total} bytes exceeds the limit of {} bytes",
+                program.max_output_bytes
+            ),
+            span: None,
+            related: Vec::new(),
+        });
+    }
+
     let lookup = |id: u32| values[id as usize].get();
     let name_of = |id: u32| program.symbols[id as usize].name.clone();
     let mut line_table = Vec::new();
     let mut datas: Vec<Vec<u8>> = vec![Vec::new(); program.sections.len()];
     let mut relocs: Vec<Vec<Reloc>> = vec![Vec::new(); program.sections.len()];
-    for atom in &program.atoms {
+    let emitted: &[Atom] = if too_large { &[] } else { &program.atoms };
+    for atom in emitted {
         let index = atom.section;
         let entry = &program.sections[index];
         let start = datas[index].len() as u32;
@@ -88,6 +118,7 @@ pub(crate) fn build(program: Program) -> Built {
             section: index,
             kind: entry.kind,
             origin: entry.origin,
+            fixed_addresses: program.fixed_addresses,
             span: atom.span,
             instruction_start: 0,
             lookup: &lookup,
@@ -103,7 +134,7 @@ pub(crate) fn build(program: Program) -> Built {
             &program.expansions,
         );
         let len = datas[index].len() as u32 - start;
-        if len > 0 {
+        if len > 0 && !entry.dummy {
             line_table.push(LineEntry {
                 section: index,
                 offset: start,
@@ -125,8 +156,9 @@ pub(crate) fn build(program: Program) -> Built {
             kind: entry.kind,
             mem: entry.mem,
             origin: entry.origin.map(|origin| origin as u32),
-            data,
-            relocs,
+            dummy: entry.dummy,
+            data: if entry.dummy { Vec::new() } else { data },
+            relocs: if entry.dummy { Vec::new() } else { relocs },
         })
         .collect();
 
@@ -159,13 +191,15 @@ pub(crate) fn build(program: Program) -> Built {
         diagnostics,
         files: program.files,
         expansions: program.expansions,
+        unit_name: program.unit_name,
+        max_output_bytes: program.max_output_bytes,
     }
 }
 
 /// The address of a position in a section, as a value.
 fn address(section: usize, entry: &SectionEntry, offset: i64) -> Value {
     match entry.origin {
-        Some(origin) => Value::abs(origin + offset),
+        Some(origin) => Value::abs(origin.saturating_add(offset)),
         None => Value {
             base: Base::Section(section),
             offset,
@@ -175,7 +209,14 @@ fn address(section: usize, entry: &SectionEntry, offset: i64) -> Value {
 
 /// Walks the source once, assigning symbols. Forward references that are not
 /// known yet count as zero when sizing.
-fn layout_pass(sections: &[SectionEntry], atoms: &[Atom], values: &SymbolValues) {
+///
+/// Returns the total size in bytes.
+fn layout_pass(
+    sections: &[SectionEntry],
+    atoms: &[Atom],
+    values: &SymbolValues,
+    fixed_addresses: bool,
+) -> i64 {
     let mut offsets = vec![0i64; sections.len()];
     for atom in atoms {
         let section = atom.section;
@@ -190,28 +231,45 @@ fn layout_pass(sections: &[SectionEntry], atoms: &[Atom], values: &SymbolValues)
                     values[*id as usize].set(Some(value));
                 }
             }
-            _ => offsets[section] += atom_len(atom, here, offset, entry, values),
+            _ => {
+                let len = atom_len(atom, section, here, offset, entry, values, fixed_addresses);
+                offsets[section] = offsets[section].saturating_add(len);
+            }
         }
     }
+    offsets
+        .iter()
+        .fold(0, |total: i64, size| total.saturating_add(*size))
 }
 
 fn atom_len(
     atom: &Atom,
+    section: usize,
     here: Value,
     offset: i64,
     entry: &SectionEntry,
     values: &SymbolValues,
+    fixed_addresses: bool,
 ) -> i64 {
     let lookup = |id: u32| values[id as usize].get().or(Some(Value::abs(0)));
     match &atom.kind {
         AtomKind::Label(_) | AtomKind::Equate(..) => 0,
         AtomKind::AlignInstruction => here.offset & 1,
-        AtomKind::Instruction(instruction) => i64::from(instruction.len()),
+        AtomKind::Instruction(instruction) => {
+            let lookup = |id: u32| values[id as usize].get();
+            instruction.len(&Sizer {
+                section,
+                origin: entry.origin,
+                start: offset,
+                fixed_addresses,
+                lookup: &lookup,
+            })
+        }
         AtomKind::Data { size, items } => items
             .iter()
             .map(|item| match item {
                 DataItem::Bytes(bytes) => bytes.len() as i64,
-                DataItem::Expr(..) => i64::from(size.bytes()),
+                DataItem::Expr(..) | DataItem::Float(..) => i64::from(size.bytes()),
             })
             .sum(),
         AtomKind::Space { size, count, .. } => match eval(count, here, &lookup) {
@@ -238,14 +296,18 @@ fn padding(address: i64, alignment: i64, offset: i64) -> i64 {
     if alignment <= 0 {
         return 0;
     }
-    let rounded = (address + alignment - 1) / alignment * alignment;
-    rounded + offset - address
+    // The parser limits these, and layout's positions saturate.
+    let rounded = address.saturating_add(alignment - 1) / alignment * alignment;
+    rounded
+        .saturating_add(offset)
+        .saturating_sub(address)
+        .max(0)
 }
 
 /// Bytes from section position `offset` up to the address `target`, if any.
 fn rorg_padding(target: Value, offset: i64, origin: Option<i64>) -> i64 {
-    let position = target.offset - origin.unwrap_or(0);
-    (position - offset).clamp(0, MAX_SPACE)
+    let position = target.offset.saturating_sub(origin.unwrap_or(0));
+    position.saturating_sub(offset).clamp(0, MAX_SPACE)
 }
 
 fn emit_atom(atom: &Atom, values: &SymbolValues, ctx: &mut EmitContext) {
@@ -322,13 +384,49 @@ fn emit_data_item(item: &DataItem, size: Size, ctx: &mut EmitContext) {
             return;
         }
         DataItem::Expr(expr, span) => (expr, *span),
+        DataItem::Float(literal, span) => {
+            emit_float(&literal.text, size, *span, ctx);
+            return;
+        }
     };
     let pc = ctx.address_of(ctx.data.len() as i64);
     let bytes = size.bytes();
     let Some(value) = ctx.evaluate(expr, pc, span) else {
-        ctx.put_zero(bytes);
+        ctx.data.resize(ctx.data.len() + bytes as usize, 0);
         return;
     };
+    match size {
+        Size::Single | Size::Double | Size::Extended | Size::Packed => {
+            // The parser turns decimal numbers into literals, so what is left here
+            // is hex, octal, binary or symbols, which supply the raw bits.
+            if value.base != Base::Absolute {
+                ctx.diagnostics.push(Diagnostic::error(
+                    "not-absolute",
+                    "floating-point data must be a constant",
+                    span,
+                ));
+                ctx.data.resize(ctx.data.len() + bytes as usize, 0);
+                return;
+            }
+            ctx.data
+                .extend_from_slice(&raw_float_bits(value.offset, size));
+            return;
+        }
+        Size::Quad => {
+            if value.base != Base::Absolute {
+                ctx.diagnostics.push(Diagnostic::error(
+                    "not-absolute",
+                    "64-bit data must be a constant",
+                    span,
+                ));
+                ctx.data.resize(ctx.data.len() + 8, 0);
+                return;
+            }
+            ctx.data.extend_from_slice(&value.offset.to_be_bytes());
+            return;
+        }
+        _ => {}
+    }
     match size {
         Size::Byte | Size::Short if !(-0x80..=0xFF).contains(&value.offset) => {
             out_of_range(span, ctx)
@@ -344,6 +442,20 @@ fn emit_data_item(item: &DataItem, size: Size, ctx: &mut EmitContext) {
         _ => {}
     }
     ctx.put_value(value, bytes);
+}
+
+fn emit_float(text: &str, size: Size, span: crate::Span, ctx: &mut EmitContext) {
+    match float_bytes(text, size) {
+        Some(bytes) => ctx.data.extend_from_slice(&bytes),
+        None => {
+            ctx.diagnostics.push(Diagnostic::error(
+                "bad-float",
+                "floating-point value out of range",
+                span,
+            ));
+            ctx.data.resize(ctx.data.len() + size.bytes() as usize, 0);
+        }
+    }
 }
 
 fn out_of_range(span: crate::Span, ctx: &mut EmitContext) {
@@ -387,11 +499,15 @@ fn emit_space(
         },
         None => 0,
     };
-    let width = size.bytes() as usize;
-    let pattern = (fill_value as u32).to_be_bytes();
-    let pattern = &pattern[4 - width..];
+    let pattern = space_pattern(size, fill_value);
     ctx.data.reserve(total as usize);
     for _ in 0..value.offset {
-        ctx.data.extend_from_slice(pattern);
+        ctx.data.extend_from_slice(&pattern);
     }
+}
+
+/// The bytes a `blk` or `dcb` repeats. The fill value supplies the raw bits, even
+/// in floating-point sizes, unlike a number in `dc`.
+fn space_pattern(size: Size, fill: i64) -> Vec<u8> {
+    raw_float_bits(fill, size)
 }

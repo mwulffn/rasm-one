@@ -85,6 +85,51 @@ impl Vasm {
         self.assemble_with_files(source, cpu, format, &[])
     }
 
+    /// Assembles an existing file to a hunk object, from its own directory.
+    pub fn assemble_file(
+        &self,
+        dir: &Path,
+        file: &str,
+        cpu: &str,
+        args: &[&str],
+    ) -> Result<Output, OracleError> {
+        let out_dir = unique_temp_dir()?;
+        let out_file = out_dir.join("out");
+        let run = Command::new(&self.path)
+            .current_dir(dir)
+            .args(["-quiet", "-no-opt", "-maxerrors=1", "-Fhunk"])
+            .arg(format!("-m{cpu}"))
+            .args(args)
+            .arg("-o")
+            .arg(&out_file)
+            .arg(file)
+            .output();
+        let bytes = fs::read(&out_file).unwrap_or_default();
+        // Best effort: a leftover temp dir must not fail the test.
+        let _ = fs::remove_dir_all(&out_dir);
+        let out = run?;
+        Ok(Output {
+            success: out.status.success(),
+            bytes,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    /// Like [`Vasm::assemble`], with extra command-line arguments.
+    pub fn assemble_with_args(
+        &self,
+        source: &str,
+        cpu: &str,
+        format: Format,
+        args: &[&str],
+    ) -> Result<Output, OracleError> {
+        let dir = unique_temp_dir()?;
+        let result = self.run_in(&dir, source, cpu, format, args);
+        // Best effort: a leftover temp dir must not fail the test.
+        let _ = fs::remove_dir_all(&dir);
+        result
+    }
+
     /// Like [`Vasm::assemble`], with extra files beside the source, given as
     /// relative paths and contents.
     pub fn assemble_with_files(
@@ -95,7 +140,8 @@ impl Vasm {
         files: &[(&str, &[u8])],
     ) -> Result<Output, OracleError> {
         let dir = unique_temp_dir()?;
-        let result = write_files(&dir, files).and_then(|()| self.run_in(&dir, source, cpu, format));
+        let result =
+            write_files(&dir, files).and_then(|()| self.run_in(&dir, source, cpu, format, &[]));
         // Best effort: a leftover temp dir must not fail the test.
         let _ = fs::remove_dir_all(&dir);
         result
@@ -107,6 +153,7 @@ impl Vasm {
         source: &str,
         cpu: &str,
         format: Format,
+        args: &[&str],
     ) -> Result<Output, OracleError> {
         fs::write(dir.join(SOURCE_NAME), source)?;
         let out = Command::new(&self.path)
@@ -114,6 +161,7 @@ impl Vasm {
             .args(["-quiet", "-no-opt", "-maxerrors=0"])
             .arg(format!("-m{cpu}"))
             .arg(format.flag())
+            .args(args)
             .args(["-o", "out", SOURCE_NAME])
             .output()?;
         let bytes = match fs::read(dir.join("out")) {

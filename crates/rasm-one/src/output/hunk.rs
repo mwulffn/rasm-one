@@ -17,12 +17,14 @@ const HUNK_SYMBOL: u32 = 0x3F0;
 const HUNK_END: u32 = 0x3F2;
 const HUNK_HEADER: u32 = 0x3F3;
 const HUNK_RELOC32SHORT: u32 = 0x3F7;
+const HUNK_RELRELOC32: u32 = 0x3FD;
 
 const EXT_DEF: u8 = 0x01;
 const EXT_ABS: u8 = 0x02;
 const EXT_REF32: u8 = 0x81;
 const EXT_REF16: u8 = 0x83;
 const EXT_REF8: u8 = 0x84;
+const EXT_RELREF32: u8 = 0x88;
 const EXT_ABSREF16: u8 = 0x8A;
 const EXT_ABSREF8: u8 = 0x8B;
 
@@ -44,14 +46,14 @@ struct Hunks<'a> {
 /// Sections become hunks in order of first appearance, leaving out those with
 /// neither bytes nor symbols. Any symbol counts, even a local label that won't
 /// be listed.
-fn select_hunks(assembly: &Assembly) -> Hunks {
+fn select_hunks(assembly: &Assembly) -> Hunks<'_> {
     let has_symbol = |index: usize| assembly.symbols.iter().any(|s| s.section == Some(index));
     let mut hunks = Hunks {
         list: Vec::new(),
         numbers: vec![None; assembly.sections.len()],
     };
     for (index, section) in assembly.sections.iter().enumerate() {
-        if !section.data.is_empty() || has_symbol(index) {
+        if !section.dummy && (!section.data.is_empty() || has_symbol(index)) {
             hunks.numbers[index] = Some(hunks.list.len() as u32);
             hunks.list.push((index, section));
         }
@@ -63,14 +65,35 @@ fn check_writable(assembly: &Assembly) -> Result<(), OutputError> {
     if assembly.has_errors() {
         return Err(OutputError::HasErrors);
     }
-    if assembly.sections.iter().any(|s| s.origin.is_some()) {
+    if assembly
+        .sections
+        .iter()
+        .any(|s| !s.dummy && s.origin.is_some())
+    {
         return Err(OutputError::FixedAddress);
     }
     Ok(())
 }
 
-/// Writes an executable.
+/// Settings for [`write_hunk_exe_with`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HunkExeOptions {
+    /// Use only hunk types that Kickstart 1.x can load. Its loader refuses the
+    /// compact relocation format with error 121, "file is not executable".
+    pub kickstart1: bool,
+}
+
+/// Writes an executable as vasm does by default, which needs Kickstart 2.0 or
+/// later. See [`write_hunk_exe_with`] for one that also loads on 1.x.
 pub fn write_hunk_exe(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
+    write_hunk_exe_with(assembly, HunkExeOptions::default())
+}
+
+/// Writes an executable.
+pub fn write_hunk_exe_with(
+    assembly: &Assembly,
+    options: HunkExeOptions,
+) -> Result<Vec<u8>, OutputError> {
     check_writable(assembly)?;
     let hunks = select_hunks(assembly);
     let mut out = Writer::default();
@@ -92,7 +115,7 @@ pub fn write_hunk_exe(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     for &(index, section) in &hunks.list {
         write_contents(section, 0, &mut out);
         if section.kind != SectionKind::Bss {
-            write_exe_relocs(section, &hunks.numbers, &mut out)?;
+            write_exe_relocs(section, &hunks.numbers, options, &mut out)?;
         }
         write_symbols(assembly, index, &mut out);
         out.long(HUNK_END);
@@ -107,7 +130,11 @@ pub fn write_hunk_object(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     let mut out = Writer::default();
     out.long(HUNK_UNIT);
     let main = assembly.files.first().map_or("", String::as_str);
-    out.name(main.rsplit('/').next().unwrap_or(main), 0);
+    let unit = match &assembly.unit_name {
+        Some(name) => name.as_str(),
+        None => main.rsplit('/').next().unwrap_or(main),
+    };
+    out.name(unit, 0);
 
     let is_constant_export = |s: &&Symbol| s.exported && s.section.is_none();
     if hunks.list.is_empty() {
@@ -236,15 +263,17 @@ fn target_hunk(
         .ok_or_else(|| unsupported(section, reloc))
 }
 
-/// Writes offsets up to 64K in the compact format and any others in the long
-/// format.
+/// Writes offsets up to 64K in the compact format, unless told not to, and any
+/// others in the long format.
 fn write_exe_relocs(
     section: &Section,
     numbers: &[Option<u32>],
+    options: HunkExeOptions,
     out: &mut Writer,
 ) -> Result<(), OutputError> {
     let mut short = OffsetsByHunk::new();
     let mut long = OffsetsByHunk::new();
+    let mut relative = OffsetsByHunk::new();
     for reloc in &section.relocs {
         let target = match &reloc.target {
             RelocTarget::Section(target) => *target,
@@ -255,34 +284,48 @@ fn write_exe_relocs(
                 });
             }
         };
-        if reloc.size != 4 || reloc.kind != RelocKind::Absolute {
+        let hunk = target_hunk(section, reloc, target, numbers)?;
+        if reloc.size == 4 && reloc.kind == RelocKind::PcRelative {
+            // This type has only the compact form, and Kickstart 1.x lacks it.
+            if options.kickstart1 || reloc.offset > MAX_SHORT_OFFSET {
+                return Err(unsupported(section, reloc));
+            }
+            add_offset(&mut relative, hunk, reloc.offset);
+            continue;
+        }
+        if reloc.size != 4 {
             return Err(unsupported(section, reloc));
         }
-        let hunk = target_hunk(section, reloc, target, numbers)?;
-        if reloc.offset <= MAX_SHORT_OFFSET {
+        if reloc.offset <= MAX_SHORT_OFFSET && !options.kickstart1 {
             add_offset(&mut short, hunk, reloc.offset);
         } else {
             add_offset(&mut long, hunk, reloc.offset);
         }
     }
-    if !short.is_empty() {
-        out.long(HUNK_RELOC32SHORT);
-        let mut words = 0;
-        for (hunk, offsets) in &short {
-            out.word(offsets.len() as u16);
-            out.word(*hunk as u16);
-            for &offset in offsets {
-                out.word(offset as u16);
-            }
-            words += 2 + offsets.len();
-        }
-        out.word(0);
-        if (words + 1) % 2 != 0 {
-            out.word(0); // Keep the stream long-aligned.
-        }
-    }
+    write_short_relocs(HUNK_RELOC32SHORT, &short, out);
     write_long_relocs(HUNK_RELOC32, &long, out);
+    write_short_relocs(HUNK_RELRELOC32, &relative, out);
     Ok(())
+}
+
+fn write_short_relocs(hunk_type: u32, groups: &OffsetsByHunk, out: &mut Writer) {
+    if groups.is_empty() {
+        return;
+    }
+    out.long(hunk_type);
+    let mut words = 0;
+    for (hunk, offsets) in groups {
+        out.word(offsets.len() as u16);
+        out.word(*hunk as u16);
+        for &offset in offsets {
+            out.word(offset as u16);
+        }
+        words += 2 + offsets.len();
+    }
+    out.word(0);
+    if (words + 1) % 2 != 0 {
+        out.word(0); // Keep the stream long-aligned.
+    }
 }
 
 fn write_long_relocs(hunk_type: u32, groups: &OffsetsByHunk, out: &mut Writer) {
@@ -309,6 +352,7 @@ fn write_object_relocs(
     let mut absolute = OffsetsByHunk::new();
     let mut pc16 = OffsetsByHunk::new();
     let mut pc8 = OffsetsByHunk::new();
+    let mut pc32 = OffsetsByHunk::new();
     for reloc in relocs {
         let RelocTarget::Section(target) = reloc.target else {
             continue; // External references are written separately.
@@ -316,6 +360,7 @@ fn write_object_relocs(
         let hunk = target_hunk(section, reloc, target, numbers)?;
         match (reloc.kind, reloc.size) {
             (RelocKind::Absolute, 4) => add_offset(&mut absolute, hunk, reloc.offset),
+            (RelocKind::PcRelative, 4) => add_offset(&mut pc32, hunk, reloc.offset),
             (RelocKind::PcRelative, 2) => add_offset(&mut pc16, hunk, reloc.offset),
             (RelocKind::PcRelative, 1) => add_offset(&mut pc8, hunk, reloc.offset),
             _ => return Err(unsupported(section, reloc)),
@@ -324,6 +369,7 @@ fn write_object_relocs(
     write_long_relocs(HUNK_RELOC32, &absolute, out);
     write_long_relocs(HUNK_RELOC16, &pc16, out);
     write_long_relocs(HUNK_RELOC8, &pc8, out);
+    write_long_relocs(HUNK_RELRELOC32, &pc32, out);
     Ok(())
 }
 
@@ -333,6 +379,7 @@ fn external_ref_kind(reloc: &Reloc) -> Option<u8> {
         (RelocKind::Absolute, 4) => Some(EXT_REF32),
         (RelocKind::Absolute, 2) => Some(EXT_ABSREF16),
         (RelocKind::Absolute, 1) => Some(EXT_ABSREF8),
+        (RelocKind::PcRelative, 4) => Some(EXT_RELREF32),
         (RelocKind::PcRelative, 2) => Some(EXT_REF16),
         (RelocKind::PcRelative, 1) => Some(EXT_REF8),
         _ => None,

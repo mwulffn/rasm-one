@@ -1,0 +1,17 @@
+[package]
+name = "rasm-one-wasm"
+description = "JavaScript bindings for the rasm-one 68k assembler"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rasm-one = { path = "../rasm-one" }
+# Must match the wasm-bindgen tool version in scripts/wasm-smoke.sh.
+wasm-bindgen = "=0.2.130"

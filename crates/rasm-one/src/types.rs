@@ -1,6 +1,7 @@
 //! Shared types.
 
 /// Operation or data size as written in source.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Size {
     /// `.b`
@@ -9,17 +10,31 @@ pub enum Size {
     Word,
     /// `.l`
     Long,
-    /// `.s`, the short branch form.
+    /// `.s`: the short form of a branch, or single precision on an FPU operand
+    /// or in data. The parser turns it into [`Size::Single`] where that applies.
     Short,
+    /// `.s` as single precision.
+    Single,
+    /// `.d`
+    Double,
+    /// `.x`
+    Extended,
+    /// `.p`
+    Packed,
+    /// `.q`
+    Quad,
 }
 
 impl Size {
-    /// Width of a data element in bytes. `.s` counts as a byte.
+    /// Width of a data element in bytes. `.s` counts as a byte until the parser
+    /// has decided that it means single precision.
     pub fn bytes(self) -> u32 {
         match self {
             Size::Byte | Size::Short => 1,
             Size::Word => 2,
-            Size::Long => 4,
+            Size::Long | Size::Single => 4,
+            Size::Double | Size::Quad => 8,
+            Size::Extended | Size::Packed => 12,
         }
     }
 
@@ -29,12 +44,17 @@ impl Size {
             "w" => Some(Size::Word),
             "l" => Some(Size::Long),
             "s" => Some(Size::Short),
+            "d" => Some(Size::Double),
+            "x" => Some(Size::Extended),
+            "p" => Some(Size::Packed),
+            "q" => Some(Size::Quad),
             _ => None,
         }
     }
 }
 
 /// Target CPU.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Cpu {
     /// MC68000
@@ -53,6 +73,19 @@ pub enum Cpu {
 }
 
 impl Cpu {
+    /// The CPU with this number, such as `68020`.
+    pub fn from_number(number: u32) -> Option<Cpu> {
+        match number {
+            68000 => Some(Cpu::M68000),
+            68010 => Some(Cpu::M68010),
+            68020 => Some(Cpu::M68020),
+            68030 => Some(Cpu::M68030),
+            68040 => Some(Cpu::M68040),
+            68060 => Some(Cpu::M68060),
+            _ => None,
+        }
+    }
+
     /// Mask with only this CPU set.
     pub const fn mask(self) -> CpuSet {
         CpuSet(match self {
@@ -81,6 +114,7 @@ impl CpuSet {
 }
 
 /// Kind of a section.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SectionKind {
     /// Code.
@@ -92,6 +126,7 @@ pub enum SectionKind {
 }
 
 /// Amiga memory requirement of a section.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemKind {
     /// No requirement.
