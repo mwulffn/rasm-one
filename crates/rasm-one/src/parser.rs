@@ -22,7 +22,7 @@ use crate::source::{FileId, FileProvider, Span};
 use crate::types::{Cpu, MemKind, SectionKind, Size};
 use crate::{
     Expansion, ExpansionKind, FpuChoice, Optimisations, RULE_ABSOLUTES, RULE_BRANCHES,
-    RULE_DISPLACEMENTS, RULE_QUICK_MOVES,
+    RULE_DISPLACEMENTS, RULE_QUICK_ARITHMETIC, RULE_QUICK_MOVES,
 };
 
 /// A symbol being collected.
@@ -2740,6 +2740,7 @@ impl LineParser<'_, '_, '_> {
         } else {
             QuickMoves::WithSecondInstruction
         });
+        let quick_row = self.quick_row_for(mnemonic, size.or(row.default_size), &operands);
         // What can't be a word, such as a branch target, isn't shortable after all.
         let mut operands = operands;
         for (operand, allowed) in operands.iter_mut().zip(row.operands) {
@@ -2757,6 +2758,7 @@ impl LineParser<'_, '_, '_> {
             drops_zero_displacement: self.parser.optimisations.rule(RULE_DISPLACEMENTS),
             shortens_absolutes: self.parser.optimisations.rule(RULE_ABSOLUTES),
             quick_move,
+            quick_row,
             branch_form: Cell::new(BranchForm::Word),
             size: size.or(row.default_size),
             operands,
@@ -2764,6 +2766,34 @@ impl LineParser<'_, '_, '_> {
             fixed_addresses: self.parser.fixed_addresses
                 && self.parser.current == self.parser.implicit_section,
             mmu_68851: self.parser.mmu_68851,
+        })
+    }
+
+    /// The row of the quick form of an addition or subtraction, under rule 5.
+    fn quick_row_for(
+        &self,
+        mnemonic: &str,
+        size: Option<Size>,
+        operands: &[Operand],
+    ) -> Option<&'static InsnRow> {
+        let quick = match mnemonic {
+            "add" | "adda" | "addi" => "addq",
+            "sub" | "suba" | "subi" => "subq",
+            _ => return None,
+        };
+        if !self.parser.optimisations.rule(RULE_QUICK_ARITHMETIC)
+            || !matches!(operands.first()?.mode, Mode::Immediate(_))
+        {
+            return None;
+        }
+        rows_for(quick)?.iter().find(|row| {
+            row.sizes.contains(&size.unwrap_or(Size::Word))
+                && row.operands.len() == operands.len()
+                && row
+                    .operands
+                    .iter()
+                    .zip(operands)
+                    .all(|(set, operand)| set.intersects(operand.mode.class()))
         })
     }
 

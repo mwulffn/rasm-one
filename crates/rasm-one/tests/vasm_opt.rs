@@ -567,6 +567,49 @@ fn test_assemble_quick_move_labels_match_vasm_o4_in_binary() -> Result<(), Box<d
     Ok(())
 }
 
+const QUICK_ARITHMETIC: Rule = Rule {
+    number: 5,
+    flag: "-opt-o5+",
+};
+
+#[test]
+fn test_assemble_quick_arithmetic_matches_vasm_o5() -> Result<(), Box<dyn Error>> {
+    let mut sources: Vec<String> = Vec::new();
+    for mnemonic in ["add", "adda", "addi", "sub", "suba", "subi"] {
+        for size in ["", ".b", ".w", ".l"] {
+            for value in ["0", "1", "8", "9", "-1", "$ffffffff", "z", "w"] {
+                for destination in [
+                    "d0", "a0", "(a0)", "(a0)+", "-(a0)", "4(a0)", "4", "4.l", "sr",
+                ] {
+                    sources.push(format!(
+                        " {mnemonic}{size} #{value},{destination}\nz equ 3\nw equ 300"
+                    ));
+                }
+            }
+        }
+    }
+    sources.push(" xref x\n add.w #x,d0".to_string());
+    sources.push(" section a,code\nf: add.l #f,d0".to_string());
+    sources.push(" opt o5-\n add.w #1,d0\n opt o5+\n add.w #1,d0".to_string());
+    sources.push(" add.w #g-f,d0\nf: nop\ng:".to_string());
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for source in &sources {
+        failures.extend(compare(
+            &vasm,
+            source,
+            "68000",
+            Format::Bin,
+            &QUICK_ARITHMETIC,
+            false,
+        )?);
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
 /// A small generator, so that runs are the same everywhere.
 struct Random(u64);
 
