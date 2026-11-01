@@ -1,6 +1,88 @@
 //! Command-line front end for rasm-one.
 
-fn main() {
-    eprintln!("rasm-one: assembling is not implemented yet");
-    std::process::exit(1);
+use std::fs;
+
+use anyhow::{bail, Context, Result};
+use rasm_one::{assemble, write_bin, FileError, FileProvider, Options, Severity};
+
+const USAGE: &str = "usage: rasm-one <source> -o <output>";
+
+/// Reads files from the native filesystem.
+struct NativeProvider;
+
+impl FileProvider for NativeProvider {
+    fn read(&self, path: &str, _including_file: Option<&str>) -> Result<Vec<u8>, FileError> {
+        fs::read(path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => FileError::NotFound(path.to_string()),
+            _ => FileError::Other(format!("{path}: {error}")),
+        })
+    }
+}
+
+struct Args {
+    source: String,
+    output: String,
+}
+
+fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
+    let (mut source, mut output) = (None, None);
+    let mut args = args;
+    while let Some(arg) = args.next() {
+        if arg == "-o" {
+            output = Some(args.next().context("-o needs a file name")?);
+        } else if arg.starts_with('-') {
+            bail!("unknown option {arg}\n{USAGE}");
+        } else if source.replace(arg).is_some() {
+            bail!("more than one source file\n{USAGE}");
+        }
+    }
+    match (source, output) {
+        (Some(source), Some(output)) => Ok(Args { source, output }),
+        _ => bail!("{USAGE}"),
+    }
+}
+
+fn main() -> Result<()> {
+    let args = parse_args(std::env::args().skip(1))?;
+    let assembly = assemble(&Options::new(args.source), &NativeProvider);
+    for diagnostic in &assembly.diagnostics {
+        eprintln!("{}", assembly.render_diagnostic(diagnostic));
+    }
+    let errors = assembly
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    if errors > 0 {
+        bail!("{errors} error(s)");
+    }
+    let bytes = write_bin(&assembly)?;
+    fs::write(&args.output, bytes).with_context(|| format!("writing {}", args.output))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args> {
+        parse_args(args.iter().map(ToString::to_string))
+    }
+
+    #[test]
+    fn test_parse_args_source_and_output() -> Result<()> {
+        let args = parse(&["a.s", "-o", "a.bin"])?;
+        assert_eq!(
+            (args.source.as_str(), args.output.as_str()),
+            ("a.s", "a.bin")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_args_rejects_bad_input() {
+        assert!(parse(&["a.s"]).is_err());
+        assert!(parse(&["a.s", "b.s", "-o", "x"]).is_err());
+        assert!(parse(&["-x", "a.s", "-o", "x"]).is_err());
+    }
 }
