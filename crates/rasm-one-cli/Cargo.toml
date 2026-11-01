@@ -1,0 +1,15 @@
+[package]
+name = "rasm-one-cli"
+description = "Command-line front end for the rasm-one 68k assembler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rasm-one"
+path = "src/main.rs"
+
+[dependencies]
+rasm-one = { path = "../rasm-one" }
