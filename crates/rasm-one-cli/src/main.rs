@@ -4,12 +4,12 @@ use std::fs;
 
 use anyhow::{bail, Context, Result};
 use rasm_one::{
-    assemble, write_bin, write_hunk_exe, write_hunk_object, write_listing, FileError, FileProvider,
-    Options, Severity,
+    assemble, write_bin, write_hunk_exe_with, write_hunk_object, write_listing, FileError,
+    FileProvider, HunkExeOptions, Options, Severity,
 };
 
 const USAGE: &str =
-    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-I<dir>]... [-L <listing>]";
+    "usage: rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-I<dir>]... [-L <listing>]";
 
 /// Reads files from the native filesystem.
 struct NativeProvider;
@@ -36,6 +36,7 @@ struct Args {
     format: Format,
     include_dirs: Vec<String>,
     listing: Option<String>,
+    kickstart1: bool,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
@@ -43,12 +44,15 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
     let mut format = Format::HunkExe;
     let mut include_dirs = Vec::new();
     let mut listing = None;
+    let mut kickstart1 = false;
     let mut args = args;
     while let Some(arg) = args.next() {
         if arg == "-o" {
             output = Some(args.next().context("-o needs a file name")?);
         } else if arg == "-L" {
             listing = Some(args.next().context("-L needs a file name")?);
+        } else if arg == "-kick1hunks" {
+            kickstart1 = true;
         } else if arg == "-Fhunkexe" {
             format = Format::HunkExe;
         } else if arg == "-Fhunk" {
@@ -70,6 +74,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args> {
             format,
             include_dirs,
             listing,
+            kickstart1,
         }),
         _ => bail!("{USAGE}"),
     }
@@ -96,7 +101,12 @@ fn main() -> Result<()> {
         bail!("{errors} error(s)");
     }
     let bytes = match args.format {
-        Format::HunkExe => write_hunk_exe(&assembly)?,
+        Format::HunkExe => write_hunk_exe_with(
+            &assembly,
+            HunkExeOptions {
+                kickstart1: args.kickstart1,
+            },
+        )?,
         Format::HunkObject => write_hunk_object(&assembly)?,
         Format::Bin => write_bin(&assembly)?,
     };

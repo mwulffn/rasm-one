@@ -2,7 +2,10 @@
 
 use std::error::Error;
 
-use rasm_one::{assemble, write_hunk_exe, MemoryProvider, Options, OutputError};
+use rasm_one::{
+    assemble, write_hunk_exe, write_hunk_exe_with, HunkExeOptions, MemoryProvider, Options,
+    OutputError,
+};
 use rasm_oracle::{Format, Vasm};
 
 fn ours(source: &str) -> Result<Vec<u8>, OutputError> {
@@ -112,6 +115,37 @@ fn test_write_hunk_exe_accepted_sources_match_vasm_bytes() -> Result<(), Box<dyn
             theirs.stderr
         );
         match ours(&source) {
+            Ok(bytes) if bytes == theirs.bytes => {}
+            Ok(bytes) => failures.push(format!(
+                "{source:?}\n  ours  {bytes:02x?}\n  vasm  {:02x?}",
+                theirs.bytes
+            )),
+            Err(error) => failures.push(format!("{source:?}: {error}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+#[test]
+fn test_write_hunk_exe_kickstart1_matches_vasm_kick1hunks() -> Result<(), Box<dyn Error>> {
+    let Some(vasm) = Vasm::from_env()? else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for source in ACCEPTED {
+        let source = format!("{source}\n");
+        let theirs =
+            vasm.assemble_with_args(&source, "68000", Format::HunkExe, &["-kick1hunks"])?;
+        assert!(
+            theirs.success,
+            "vasm rejected {source:?}: {}",
+            theirs.stderr
+        );
+        let mut files = MemoryProvider::new();
+        files.insert("t.s", source.as_str());
+        let options = HunkExeOptions { kickstart1: true };
+        match write_hunk_exe_with(&assemble(&Options::new("t.s"), &files), options) {
             Ok(bytes) if bytes == theirs.bytes => {}
             Ok(bytes) => failures.push(format!(
                 "{source:?}\n  ours  {bytes:02x?}\n  vasm  {:02x?}",

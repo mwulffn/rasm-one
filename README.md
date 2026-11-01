@@ -9,12 +9,13 @@ issues for progress.
 Build with `cargo build --release`, which produces the `rasm-one` command:
 
 ```
-rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-I<dir>]... [-L <listing>]
+rasm-one <source> -o <output> [-Fhunkexe | -Fhunk | -Fbin] [-kick1hunks] [-I<dir>]... [-L <listing>]
 ```
 
 | Option | Output |
 |---|---|
 | `-Fhunkexe` | Amiga hunk executable (the default) |
+| `-kick1hunks` | Make an executable that also loads on Kickstart 1.x. By default, as in vasm, the compact relocations need Kickstart 2.0 or later |
 | `-Fhunk` | Amiga hunk object file, for linking |
 | `-Fbin` | Raw binary, for bootblocks and trackloaded code |
 | `-I<dir>` | Also search this directory for `include` and `incbin` files |
@@ -38,6 +39,15 @@ cargo test --workspace
 
 The script builds a pinned, unmodified vasm under `target/`, which is never
 committed. Without `RASM_VASM`, comparison tests are skipped with a message.
+
+Two kinds of test run the output. To run executables under
+[vamos](https://github.com/cnvogelg/amitools), install it with
+`uv tool install 'amitools[vamos]'` and set `RASM_VAMOS` to its path. To boot one
+from a floppy on an emulated A500 and A1200, using
+[vamiga-lua](https://github.com/mwulffn/vamiga-lua), set `RASM_VAMIGA_LUA`,
+`RASM_KICKSTART_13` and `RASM_KICKSTART_31` and run `scripts/emulator-smoke.sh`.
+That one is local only, since Kickstart ROMs can't be redistributed. The ROMs must
+be plain images: one with a Cloanto header, 11 bytes longer, did not boot.
 
 ## Reference material
 

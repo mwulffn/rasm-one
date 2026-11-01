@@ -69,8 +69,25 @@ fn check_writable(assembly: &Assembly) -> Result<(), OutputError> {
     Ok(())
 }
 
-/// Writes an executable.
+/// Settings for [`write_hunk_exe_with`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HunkExeOptions {
+    /// Use only hunk types that Kickstart 1.x can load. Its loader refuses the
+    /// compact relocation format with error 121, "file is not executable".
+    pub kickstart1: bool,
+}
+
+/// Writes an executable as vasm does by default, which needs Kickstart 2.0 or
+/// later. See [`write_hunk_exe_with`] for one that also loads on 1.x.
 pub fn write_hunk_exe(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
+    write_hunk_exe_with(assembly, HunkExeOptions::default())
+}
+
+/// Writes an executable.
+pub fn write_hunk_exe_with(
+    assembly: &Assembly,
+    options: HunkExeOptions,
+) -> Result<Vec<u8>, OutputError> {
     check_writable(assembly)?;
     let hunks = select_hunks(assembly);
     let mut out = Writer::default();
@@ -92,7 +109,7 @@ pub fn write_hunk_exe(assembly: &Assembly) -> Result<Vec<u8>, OutputError> {
     for &(index, section) in &hunks.list {
         write_contents(section, 0, &mut out);
         if section.kind != SectionKind::Bss {
-            write_exe_relocs(section, &hunks.numbers, &mut out)?;
+            write_exe_relocs(section, &hunks.numbers, options, &mut out)?;
         }
         write_symbols(assembly, index, &mut out);
         out.long(HUNK_END);
@@ -236,11 +253,12 @@ fn target_hunk(
         .ok_or_else(|| unsupported(section, reloc))
 }
 
-/// Writes offsets up to 64K in the compact format and any others in the long
-/// format.
+/// Writes offsets up to 64K in the compact format, unless told not to, and any
+/// others in the long format.
 fn write_exe_relocs(
     section: &Section,
     numbers: &[Option<u32>],
+    options: HunkExeOptions,
     out: &mut Writer,
 ) -> Result<(), OutputError> {
     let mut short = OffsetsByHunk::new();
@@ -259,7 +277,7 @@ fn write_exe_relocs(
             return Err(unsupported(section, reloc));
         }
         let hunk = target_hunk(section, reloc, target, numbers)?;
-        if reloc.offset <= MAX_SHORT_OFFSET {
+        if reloc.offset <= MAX_SHORT_OFFSET && !options.kickstart1 {
             add_offset(&mut short, hunk, reloc.offset);
         } else {
             add_offset(&mut long, hunk, reloc.offset);
