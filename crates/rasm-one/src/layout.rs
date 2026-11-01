@@ -11,13 +11,15 @@ use crate::parser::{add_expansion_chain, is_internal_symbol, Program, SectionEnt
 use crate::types::{SectionKind, Size};
 use crate::{Expansion, LineEntry, Reloc, Section, Symbol};
 
-/// A chain of forward equates settles one link per pass; this bound only catches
-/// sources that can never settle, or that would take unreasonably long to.
-const MAX_PASSES: usize = 1000;
+/// A chain of forward equates settles one link per pass; this bound on passes that make
+/// the output no smaller only catches sources that can never settle, or that would take
+/// unreasonably long to.
+const MAX_STALLED_PASSES: usize = 1000;
 
-/// A branch can be too long for one size and too short for another, depending on
-/// which size it has. After this many passes branches only grow, so they settle.
-const SHRINKING_PASSES: usize = 200;
+/// A branch can be too long for one size and too short for another, depending on which size
+/// it has. After this many passes that make the output no smaller, branches only grow, so
+/// they settle. Shrinking can take a pass per branch, so this doesn't count passes that help.
+const SHRINKING_STALLED_PASSES: usize = 200;
 
 /// Largest permitted `ds`/`blk` size in bytes.
 const MAX_SPACE: i64 = 0x7FFF_FFFF;
@@ -72,16 +74,19 @@ pub(crate) fn build(program: Program) -> Built {
         }
     }
     let mut settled = false;
-    for pass in 0..MAX_PASSES {
+    let mut smallest = i64::MAX;
+    let mut stalled = 0;
+    let mut pass = 0;
+    while stalled < MAX_STALLED_PASSES {
         let before = values.clone();
         let form_changed = Cell::new(false);
-        layout_pass(
+        let total = layout_pass(
             &program.sections,
             &program.atoms,
             &values,
             program.fixed_addresses,
             Some(BranchChoice {
-                grow_only: pass >= SHRINKING_PASSES,
+                grow_only: stalled >= SHRINKING_STALLED_PASSES,
                 changed: &form_changed,
                 pass,
                 defined: &defined,
@@ -93,6 +98,13 @@ pub(crate) fn build(program: Program) -> Built {
         if settled {
             break;
         }
+        if total < smallest {
+            smallest = total;
+            stalled = 0;
+        } else {
+            stalled += 1;
+        }
+        pass += 1;
     }
     if !settled {
         diagnostics.push(Diagnostic {

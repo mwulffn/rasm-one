@@ -235,6 +235,18 @@ fn test_assemble_branches_match_vasm_o1() -> Result<(), Box<dyn Error>> {
     compare_all(&sources, false)
 }
 
+/// Each branch here can only shrink after the one after it has, so this takes far more
+/// passes than a small program.
+#[test]
+fn test_assemble_long_chain_of_shrinking_branches_matches_vasm_o1() -> Result<(), Box<dyn Error>> {
+    let mut source = String::new();
+    for index in 0..3000 {
+        source += &format!("l{index}:\n ds.b 60\n bra l{}\n", index + 2);
+    }
+    source += "l3000:\nl3001:\n";
+    compare_all(&[source], false)
+}
+
 /// rasm-one doesn't write `org` to hunk files, so these are for raw binaries.
 #[test]
 fn test_assemble_org_branches_match_vasm_o1() -> Result<(), Box<dyn Error>> {
