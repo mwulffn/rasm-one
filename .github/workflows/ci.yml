@@ -19,12 +19,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: echo "RASM_VASM=$(scripts/fetch-vasm.sh)" >> "$GITHUB_ENV"
-      - run: echo "RASM_VLINK=$(scripts/fetch-vlink.sh)" >> "$GITHUB_ENV"
+      # A failure inside `echo "X=$(...)"` doesn't stop the step, so assign first.
+      - run: vasm=$(scripts/fetch-vasm.sh) && echo "RASM_VASM=$vasm" >> "$GITHUB_ENV"
+      - run: vlink=$(scripts/fetch-vlink.sh) && echo "RASM_VLINK=$vlink" >> "$GITHUB_ENV"
       - run: pipx install 'amitools[vamos]==0.8.1'
-      - run: echo "RASM_VAMOS=$(command -v vamos)" >> "$GITHUB_ENV"
+      - run: vamos=$(command -v vamos) && echo "RASM_VAMOS=$vamos" >> "$GITHUB_ENV"
       - run: sudo apt-get update && sudo apt-get install -y lhasa
-      - run: echo "RASM_CORPUS=$(scripts/fetch-corpus.sh)" >> "$GITHUB_ENV"
+      - run: corpus=$(scripts/fetch-corpus.sh) && echo "RASM_CORPUS=$corpus" >> "$GITHUB_ENV"
       # Nearly all of the sweep's time is waiting for vasm, whose answers can't change unless
       # the sweep's lines or vasm do, so they are cached. The key only decides when to start a
       # new copy, because each entry is found by a hash of what vasm was given. They go in one

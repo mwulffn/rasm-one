@@ -4,6 +4,8 @@
 set -eu
 
 URL=http://phoenix.owl.de/tags/vlink0_17a.tar.gz
+# The same file, for when the server is down. The checksum still decides.
+MIRROR=http://web.archive.org/web/20240318215044id_/http://phoenix.owl.de/tags/vlink0_17a.tar.gz
 SHA256=f6754913d47bc97cf4771cc0aa7c51de368a04894be35b8dc5e4beac527f5b82
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -12,7 +14,8 @@ bin=$dir/vlink/vlink
 
 if [ ! -x "$bin" ]; then
     mkdir -p "$dir"
-    curl -sSfL -o "$dir/vlink.tar.gz" "$URL"
+    curl -sSfL -o "$dir/vlink.tar.gz" "$URL" ||
+        curl -sSfL --retry 3 -o "$dir/vlink.tar.gz" "$MIRROR"
     if command -v sha256sum >/dev/null 2>&1; then
         actual=$(sha256sum "$dir/vlink.tar.gz" | cut -d' ' -f1)
     else

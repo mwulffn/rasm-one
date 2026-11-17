@@ -5,6 +5,8 @@
 set -eu
 
 URL=http://phoenix.owl.de/tags/vasm2_0d.tar.gz
+# The same file, for when the server is down. The checksum still decides.
+MIRROR=http://web.archive.org/web/20260422181431id_/http://phoenix.owl.de/tags/vasm2_0d.tar.gz
 SHA256=a818b0cef018c3b88be998de2c15ece83303cbe4a15f0b391c0203710b262f2e
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -13,7 +15,8 @@ bin=$dir/vasm/vasmm68k_mot
 
 if [ ! -x "$bin" ]; then
     mkdir -p "$dir"
-    curl -sSfL -o "$dir/vasm.tar.gz" "$URL"
+    curl -sSfL -o "$dir/vasm.tar.gz" "$URL" ||
+        curl -sSfL --retry 3 -o "$dir/vasm.tar.gz" "$MIRROR"
     if command -v sha256sum >/dev/null 2>&1; then
         actual=$(sha256sum "$dir/vasm.tar.gz" | cut -d' ' -f1)
     else
